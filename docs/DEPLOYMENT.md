@@ -1,6 +1,8 @@
 # MedDesk · 部署文档（从零到上线）
 
-> 适用对象：单台云服务器（Debian 12 / Ubuntu 22.04，2C4G 起步，20GB+ 系统盘）。
+> 适用对象：单台云服务器（Debian 12 / Ubuntu 22.04，20GB+ 系统盘）。
+> **实测基准：1.6GB 内存机器可运行全套**（PG 500m + Redis 320m + 应用 + Nginx）。
+> ⚠️ 1.6GB 机器**不使用 swap**（用户约定）：内存按硬顶预算分配，见第 1 节「内存纪律」。
 > 全文域名以 `med.example.com` 示例，部署前全文替换为你的真实域名。
 > 两条路径任选其一：**路径 A：systemd 裸机部署（推荐，资源占用最低）**；**路径 B：Docker Compose（最快起环境）**。
 
@@ -30,7 +32,7 @@
 | 组件 | PG18 裸装 + 二进制 + Nginx（宿主机） | postgres + redis + app 三个容器 + 宿主机 Nginx |
 | Redis | **默认不装**（进程内降级，功能等价） | compose 自带 redis，默认启用 |
 | 升级 | 替换二进制 + `systemctl restart` | `docker compose up -d --build` |
-| 资源 | 约 200–350MB 常驻 | 约 450–700MB 常驻（多一层容器开销） |
+| 资源 | 约 200–350MB 常驻 | 约 900MB 常驻上限（PG 500m + Redis 320m + app 512m 硬顶） |
 
 安全加固要点（systemd：`NoNewPrivileges`、`ProtectSystem=strict`、seccomp 白名单）已写在
 [deploy/systemd/meddesk.service](../deploy/systemd/meddesk.service)，本目录文件可直接复制使用。
@@ -49,6 +51,14 @@ ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp && ufw --force enable
 
 # 时钟同步（JWT 校验对时钟漂移敏感，见第 11 节排查表）
 timedatectl set-ntp true && timedatectl status | grep -E 'synchronized|NTP'
+
+# 内存纪律（本项目部署**不加 swap**）：
+#   1.6GB 总量按硬顶分配：PG 500m + Redis 320m（compose mem_limit 已设，触顶即重启而非拖垮整机）；
+#   应用(JVM 无, Go)自然增长 ~100MB；Nginx ~20MB。可用内存应保持 >150MB。
+#   2. journald 限制内存缓存：在 /etc/systemd/journald.conf 设 RuntimeMaxUse=64M 后 restart。
+#   3. 巡检：free -m 与 docker stats --no-stream；available 持续 <100MB 时先查 docker stats。
+#   4. 无 swap 下 OOM killer 会优先杀占用最大的进程（通常是 PG 容器）——
+#      compose 的 restart: unless-stopped 会自动拉起，数据在卷中不丢失。
 ```
 
 > **DNS 前置**：把 `med.example.com` 的 A/AAAA 记录指到本机公网 IP，等待解析生效再申请证书。
@@ -80,7 +90,7 @@ CREATE EXTENSION IF NOT EXISTS citext;
 SQL
 ```
 
-小机调优参数（2C4G）见 [deploy/postgres-tuning.conf](../deploy/postgres-tuning.conf)，
+小机调优参数（与 PG 内存上限 500m 配套）见 [deploy/postgres-tuning.conf](../deploy/postgres-tuning.conf)，
 复制到 `/etc/postgresql/18/main/conf.d/meddesk.conf` 后 `systemctl restart postgresql`。
 PG 默认只监听 `127.0.0.1`，应用与库同机时**不要**开放 `listen_addresses = '*'`。
 
@@ -90,7 +100,7 @@ PG 默认只监听 `127.0.0.1`，应用与库同机时**不要**开放 `listen_a
 只起 **PG18 + Redis7** 两个容器（应用跑在宿主机），口令/端口全部走环境变量，必填缺失时直接拒绝启动。
 
 ```bash
-cd /home/ops/service/meddesk/compose   # 建议目录；也可直接在 deploy/ 下执行
+cd /home/ops/service/docker/meddesk   # compose 专用目录；把交付包 deploy/ 下的文件拷到这里
 # ① 准备 .env（与 compose 文件同目录，权限 600）
 cat > .env <<'EOF'
 POSTGRES_USER=meddesk

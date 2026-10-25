@@ -32,8 +32,8 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    # 2C4G 小机建议给 PG 约 1G 内存上限
-    mem_limit: 1g
+    # 内存上限 500m（配套：shared_buffers ≤128MB，见 postgres-tuning.conf）
+    mem_limit: 500m
 
   redis:
     image: redis:7-alpine
@@ -62,7 +62,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
-    mem_limit: 384m
+    mem_limit: 320m
 
 volumes:
   pgdata_mw:

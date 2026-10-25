@@ -301,7 +301,7 @@ meddesk/
 │   ├── env.example                # 生产环境变量样例
 │   ├── nginx/meddesk.conf         # Nginx 站点配置
 │   ├── systemd/meddesk.service    # systemd 单元（含安全加固）
-│   ├── postgres-tuning.conf       # PG 调优片段（2C4G）
+│   ├── postgres-tuning.conf       # PG 调优片段（与 mem_limit 500m 配套）
 │   ├── fonts/.gitkeep             # 放离线中文字体用（勿删）
 │   └── scripts/
 │       ├── install.sh             # 一键初始化（幂等，支持 --dry-run）
