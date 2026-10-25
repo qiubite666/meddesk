@@ -45,8 +45,15 @@ help: ## 显示帮助
 	@echo "交叉编译产出位于 $(BUILD_DIR)/ ，命名 meddesk-<GOOS>-<GOARCH>"
 
 # ------------------------------------------------------------------ 开发
-.PHONY: dev
-dev: ## 本地开发启动（从磁盘读前端，改 JS 不用重编 Go）
+.PHONY: deps-up deps-down dev
+deps-up: ## 用 docker compose 起本地依赖（PG16 + Redis7，见 deploy/docker-compose.dev.yml）
+	docker compose -f deploy/docker-compose.dev.yml up -d
+	@echo "PG: 127.0.0.1:5432 (meddesk/meddesk)  Redis: 127.0.0.1:6379 (devpass)"
+
+deps-down: ## 停止本地依赖（保留数据卷；连数据一起清加 DOWN_V=1）
+	docker compose -f deploy/docker-compose.dev.yml down $(if $(DOWN_V),-v,)
+
+dev: ## 本地开发启动（从磁盘读前端，改 JS 不用重编 Go）；先 deps-up 起数据库
 	MEDDESK_WEB_DIR=./web go run $(CMD_DIR)
 
 .PHONY: dev-init
@@ -109,11 +116,13 @@ check-shell: ## 校验所有 shell 脚本语法（bash -n）
 	@for f in deploy/scripts/*.sh; do bash -n "$$f" && echo "OK   $$f" || exit 1; done
 
 .PHONY: check-yaml
-check-yaml: ## 校验 docker-compose.yml（优先 docker compose config，退回 python yaml）
+check-yaml: ## 校验两份 docker-compose（优先 docker compose config，退回 python yaml）
 	@if command -v docker >/dev/null 2>&1; then \
 	   $(DOCKER_COMPOSE) config >/dev/null && echo "OK   deploy/docker-compose.yml (docker compose config)"; \
+	   docker compose -f deploy/docker-compose.dev.yml config >/dev/null && echo "OK   deploy/docker-compose.dev.yml (docker compose config)"; \
 	 else \
 	   python3 -c "import yaml,sys; yaml.safe_load(open('deploy/docker-compose.yml')); print('OK   deploy/docker-compose.yml (python yaml.safe_load)')"; \
+	   python3 -c "import yaml,sys; yaml.safe_load(open('deploy/docker-compose.dev.yml')); print('OK   deploy/docker-compose.dev.yml (python yaml.safe_load)')"; \
 	 fi
 
 .PHONY: check-docs

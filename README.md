@@ -333,13 +333,13 @@ meddesk/
 ### 6.2 起一个本地数据库
 
 ```bash
-# 用 Docker 起（最快）
-docker run -d --name meddesk-pg  -p 127.0.0.1:5432:5432 \
-  -e POSTGRES_USER=meddesk -e POSTGRES_PASSWORD=meddesk -e POSTGRES_DB=meddesk \
-  postgres:16-alpine
+# 用 docker compose 起依赖（PG 16 + Redis 7，仅本机监听；应用本身在宿主机 go run）
+docker compose -f deploy/docker-compose.dev.yml up -d
 
-docker run -d --name meddesk-rd -p 127.0.0.1:6379:6379 \
-  redis:7-alpine redis-server --requirepass devpass
+# 查看状态 / 停止 / 停止并清空数据
+docker compose -f deploy/docker-compose.dev.yml ps
+docker compose -f deploy/docker-compose.dev.yml down
+docker compose -f deploy/docker-compose.dev.yml down -v
 ```
 
 ### 6.3 准备环境变量
