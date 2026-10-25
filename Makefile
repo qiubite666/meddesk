@@ -58,7 +58,7 @@ dev: ## 本地开发启动（从磁盘读前端，改 JS 不用重编 Go）；�
 
 .PHONY: dev-init
 dev-init: ## 准备本地 .env（从样例复制，需自行替换占位符）
-	@if [ -f $(ENV_FILE) ]; then echo "$(ENV_FILE) 已存在，跳过"; else cp .env.example $(ENV_FILE); echo "已生成 $(ENV_FILE)，请替换其中的 <...> 占位符"; fi
+	@if [ -f $(ENV_FILE) ]; then echo "$(ENV_FILE) 已存在，跳过"; else cp meddesk.env.example $(ENV_FILE); echo "已生成 $(ENV_FILE)，请替换其中的 <...> 占位符"; fi
 
 .PHONY: run
 run: build ## 构建后直接运行（使用内嵌前端）
@@ -131,7 +131,7 @@ check-yaml: ## 校验两份 docker-compose（优先 docker compose config，退�
 check-docs: ## 校验 docs 与 deploy 下所有脚本/配置的存在性
 	@for f in docs/API.md docs/DEPLOYMENT.md docs/DATA-MODEL.md docs/SECURITY.md docs/EXTENDING.md \
 	          deploy/nginx/meddesk.conf deploy/systemd/meddesk.service deploy/Dockerfile \
-	          deploy/postgres-tuning.conf .env.example; do \
+	          deploy/postgres-tuning.conf meddesk.env.example; do \
 	   [ -f "$$f" ] && echo "OK   $$f" || { echo "MISS $$f"; exit 1; }; \
 	 done
 

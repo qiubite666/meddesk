@@ -232,7 +232,7 @@ cat <<'MSG'
        sudo chmod 644 /home/ops/service/fonts/NotoSansSC-Regular.ttf
      systemd 的 ProtectSystem=strict 下 /opt 是只读挂载，安装后无需额外处理。
   2) 显式指定（可选，能省掉启动时的探测）：
-       echo 'MEDDESK_PDF_FONT_PATH=/home/ops/service/fonts/NotoSansSC-Regular.ttf' >> /home/ops/service/meddesk.env
+       echo 'MEDDESK_PDF_FONT_PATH=/home/ops/service/fonts/NotoSansSC-Regular.ttf' >> /home/ops/service/.meddesk.env
        sudo systemctl restart meddesk
   3) 重启后导出一次 PDF 验证中文是否正常显示。
 MSG

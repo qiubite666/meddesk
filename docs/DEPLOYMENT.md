@@ -160,7 +160,7 @@ docker compose -f deploy/docker-compose.middleware.yml up -d redis
 | `REDIS_MAXMEMORY` | `256mb` | 否 | 内存上限，超限按 allkeys-lru 淘汰 |
 | `TZ` | `Asia/Shanghai` | 否 | 容器时区 |
 
-**应用侧变量**（`/home/ops/service/meddesk.env`，两种方式只是连接串不同）：
+**应用侧变量**（`/home/ops/service/.meddesk.env`，两种方式只是连接串不同）：
 
 | 变量 | 方式 A（宿主机安装） | 方式 B（docker compose） |
 |---|---|---|
@@ -169,7 +169,7 @@ docker compose -f deploy/docker-compose.middleware.yml up -d redis
 | `MEDDESK_REDIS_URL` | `redis://:<Redis口令>@127.0.0.1:6379/0` | `redis://:$REDIS_PASSWORD@127.0.0.1:$REDIS_PORT/0` |
 
 注意：口令若含 `@ : / # ?` 等 URL 保留字符需 URL 编码（或直接用 base64 输出里不含保留字符的变体）；
-改完 `meddesk.env` 执行 `systemctl restart meddesk` 生效。
+改完 `.meddesk.env` 执行 `systemctl restart meddesk` 生效。
 Redis 里没有任何不可替代的数据；挂掉或关闭时应用自动降级，不影响业务数据。
 
 ---
@@ -199,7 +199,7 @@ bash deploy/scripts/get-font.sh   # 下载 Noto Sans SC 到 /home/ops/service/fo
 写环境变量文件（也可直接跑 `deploy/scripts/install.sh` 自动生成，含 `--with-postgres --with-redis --issue-cert` 可选开关）：
 
 ```bash
-cat > /home/ops/service/meddesk.env <<EOF
+cat > /home/ops/service/.meddesk.env <<EOF
 MEDDESK_HTTP_ADDR=:8080
 MEDDESK_BASE_URL=https://med.example.com
 MEDDESK_TRUST_PROXY=true
@@ -212,7 +212,7 @@ MEDDESK_UPLOAD_DIR=/home/ops/service/uploads
 MEDDESK_LOG_FORMAT=json
 TZ=Asia/Shanghai
 EOF
-chown root:ops /home/ops/service/meddesk.env && chmod 640 /home/ops/service/meddesk.env
+chown root:ops /home/ops/service/.meddesk.env && chmod 640 /home/ops/service/.meddesk.env
 ```
 
 > `MEDDESK_SIGNUP_ENABLED=false` 表示注册仅限首个账号走命令行开启；个人自托管建议：注册第一个账号后立即关闭公开注册（在环境变量中改回 `false` 并重启）。
@@ -367,7 +367,7 @@ systemctl restart meddesk
 curl -fsSL https://get.docker.com | sh
 
 # 2. 准备环境变量
-cp .env.example .env          # 替换所有 <...> 占位符（含 PG/Redis 口令）
+cp meddesk.env.example .env    # 替换所有 <...> 占位符（含 PG/Redis 口令）
 
 # 3. 构建并启动（postgres + redis + app，全部只绑 127.0.0.1）
 docker compose -f deploy/docker-compose.yml up -d --build

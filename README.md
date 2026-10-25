@@ -349,7 +349,7 @@ docker compose -f deploy/docker-compose.dev.yml down -v
 ### 6.3 准备环境变量
 
 ```bash
-cp .env.example .env
+cp meddesk.env.example .env
 
 # JWT 密钥是必填项，必须 ≥32 字节
 openssl rand -base64 48          # 把输出填进 MEDDESK_JWT_SECRET
@@ -462,7 +462,7 @@ MedDesk 提供两条等价的部署路径，**二选一**：
 
 | 路径 | 适用人群 | 入口 |
 |---|---|---|
-| **A · Docker Compose** | 想快速跑起来、NAS/小主机、不在意容器化运维 | `cp .env.example .env && docker compose -f deploy/docker-compose.yml up -d --build` |
+| **A · Docker Compose** | 想快速跑起来、NAS/小主机、不在意容器化运维 | `cp meddesk.env.example .env && docker compose -f deploy/docker-compose.yml up -d --build` |
 | **B · systemd + 宿主机 PG** | 追求最小攻击面、已有 PG 实例、想用 journald 统一运维 | `sudo ./deploy/scripts/install.sh --method systemd --domain med.example.com --with-postgres --with-redis` |
 
 完整的 11 步上线流程（含 PostgreSQL 安装、Redis 加固、acme.sh 申请 ECC 证书、备份 crontab、
@@ -518,7 +518,7 @@ curl -fsS https://med.example.com/api/v1/health
 | `MEDDESK_RATE_LIMIT_BURST` | `60` | 突发上限 |
 | `MEDDESK_CORS_ALLOWED_ORIGINS` | 空 | 逗号分隔，空 = 同源 |
 
-> 权威定义见 [`internal/config/config.go`](internal/config/config.go)；带完整注释的样例见 [`.env.example`](.env.example)。
+> 权威定义见 [`internal/config/config.go`](internal/config/config.go)；带完整注释的样例见 [`meddesk.env.example`](meddesk.env.example)。
 
 ---
 

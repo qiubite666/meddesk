@@ -28,7 +28,7 @@
 | **A6** | `web/index.html`、`web/assets/css/app.css`、`web/manifest.webmanifest`、`web/sw.js`、`web/assets/js/{core,crypto,db,data,api,sync,app}.js` | 前端平台层/壳 |
 | **A7** | `web/assets/js/schedule.js`、`web/assets/js/remind.js` | 排程引擎与提醒（纯逻辑） |
 | **A8** | `web/assets/js/med.js`、`web/assets/js/export.js` | 用药模块视图与导出交互 |
-| **A9** | `deploy/**`、`docs/**`、`README.md`、`.env.example`、`Makefile` | 运维与文档 |
+| **A9** | `deploy/**`、`docs/**`、`README.md`、`meddesk.env.example`、`Makefile` | 运维与文档 |
 
 > `web/.gitkeep` 已存在（供 `//go:embed all:web` 使用）。**禁止删除**。
 
@@ -515,7 +515,7 @@ MD.export.csv(rows) / MD.export.pdf(rows)     // csv 纯前端 Blob 下载；pdf
 
 ---
 
-## 7. 环境变量（`A9` 据此写 `.env.example`）
+## 7. 环境变量（`A9` 据此写 `meddesk.env.example`）
 
 | 变量 | 默认 | 说明 |
 |---|---|---|

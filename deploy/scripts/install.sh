@@ -6,7 +6,7 @@
 #   1  检查运行环境（root/sudo、发行版、架构、磁盘空间）
 #   2  检查运行用户 ops 与目录结构（/home/ops/service 布局，见下）
 #   3  安装二进制（从本地已构建的产物，或用 go build 现编）
-#   4  生成/写入环境变量文件 /home/ops/service/meddesk.env（0640, root:ops）
+#   4  生成/写入环境变量文件 /home/ops/service/.meddesk.env（0640, root:ops）
 #   5  PostgreSQL：建库建用户 + citext 扩展（--with-postgres，最小权限）
 #   6  Redis：本地监听 + maxmemory + requirepass（--with-redis）
 #   7  systemd 单元安装并 enable（路径 B）
@@ -22,7 +22,7 @@
 #
 # 【ops 布局】（与 deploy/systemd/meddesk.service、meddesk.env.example 一致）
 #   /home/ops/service/meddesk       二进制（前端已内嵌）
-#   /home/ops/service/meddesk.env   环境变量（含密钥，绝不提交 git）
+#   /home/ops/service/.meddesk.env  环境变量（含密钥，绝不提交 git）
 #   /home/ops/service/uploads/      附件密文
 #   /home/ops/service/fonts/        PDF 中文字体
 #
@@ -43,7 +43,7 @@ APP_USER="ops"
 SERVICE_DIR="/home/ops/service"
 UPLOAD_DIR="$SERVICE_DIR/uploads"
 FONT_DIR="$SERVICE_DIR/fonts"
-ENV_FILE="$SERVICE_DIR/meddesk.env"
+ENV_FILE="$SERVICE_DIR/.meddesk.env"
 BIN_PATH="$SERVICE_DIR/meddesk"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
@@ -245,7 +245,7 @@ else
     if [[ -f "$COMPOSE_ENV" ]]; then
       warn "$COMPOSE_ENV 已存在，未覆盖；如需重建请先 cp .env.example .env 并手改"
     else
-      cp "$REPO_ROOT/.env.example" "$COMPOSE_ENV"
+      cp "$REPO_ROOT/meddesk.env.example" "$COMPOSE_ENV"
       # 把占位符替换成本次生成的随机值（仅在你明确同意自动化的情况下才有意义，
       # 这里保留明文写入 + 提示，便于你立刻可用；生产环境建议自行改为密钥管理方案）
       sed -i "s#^MEDDESK_JWT_SECRET=.*#MEDDESK_JWT_SECRET=$JWT_SECRET#" "$COMPOSE_ENV"

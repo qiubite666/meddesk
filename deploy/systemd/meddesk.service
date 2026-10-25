@@ -7,7 +7,7 @@
 #
 # 【ops 布局约定】（与 docs/DEPLOYMENT.md、meddesk.env.example 保持一致）
 #   /home/ops/service/meddesk        -> 二进制（前端已内嵌，单文件）
-#   /home/ops/service/meddesk.env    -> 环境变量文件（权限 0640，属主 root:ops）
+#   /home/ops/service/.meddesk.env   -> 环境变量文件（权限 0640，属主 root:ops）
 #   /home/ops/service/uploads/       -> 附件密文落盘（MEDDESK_UPLOAD_DIR）
 #   /home/ops/service/fonts/         -> PDF 中文字体（MEDDESK_PDF_FONT_PATH 所在目录）
 #   运行用户：ops（应用监听 :8080 非特权端口，无需 root / capabilities）
@@ -23,7 +23,7 @@
 #                            先注释再二分排查。
 #   CapabilityBoundingSet= : 清空 capabilities（不监听 1024 以下端口，不需要 CAP）。
 #
-# 【重要】meddesk.env 里存放 JWT 密钥与数据库口令，
+# 【重要】.meddesk.env 里存放 JWT 密钥与数据库口令，
 #         必须 chown root:ops && chmod 640，且不要提交进 git（.gitignore 已忽略）。
 # ==============================================================================
 
@@ -47,7 +47,7 @@ ExecStart=/home/ops/service/meddesk
 ExecReload=/bin/kill -HUP $MAINPID
 
 # 环境变量集中在这一个文件里（MEDDESK_* 系列，见 meddesk.env.example）
-EnvironmentFile=/home/ops/service/meddesk.env
+EnvironmentFile=/home/ops/service/.meddesk.env
 
 LimitNOFILE=65535
 LimitNPROC=4096
