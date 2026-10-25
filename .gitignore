@@ -1,7 +1,9 @@
-# ---- 机密与环境（绝不提交）----
+# ---- 机密与环境（绝不提交，含样例；不得新增 !*.env* 白名单）----
 .env
 *.env
-!*.example
+.env.example
+env.example
+meddesk.env
 deploy/scripts/initdb/*.local.sql
 
 # ---- 构建产物 ----

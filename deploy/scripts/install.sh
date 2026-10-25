@@ -3,10 +3,10 @@
 # MedDesk —— 一键初始化脚本
 #
 # 它做的事（按顺序，全部可重复执行/幂等）：
-#   1  检查运行环境（root、发行版、架构、磁盘空间）
-#   2  创建系统用户 meddesk、目录结构与权限
+#   1  检查运行环境（root/sudo、发行版、架构、磁盘空间）
+#   2  检查运行用户 ops 与目录结构（/home/ops/service 布局，见下）
 #   3  安装二进制（从本地已构建的产物，或用 go build 现编）
-#   4  生成/写入环境变量文件 /etc/meddesk/meddesk.env（0600）
+#   4  生成/写入环境变量文件 /home/ops/service/meddesk.env（0640, root:ops）
 #   5  PostgreSQL：建库建用户 + citext 扩展（--with-postgres，最小权限）
 #   6  Redis：本地监听 + maxmemory + requirepass（--with-redis）
 #   7  systemd 单元安装并 enable（路径 B）
@@ -19,6 +19,12 @@
 #        --binary ./meddesk --with-postgres --with-redis --issue-cert
 #   sudo ./deploy/scripts/install.sh --method compose          # 只做 compose 前置准备
 #   sudo ./deploy/scripts/install.sh --dry-run ...             # 只打印计划，不落盘
+#
+# 【ops 布局】（与 deploy/systemd/meddesk.service、meddesk.env.example 一致）
+#   /home/ops/service/meddesk       二进制（前端已内嵌）
+#   /home/ops/service/meddesk.env   环境变量（含密钥，绝不提交 git）
+#   /home/ops/service/uploads/      附件密文
+#   /home/ops/service/fonts/        PDF 中文字体
 #
 # ⚠ 安全约定：
 #   - 脚本**不会**自动生成并写入口令：所有敏感值必须是占位符或由你提供，
@@ -33,11 +39,12 @@ DRY_RUN=0
 METHOD="systemd"          # systemd | compose
 DOMAIN="med.example.com"
 BINARY=""                 # 已构建好的二进制路径
-UPLOAD_DIR="/var/lib/meddesk/uploads"
-ETC_DIR="/etc/meddesk"
-BIN_DIR="/opt/meddesk/bin"
-LOG_DIR="/var/log/meddesk"
-WEB_DIR="/var/www/meddesk"
+APP_USER="ops"
+SERVICE_DIR="/home/ops/service"
+UPLOAD_DIR="$SERVICE_DIR/uploads"
+FONT_DIR="$SERVICE_DIR/fonts"
+ENV_FILE="$SERVICE_DIR/meddesk.env"
+BIN_PATH="$SERVICE_DIR/meddesk"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 WITH_POSTGRES=0
@@ -96,10 +103,9 @@ done
 echo "══════════════ MedDesk 安装计划 ══════════════"
 echo " 部署方式     : $METHOD"
 echo " 域名         : $DOMAIN"
-echo " 安装目录     : $BIN_DIR"
-echo " 配置目录     : $ETC_DIR"
+echo " 运行用户     : $APP_USER（需已存在）"
+echo " 服务目录     : $SERVICE_DIR"
 echo " 附件目录     : $UPLOAD_DIR"
-echo " 日志目录     : $LOG_DIR"
 echo " 附带 PG/Redis: $WITH_POSTGRES / $WITH_REDIS"
 echo " 申请证书     : $ISSUE_CERT"
 echo " Dry-Run      : $DRY_RUN"
@@ -132,21 +138,15 @@ log "  /var 可用空间: ${AVAIL} MB"
 if (( AVAIL < 2048 )); then warn "磁盘空间偏小（<2GB），建议扩容后再部署"; fi
 
 # ---------------------------------------------------------------- 2 用户与目录
-log "步骤 2/10  创建系统用户与目录"
+log "步骤 2/10  检查运行用户与目录"
 if (( DRY_RUN )); then
-  echo "  [dry-run] useradd meddesk + mkdir -p $ETC_DIR $BIN_DIR $UPLOAD_DIR $LOG_DIR $WEB_DIR"
+  echo "  [dry-run] 检查 ops 用户 + install -d -o ops -g ops $SERVICE_DIR $UPLOAD_DIR $FONT_DIR"
 else
-  need_root
-  if ! id meddesk >/dev/null 2>&1; then
-    useradd --system --home-dir /var/lib/meddesk --shell /usr/sbin/nologin meddesk
-    log "  已创建系统用户 meddesk"
-  else
-    log "  用户 meddesk 已存在，跳过"
+  if ! id "$APP_USER" >/dev/null 2>&1; then
+    die "用户 $APP_USER 不存在。请先创建：sudo useradd -m -s /bin/bash $APP_USER"
   fi
-  install -d -o meddesk -g meddesk -m 0750 "$BIN_DIR" "$WEB_DIR"
-  install -d -o meddesk -g meddesk -m 0750 "$UPLOAD_DIR" "$LOG_DIR"
-  install -d -o root    -g meddesk -m 0750 "$ETC_DIR"
-  log "  目录就绪"
+  install -d -o "$APP_USER" -g "$APP_USER" -m 0750 "$SERVICE_DIR" "$UPLOAD_DIR" "$FONT_DIR"
+  log "  目录就绪（属主 $APP_USER）"
 fi
 
 # ---------------------------------------------------------------- 3 二进制
@@ -167,7 +167,7 @@ if [[ "$METHOD" == "systemd" ]]; then
     fi
   fi
   if [[ -n "$BINARY" && -f "$BINARY" ]]; then
-    run "安装到 $BIN_DIR/meddesk" install -m 0755 -o meddesk -g meddesk "$BINARY" "$BIN_DIR/meddesk"
+    run "安装到 $BIN_PATH" install -m 0755 -o "$APP_USER" -g "$APP_USER" "$BINARY" "$BIN_PATH"
   fi
 else
   log "  compose 模式：镜像由 docker compose build 生成，跳过二进制安装"
@@ -175,7 +175,6 @@ fi
 
 # ---------------------------------------------------------------- 4 环境变量文件
 log "步骤 4/10  写入环境变量文件"
-ENV_FILE="$ETC_DIR/meddesk.env"
 COMPOSE_ENV="$REPO_ROOT/.env"
 JWT_SECRET="$(openssl rand -base64 48 2>/dev/null || head -c 48 /dev/urandom | base64)"
 PG_PASS="$(openssl rand -base64 24 2>/dev/null || head -c 24 /dev/urandom | base64)"
@@ -221,7 +220,7 @@ MEDDESK_SYNC_PULL_PAGE=300
 MEDDESK_SYNC_PULL_PAGE_MAX=1000
 MEDDESK_UPLOAD_DIR=$UPLOAD_DIR
 MEDDESK_UPLOAD_MAX_BYTES=8388608
-MEDDESK_PDF_FONT_PATH=/opt/meddesk/fonts/NotoSansSC-Regular.ttf
+MEDDESK_PDF_FONT_PATH=$FONT_DIR/NotoSansSC-Regular.ttf
 MEDDESK_LOG_LEVEL=info
 MEDDESK_LOG_FORMAT=json
 MEDDESK_RATE_LIMIT_RPS=20
@@ -239,20 +238,21 @@ else
   fi
   if [[ "$METHOD" == "systemd" ]]; then
     gen_env > "$ENV_FILE"
-    chown root:meddesk "$ENV_FILE"; chmod 600 "$ENV_FILE"
-    log "  已写入 $ENV_FILE（0600）"
+    chown root:"$APP_USER" "$ENV_FILE"; chmod 640 "$ENV_FILE"
+    log "  已写入 $ENV_FILE（0640, root:$APP_USER）"
   fi
   if [[ "$METHOD" == "compose" ]]; then
     if [[ -f "$COMPOSE_ENV" ]]; then
-      warn "$COMPOSE_ENV 已存在，未覆盖；如需重建请先 cp deploy/env.example .env 并手改"
+      warn "$COMPOSE_ENV 已存在，未覆盖；如需重建请先 cp .env.example .env 并手改"
     else
-      cp "$REPO_ROOT/deploy/env.example" "$COMPOSE_ENV"
+      cp "$REPO_ROOT/.env.example" "$COMPOSE_ENV"
       # 把占位符替换成本次生成的随机值（仅在你明确同意自动化的情况下才有意义，
       # 这里保留明文写入 + 提示，便于你立刻可用；生产环境建议自行改为密钥管理方案）
       sed -i "s#^MEDDESK_JWT_SECRET=.*#MEDDESK_JWT_SECRET=$JWT_SECRET#" "$COMPOSE_ENV"
       sed -i "s#^MEDDESK_DB_URL=.*#MEDDESK_DB_URL=postgres://$PG_NAME:$PG_PASS@postgres:5432/$PG_NAME?sslmode=disable#" "$COMPOSE_ENV"
       sed -i "s#^MEDDESK_REDIS_URL=.*#MEDDESK_REDIS_URL=redis://:$REDIS_PASS@redis:6379/0#" "$COMPOSE_ENV"
       sed -i "s#^MEDDESK_BASE_URL=.*#MEDDESK_BASE_URL=https://$DOMAIN#" "$COMPOSE_ENV"
+      # 注意：这是**容器内**路径（Dockerfile 安装字体的位置），与宿主机布局无关
       sed -i "s#^MEDDESK_PDF_FONT_PATH=.*#MEDDESK_PDF_FONT_PATH=/opt/meddesk/fonts/NotoSansSC-Regular.ttf#" "$COMPOSE_ENV"
       chmod 600 "$COMPOSE_ENV"
       log "  已写入 $COMPOSE_ENV（0600），并把占位符替换为随机值"
@@ -340,13 +340,14 @@ fi
 # ---------------------------------------------------------------- 8 Nginx
 if (( NGINX_CONF )); then
   log "步骤 8/10  Nginx 站点配置"
-  NGX_CONF="/etc/nginx/conf.d/meddesk.conf"
+  NGX_CONF="/etc/nginx/sites-available/meddesk.conf"
   if (( DRY_RUN )); then
     echo "  [dry-run] 安装 $NGX_CONF 并 nginx -t && reload"
   else
     if [[ -f "$NGX_CONF" ]]; then cp -a "$NGX_CONF" "$NGX_CONF.bak.$(date +%Y%m%d%H%M%S)"; fi
     sed "s|med\.example\.com|$DOMAIN|g" "$REPO_ROOT/deploy/nginx/meddesk.conf" > "$NGX_CONF"
-    log "  已写入 $NGX_CONF（域名替换为 $DOMAIN）"
+    ln -sfn "$NGX_CONF" /etc/nginx/sites-enabled/meddesk.conf
+    log "  已写入 $NGX_CONF 并启用（域名替换为 $DOMAIN）"
     log "  ⚠ 证书文件尚不存在，先用 HTTP-only 片段自检：nginx -t 可能因缺证书而失败。"
     if (( ISSUE_CERT )); then
       log "  稍后第 9 步会申请证书，届时再 reload。"
@@ -436,6 +437,6 @@ fi
 log "安装脚本执行完毕 ✅"
 echo
 echo "后续待办："
-echo "  1) 把 deploy/scripts/*.sh 拷到 $BIN_DIR/../scripts 并 chmod +x"
-echo "  2) 配置备份定时任务：crontab -e -> 17 3 * * * $BIN_DIR/../scripts/backup.sh"
+echo "  1) 把 deploy/scripts/*.sh 拷到 $SERVICE_DIR/scripts 并 chmod +x"
+echo "  2) 配置备份定时任务：crontab -e -> 17 3 * * * $SERVICE_DIR/scripts/backup.sh"
 echo "  3) 详细步骤见 docs/DEPLOYMENT.md；安全基线见 docs/SECURITY.md"

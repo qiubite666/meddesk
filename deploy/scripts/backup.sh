@@ -16,7 +16,7 @@
 #   ./deploy/scripts/backup.sh --dry-run          # 只打印将执行的操作，不落盘
 #
 # 定时任务（每天 03:17）：
-#   17 3 * * * /opt/meddesk/scripts/backup.sh >> /var/log/meddesk/backup.log 2>&1
+#   17 3 * * * /home/ops/service/scripts/backup.sh >> /home/ops/service/backup.log 2>&1
 #
 # ⚠ 重要提醒：
 #   数据库备份里只包含**密文**（iv/ct）与账户元数据，**没有**用户的口令派生因子之外的东西。
@@ -28,7 +28,7 @@ set -Eeuo pipefail
 
 # ---------------------------------------------------------------- 默认配置
 DEST="${BACKUP_DEST:-/var/backups/meddesk}"
-UPLOAD_DIR="${MEDDESK_UPLOAD_DIR:-/var/lib/meddesk/uploads}"
+UPLOAD_DIR="${MEDDESK_UPLOAD_DIR:-/home/ops/service/uploads}"
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-30}"
 DB_URL="${MEDDESK_DB_URL:-postgres://meddesk:meddesk@127.0.0.1:5432/meddesk?sslmode=disable}"
 REMOTE="${BACKUP_REMOTE:-}"          # 例：user@host:/backup/meddesk

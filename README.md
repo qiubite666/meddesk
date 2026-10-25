@@ -163,7 +163,7 @@ MedDesk 是一个**自托管（self-hosted）**的个人 / 家庭数字工作台
 └──────────────┘  │  attachments     │     │
 ┌──────────────┐  └──────────────────┘     │
 │   Redis 7    │  密文落盘目录              │
-│ 限流/吊销名单 │  /var/lib/meddesk/uploads │
+│ 限流/吊销名单 │  /home/ops/service/uploads │
 │ 登录失败计数  │  {userID}/{yy}/{id}.bin  │
 └──────────────┘                            │
                                             ▼
@@ -349,7 +349,7 @@ docker compose -f deploy/docker-compose.dev.yml down -v
 ### 6.3 准备环境变量
 
 ```bash
-cp deploy/env.example .env
+cp .env.example .env
 
 # JWT 密钥是必填项，必须 ≥32 字节
 openssl rand -base64 48          # 把输出填进 MEDDESK_JWT_SECRET
@@ -462,7 +462,7 @@ MedDesk 提供两条等价的部署路径，**二选一**：
 
 | 路径 | 适用人群 | 入口 |
 |---|---|---|
-| **A · Docker Compose** | 想快速跑起来、NAS/小主机、不在意容器化运维 | `cp deploy/env.example .env && docker compose -f deploy/docker-compose.yml up -d --build` |
+| **A · Docker Compose** | 想快速跑起来、NAS/小主机、不在意容器化运维 | `cp .env.example .env && docker compose -f deploy/docker-compose.yml up -d --build` |
 | **B · systemd + 宿主机 PG** | 追求最小攻击面、已有 PG 实例、想用 journald 统一运维 | `sudo ./deploy/scripts/install.sh --method systemd --domain med.example.com --with-postgres --with-redis` |
 
 完整的 11 步上线流程（含 PostgreSQL 安装、Redis 加固、acme.sh 申请 ECC 证书、备份 crontab、
@@ -509,7 +509,7 @@ curl -fsS https://med.example.com/api/v1/health
 | `MEDDESK_SYNC_MAX_RECORD_BYTES` | `1048576` | 单条密文上限（1 MiB） |
 | `MEDDESK_SYNC_PULL_PAGE` | `300` | pull 默认分页 |
 | `MEDDESK_SYNC_PULL_PAGE_MAX` | `1000` | pull 最大分页 |
-| `MEDDESK_UPLOAD_DIR` | `/var/lib/meddesk/uploads` | 密文附件目录 |
+| `MEDDESK_UPLOAD_DIR` | `/home/ops/service/uploads` | 密文附件目录 |
 | `MEDDESK_UPLOAD_MAX_BYTES` | `8388608` | 单附件上限（8 MiB） |
 | `MEDDESK_PDF_FONT_PATH` | 空 | CJK TTF 路径，留空则自动探测 |
 | `MEDDESK_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
@@ -518,7 +518,7 @@ curl -fsS https://med.example.com/api/v1/health
 | `MEDDESK_RATE_LIMIT_BURST` | `60` | 突发上限 |
 | `MEDDESK_CORS_ALLOWED_ORIGINS` | 空 | 逗号分隔，空 = 同源 |
 
-> 权威定义见 [`internal/config/config.go`](internal/config/config.go)；带完整注释的样例见 [`deploy/env.example`](deploy/env.example)。
+> 权威定义见 [`internal/config/config.go`](internal/config/config.go)；带完整注释的样例见 [`.env.example`](.env.example)。
 
 ---
 

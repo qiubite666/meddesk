@@ -127,7 +127,7 @@ func Load() (*Config, error) {
 			MaxPullPageSize: envInt("MEDDESK_SYNC_PULL_PAGE_MAX", 1000),
 		},
 		Upload: UploadConfig{
-			Dir:      envString("MEDDESK_UPLOAD_DIR", "/var/lib/meddesk/uploads"),
+			Dir:      envString("MEDDESK_UPLOAD_DIR", "/home/ops/service/uploads"),
 			MaxBytes: envInt64("MEDDESK_UPLOAD_MAX_BYTES", 8<<20), // 8 MiB
 		},
 		PDF: PDFConfig{

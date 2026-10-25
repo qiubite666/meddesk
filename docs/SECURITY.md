@@ -39,7 +39,7 @@ password（仅存在于你的内存）
 
 - 服务端只有 `authHash`（还做了 argon2id 二次哈希）与 `wrappedDEK`——**没有口令、没有 KEK，无法解开 DEK**。
 - KEK 只在内存中存在；刷新页面后由「口令 + salt」重新派生，`wrappedDEK` 从服务端取回解包。
-- 附件（照片）：客户端压缩（最长边 ≤1280px、JPEG q=0.82）→ 同一 DEK 加密 → 以密文落盘 `/var/lib/meddesk/uploads/{user}/{yy}/{id}.bin`（权限 0600）。
+- 附件（照片）：客户端压缩（最长边 ≤1280px、JPEG q=0.82）→ 同一 DEK 加密 → 以密文落盘 `/home/ops/service/uploads/{user}/{yy}/{id}.bin`（权限 0600）。
 
 ## 2. 口令与登录
 

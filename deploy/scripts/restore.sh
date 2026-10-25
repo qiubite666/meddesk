@@ -16,7 +16,7 @@
 #   ./deploy/scripts/restore.sh --from 20261026-031700 --dry-run
 #   ./deploy/scripts/restore.sh --from 20261026-031700       # 交互式二次确认后恢复（DB+附件）
 #   ./deploy/scripts/restore.sh --from latest --db-only
-#   ./deploy/scripts/restore.sh --from latest --files-only --upload-dir /var/lib/meddesk/uploads
+#   ./deploy/scripts/restore.sh --from latest --files-only --upload-dir /home/ops/service/uploads
 #   ./deploy/scripts/restore.sh --from latest --force         # 跳过确认（危险）
 #
 # 恢复目标 PostgreSQL：可用 --db-url 覆盖，或读环境变量 MEDDESK_DB_URL。
@@ -25,7 +25,7 @@
 set -Eeuo pipefail
 
 DEST="${BACKUP_DEST:-/var/backups/meddesk}"
-UPLOAD_DIR="${MEDDESK_UPLOAD_DIR:-/var/lib/meddesk/uploads}"
+UPLOAD_DIR="${MEDDESK_UPLOAD_DIR:-/home/ops/service/uploads}"
 DB_URL="${MEDDESK_DB_URL:-postgres://meddesk:meddesk@127.0.0.1:5432/meddesk?sslmode=disable}"
 LOG_TAG="[meddesk-restore]"
 
@@ -214,7 +214,7 @@ if [[ "$MODE" == "all" || "$MODE" == "files" ]]; then
     "$TAR_BIN" -xzf "$FILES_TAR" -C "$(dirname "$UPLOAD_DIR")"
     log "附件恢复完成 ✅"
     # 权限对齐 systemd 的运行用户（不对的话应用会 500）
-    APP_USER="$(stat -c '%U' "$(dirname "$UPLOAD_DIR")" 2>/dev/null || echo meddesk)"
+    APP_USER="$(stat -c '%U' "$(dirname "$UPLOAD_DIR")" 2>/dev/null || echo ops)"
     if id "$APP_USER" >/dev/null 2>&1; then
       chown -R "$APP_USER":"$APP_USER" "$UPLOAD_DIR" || warn "chown 失败，请手动执行"
       log "已修正属主为: $APP_USER"

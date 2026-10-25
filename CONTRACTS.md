@@ -280,7 +280,7 @@ func Mount(rg *gin.RouterGroup, svc *Service, requireAuth gin.HandlerFunc)
   请求体最大 4 MiB，响应头 `Cache-Control: no-store`、`Content-Disposition: attachment`。
 - PDF：A4 纵向；标题 + 汇总区（总次数/已服/跳过/漏服/依从率）+ 表格（日期/时间/成员/药物/剂量/状态/备注）
   + 页脚（生成时间、页码）。中文字体：`cfg.PDF.FontPath`，为空时按顺序探测
-  `/opt/meddesk/fonts/NotoSansSC-Regular.ttf`、`/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf`、
+  `/home/ops/service/fonts/NotoSansSC-Regular.ttf`、`/opt/meddesk/fonts/NotoSansSC-Regular.ttf`（兼容旧部署）、`/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf`、
   `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`、`/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc`；
   全部失败 → 返回 `apierr.CodeUnavailable`，message 写明「请先安装中文字体或配置 MEDDESK_PDF_FONT_PATH」。
 - 状态中文映射：`taken=已服用`、`skipped=已跳过`、`snoozed=已推迟`、`pending=待服用`、`missed=已漏服`。
@@ -543,7 +543,7 @@ MD.export.csv(rows) / MD.export.pdf(rows)     // csv 纯前端 Blob 下载；pdf
 | `MEDDESK_SYNC_MAX_RECORD_BYTES` | `1048576` | 单条密文上限 |
 | `MEDDESK_SYNC_PULL_PAGE` | `300` | 默认分页 |
 | `MEDDESK_SYNC_PULL_PAGE_MAX` | `1000` | 最大分页 |
-| `MEDDESK_UPLOAD_DIR` | `/var/lib/meddesk/uploads` | 附件目录 |
+| `MEDDESK_UPLOAD_DIR` | `/home/ops/service/uploads` | 附件目录 |
 | `MEDDESK_UPLOAD_MAX_BYTES` | `8388608` | 单附件上限 |
 | `MEDDESK_PDF_FONT_PATH` | 空 | CJK TTF 路径 |
 | `MEDDESK_LOG_LEVEL` | `info` | debug/info/warn/error |
