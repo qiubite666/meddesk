@@ -245,13 +245,14 @@ rm -f /etc/nginx/sites-enabled/default
 nginx -t
 ```
 
-用 **acme.sh 申请 ECC 证书**（与你现有 qiubite.fun 的管理方式一致）：
+用 **acme.sh 申请 ECC 证书（DNS 验证，不需要 80 端口与网站可访问）**：
 
 ```bash
 curl https://get.acme.sh | sh -s email=you@example.com
 source ~/.bashrc
-# 若 80 端口已被 nginx 占用且域名已解析到本机：
-acme.sh --issue --nginx -d med.example.com --keylength ec-256
+# 把 dns_xx 换成你的 DNS 提供商插件（cf=Cloudflare、dp=腾讯 DNSPod、aliyun=阿里云…）
+# 首次运行需提供 API Token，acme.sh 保存到 ~/.acme.sh/account.conf 供续期复用
+acme.sh --issue --dns dns_xx -d med.example.com --keylength ec-256
 # 安装到 nginx conf 期望的路径（与 deploy/nginx/meddesk.conf 第 97-98 行一致）：
 acme.sh --install-cert -d med.example.com --ecc \
   --fullchain-file /etc/letsencrypt/live/med.example.com/fullchain.pem \
@@ -267,6 +268,8 @@ nginx -s reload
 
 ```bash
 # 健康检查（应返回 {"status":"ok","version":"...","db":"ok",...}）
+# 80 端口对包括 health 在内的所有请求 307 强跳 HTTPS；本机/容器探活请直连应用端口：
+curl -fsS http://127.0.0.1:8080/api/v1/health
 curl -fsS https://med.example.com/api/v1/health
 # 就绪检查（db/cache 连通性）
 curl -fsS https://med.example.com/api/v1/ready
@@ -351,7 +354,7 @@ systemctl restart meddesk
 | `curl /api/v1/health` 里 `db:"fail"` | PG 口令错 / 库未建 / PG 未监听 | 核对 `MEDDESK_DB_URL`；`sudo -u postgres psql -c '\l'` |
 | `db:"ok" cache:"degraded"` | Redis 未启或被禁 | 预期行为（进程内降级），非故障 |
 | PDF 导出返回 503 | 缺中文字体 | `deploy/scripts/get-font.sh` 或设 `MEDDESK_PDF_FONT_PATH` 指向有效 TTF |
-| 证书续期失败 | 80 端口被防火墙拦 / DNS 解析漂移 | `acme.sh --renew -d med.example.com --ecc --force` 看具体报错 |
+| 证书续期失败 | DNS API Token 失效 / 域名解析记录被改 | `acme.sh --renew -d med.example.com --ecc --force` 看具体报错；核对 `~/.acme.sh/account.conf` |
 | 上传返回 413 | Nginx `client_max_body_size` 或应用 `MEDDESK_UPLOAD_MAX_BYTES` 超限 | 两处上限需**同时**调大，Nginx 值 ≥ 应用值 |
 | 登录后立刻 401 | 服务器时钟漂移导致 JWT 过期判定异常 | `timedatectl` 确认 NTP 已同步 |
 | 启动即退出 status=203/SIGSYS | seccomp `SystemCallFilter` 与内核不兼容 | 注释该行后逐段收紧（见 unit 文件注释） |

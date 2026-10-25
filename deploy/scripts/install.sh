@@ -375,12 +375,13 @@ if (( ISSUE_CERT )); then
     # 2) 注册 ACME 账户（仅首次；Let's Encrypt 为例，国内可选 ZeroSSL/其他 CA）
     acme.sh --set-default-ca --server letsencrypt
 
-    # 3) 前置条件：域名 A/AAAA 解析已指向本机，且 80 端口可放行 ACME 挑战
-    #    Nginx 需先加载一份最小 HTTP 配置（只含 server_name 与 /.well-known 放行）
+    # 3) DNS 验证（DNS-01）：不需要 80 端口与网站可访问性。
+    #    把 dns_xx 换成你的 DNS 提供商插件（cf=Cloudflare、dp=腾讯 DNSPod、aliyun=阿里云…），
+    #    首次运行会要求提供 API Token，acme.sh 自动保存到 ~/.acme.sh/account.conf 供续期复用。
 
-    # 4) 申请 ECC 证书（P-256）—— 命令中的 ec-256 即 ECC 256 位密钥
+    # 4) 申请 ECC 证书（P-256）—— ec-256 即 ECC 256 位密钥
 MSG
-  echo "    acme.sh --issue --nginx -d $DOMAIN --keylength ec-256"
+  echo "    acme.sh --issue --dns dns_xx -d $DOMAIN --keylength ec-256"
   cat <<'MSG'
 
     # 5) 安装证书到固定路径（不要用 ~/.acme.sh 里的路径直接配 Nginx，会被续期时的目录调整坑到）
@@ -399,7 +400,7 @@ MSG
     #   手动续期演练（正式 CA 慎用，会触发限流）：acme.sh --renew -d $DOMAIN --ecc --force
 
     # 7) Nginx 重载并验证
-    nginx -t && systemctl reload nginx
+    sudo nginx -t && sudo systemctl reload nginx
     echo | openssl s_client -connect $DOMAIN:443 -servername $DOMAIN 2>/dev/null | openssl x509 -noout -text | grep -E 'Public Key Algorithm|Signature Algorithm'
 MSG
   log "  证书步骤已打印，请手工执行（脚本刻意不自动执行）"
