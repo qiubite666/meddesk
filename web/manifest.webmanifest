@@ -1,0 +1,26 @@
+{
+  "name": "MedDesk 药事台",
+  "short_name": "MedDesk",
+  "description": "安全、离线优先的个人用药管理工具",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "theme_color": "#0e9f6e",
+  "background_color": "#f4f7f6",
+  "lang": "zh-CN",
+  "icons": [
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 192 192'%3E%3Crect width='192' height='192' rx='44' fill='%230e9f6e'/%3E%3Cg fill='none' stroke='white' stroke-width='14' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M55 43a32 32 0 0 1 45 0l49 49a32 32 0 0 1-45 45l-61-61a32 32 0 0 1 12-33Z'/%3E%3Cpath d='m68 101 33-33'/%3E%3C/g%3E%3C/svg%3E",
+      "sizes": "192x192",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%230e9f6e'/%3E%3Cg fill='none' stroke='white' stroke-width='36' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M147 114a85 85 0 0 1 120 0l131 131a85 85 0 0 1-120 120L114 201a85 85 0 0 1 33-87Z'/%3E%3Cpath d='m182 270 88-88'/%3E%3C/g%3E%3C/svg%3E",
+      "sizes": "512x512",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}
