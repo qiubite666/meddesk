@@ -28,7 +28,7 @@ set -Eeuo pipefail
 
 # ---------------------------------------------------------------- 默认配置
 DEST="${BACKUP_DEST:-/var/backups/meddesk}"
-UPLOAD_DIR="${MEDDESK_UPLOAD_DIR:-/home/ops/service/meddesk/uploads}"
+UPLOAD_DIR="${MEDDESK_UPLOAD_DIR:-/home/ops/service/meddesk/data}"
 KEEP_DAYS="${BACKUP_KEEP_DAYS:-30}"
 DB_URL="${MEDDESK_DB_URL:-postgres://meddesk:meddesk@127.0.0.1:5432/meddesk?sslmode=disable}"
 REMOTE="${BACKUP_REMOTE:-}"          # 例：user@host:/backup/meddesk

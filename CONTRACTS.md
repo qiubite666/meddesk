@@ -543,7 +543,7 @@ MD.export.csv(rows) / MD.export.pdf(rows)     // csv 纯前端 Blob 下载；pdf
 | `MEDDESK_SYNC_MAX_RECORD_BYTES` | `1048576` | 单条密文上限 |
 | `MEDDESK_SYNC_PULL_PAGE` | `300` | 默认分页 |
 | `MEDDESK_SYNC_PULL_PAGE_MAX` | `1000` | 最大分页 |
-| `MEDDESK_UPLOAD_DIR` | `/home/ops/service/meddesk/uploads` | 附件目录 |
+| `MEDDESK_UPLOAD_DIR` | `/home/ops/service/meddesk/data` | 附件目录 |
 | `MEDDESK_UPLOAD_MAX_BYTES` | `8388608` | 单附件上限 |
 | `MEDDESK_PDF_FONT_PATH` | 空 | CJK TTF 路径 |
 | `MEDDESK_LOG_LEVEL` | `info` | debug/info/warn/error |

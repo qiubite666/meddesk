@@ -8,7 +8,7 @@
 # 【ops 布局约定】（与 docs/DEPLOYMENT.md、meddesk.env.example 保持一致）
 #   /home/ops/service/meddesk/meddesk        -> 二进制（前端已内嵌，单文件）
 #   /home/ops/service/meddesk/.meddesk.env   -> 环境变量文件（权限 0640，属主 root:ops）
-#   /home/ops/service/meddesk/uploads/       -> 附件密文落盘（MEDDESK_UPLOAD_DIR）
+#   /home/ops/service/meddesk/data/       -> 附件密文落盘（MEDDESK_UPLOAD_DIR）
 #   /home/ops/service/meddesk/fonts/         -> PDF 中文字体（MEDDESK_PDF_FONT_PATH 所在目录）
 #   运行用户：ops（应用监听 :8080 非特权端口，无需 root / capabilities）
 #
@@ -102,8 +102,8 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
 # ProtectSystem=strict / ProtectHome=read-only 下必须显式放开的「可写」路径
-ReadWritePaths=/home/ops/service/meddesk/uploads
-# 若上传目录尚未创建，先：sudo install -d -o ops -g ops -m 0750 /home/ops/service/meddesk/uploads
+ReadWritePaths=/home/ops/service/meddesk/data
+# 若上传目录尚未创建，先：sudo install -d -o ops -g ops -m 0750 /home/ops/service/meddesk/data
 # 导出（PDF/CSV）是纯内存渲染，不落盘；不要放开其他写路径。
 
 [Install]

@@ -189,7 +189,7 @@ ssh root@<服务器IP> '
 set -e
 # 运行用户 ops（若尚未创建：useradd -m -s /bin/bash ops）
 id ops >/dev/null 2>&1 || useradd -m -s /bin/bash ops
-install -d -o ops -g ops -m 0750 /home/ops/service/meddesk /home/ops/service/meddesk/uploads /home/ops/service/meddesk/fonts
+install -d -o ops -g ops -m 0750 /home/ops/service/meddesk /home/ops/service/meddesk/data /home/ops/service/meddesk/fonts
 install -m 0755 /tmp/meddesk /home/ops/service/meddesk/meddesk
 # 中文字体（PDF 导出必需；缺失时导出返回 503，其余功能不受影响）
 bash deploy/scripts/get-font.sh   # 下载 Noto Sans SC 到 /home/ops/service/meddesk/fonts/
@@ -208,7 +208,7 @@ MEDDESK_REDIS_ENABLED=false
 MEDDESK_JWT_SECRET=<openssl rand -base64 48 生成，至少 32 字节>
 MEDDESK_SIGNUP_ENABLED=false
 MEDDESK_PDF_FONT_PATH=/home/ops/service/meddesk/fonts/NotoSansSC-Regular.ttf
-MEDDESK_UPLOAD_DIR=/home/ops/service/meddesk/uploads
+MEDDESK_UPLOAD_DIR=/home/ops/service/meddesk/data
 MEDDESK_LOG_FORMAT=json
 TZ=Asia/Shanghai
 EOF

@@ -148,14 +148,14 @@ services:
       MEDDESK_DB_URL: "postgres://meddesk:<PG_PASSWORD_请替换为随机串>@postgres:5432/meddesk?sslmode=disable"
       MEDDESK_REDIS_ENABLED: "true"
       MEDDESK_REDIS_URL: "redis://:<REDIS_PASSWORD_请替换为随机串>@redis:6379/0"
-      MEDDESK_UPLOAD_DIR: /var/lib/meddesk/uploads
+      MEDDESK_UPLOAD_DIR: /var/lib/meddesk/data
       # Dockerfile 已把中文字体放到该路径；若构建时未取到字体，PDF 导出会返回 503
       MEDDESK_PDF_FONT_PATH: /opt/meddesk/fonts/NotoSansSC-Regular.ttf
       MEDDESK_LOG_FORMAT: json
       TZ: Asia/Shanghai
     volumes:
       # 上传的密文附件必须持久化（丢失意味着该用户的药物照片不可恢复）
-      - appdata:/var/lib/meddesk/uploads
+      - appdata:/var/lib/meddesk/data
     # 2C4G 小机：app 512M 足够（Go 运行时 + go-pdf/fpdf 渲染）
     mem_limit: 512m
     memswap_limit: 512m

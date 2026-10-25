@@ -23,7 +23,7 @@
 # 【ops 布局】（与 deploy/systemd/meddesk.service、meddesk.env.example 一致）
 #   /home/ops/service/meddesk/meddesk       二进制（前端已内嵌）
 #   /home/ops/service/meddesk/.meddesk.env  环境变量（含密钥，绝不提交 git）
-#   /home/ops/service/meddesk/uploads/      附件密文
+#   /home/ops/service/meddesk/data/      附件密文
 #   /home/ops/service/meddesk/fonts/        PDF 中文字体
 #
 # ⚠ 安全约定：

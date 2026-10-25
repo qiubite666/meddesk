@@ -163,7 +163,7 @@ MedDesk 是一个**自托管（self-hosted）**的个人 / 家庭数字工作台
 └──────────────┘  │  attachments     │     │
 ┌──────────────┐  └──────────────────┘     │
 │   Redis 7    │  密文落盘目录              │
-│ 限流/吊销名单 │  /home/ops/service/meddesk/uploads │
+│ 限流/吊销名单 │  /home/ops/service/meddesk/data │
 │ 登录失败计数  │  {userID}/{yy}/{id}.bin  │
 └──────────────┘                            │
                                             ▼
@@ -509,7 +509,7 @@ curl -fsS https://med.example.com/api/v1/health
 | `MEDDESK_SYNC_MAX_RECORD_BYTES` | `1048576` | 单条密文上限（1 MiB） |
 | `MEDDESK_SYNC_PULL_PAGE` | `300` | pull 默认分页 |
 | `MEDDESK_SYNC_PULL_PAGE_MAX` | `1000` | pull 最大分页 |
-| `MEDDESK_UPLOAD_DIR` | `/home/ops/service/meddesk/uploads` | 密文附件目录 |
+| `MEDDESK_UPLOAD_DIR` | `/home/ops/service/meddesk/data` | 密文附件目录 |
 | `MEDDESK_UPLOAD_MAX_BYTES` | `8388608` | 单附件上限（8 MiB） |
 | `MEDDESK_PDF_FONT_PATH` | 空 | CJK TTF 路径，留空则自动探测 |
 | `MEDDESK_LOG_LEVEL` | `info` | `debug`/`info`/`warn`/`error` |
