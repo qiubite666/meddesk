@@ -120,9 +120,11 @@ check-yaml: ## 校验两份 docker-compose（优先 docker compose config，退�
 	@if command -v docker >/dev/null 2>&1; then \
 	   $(DOCKER_COMPOSE) config >/dev/null && echo "OK   deploy/docker-compose.yml (docker compose config)"; \
 	   docker compose -f deploy/docker-compose.dev.yml config >/dev/null && echo "OK   deploy/docker-compose.dev.yml (docker compose config)"; \
+	   docker compose --env-file /dev/null -f deploy/docker-compose.middleware.yml config >/dev/null 2>&1 || echo "SKIP deploy/docker-compose.middleware.yml (缺必填口令，属预期)"; \
 	 else \
 	   python3 -c "import yaml,sys; yaml.safe_load(open('deploy/docker-compose.yml')); print('OK   deploy/docker-compose.yml (python yaml.safe_load)')"; \
 	   python3 -c "import yaml,sys; yaml.safe_load(open('deploy/docker-compose.dev.yml')); print('OK   deploy/docker-compose.dev.yml (python yaml.safe_load)')"; \
+	   python3 -c "import yaml,sys; yaml.safe_load(open('deploy/docker-compose.middleware.yml')); print('OK   deploy/docker-compose.middleware.yml (python yaml.safe_load)')"; \
 	 fi
 
 .PHONY: check-docs

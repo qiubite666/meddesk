@@ -8,8 +8,8 @@
 
 - [0. 两条路径怎么选](#0-两条路径怎么选)
 - [1. 系统准备](#1-系统准备)
-- [2. PostgreSQL 16](#2-postgresql-16)
-- [3. Redis 7（可选）](#3-redis-7可选)
+- [2. PostgreSQL 16（两种方式二选一）](#2-postgresql-16两种方式二选一)
+- [3. Redis 7（可选；启用时同样两种方式二选一）](#3-redis-7可选启用时同样两种方式二选一)
 - [4. 编译安装二进制](#4-编译安装二进制)
 - [5. systemd 单元](#5-systemd-单元)
 - [6. Nginx 与 TLS 证书](#6-nginx-与-tls-证书)
@@ -55,7 +55,9 @@ timedatectl set-ntp true && timedatectl status | grep -E 'synchronized|NTP'
 
 ---
 
-## 2. PostgreSQL 16
+## 2. PostgreSQL 16（两种方式二选一）
+
+### 2.1 方式 A：宿主机安装（apt + systemd，资源占用最低）
 
 ```bash
 # 官方 PGDG 源（Debian 12 示例；Ubuntu 把 bookworm 换成 jammy）
@@ -79,11 +81,48 @@ SQL
 复制到 `/etc/postgresql/16/main/conf.d/meddesk.conf` 后 `systemctl restart postgresql`。
 PG 默认只监听 `127.0.0.1`，应用与库同机时**不要**开放 `listen_addresses = '*'`。
 
+### 2.2 方式 B：docker compose（不动系统包，升级/迁移方便）
+
+配置文件：[deploy/docker-compose.middleware.yml](../deploy/docker-compose.middleware.yml)——
+只起 **PG16 + Redis7** 两个容器（应用跑在宿主机），口令/端口全部走环境变量，必填缺失时直接拒绝启动。
+
+```bash
+cd /opt/meddesk/compose        # 建议目录；也可直接在 deploy/ 下执行
+# ① 准备 .env（与 compose 文件同目录，权限 600）
+cat > .env <<'EOF'
+POSTGRES_USER=meddesk
+POSTGRES_PASSWORD=<openssl rand -base64 24 的输出>
+POSTGRES_DB=meddesk
+PG_PORT=5432
+REDIS_PASSWORD=<openssl rand -base64 24 的输出>
+REDIS_PORT=6379
+REDIS_MAXMEMORY=256mb
+TZ=Asia/Shanghai
+EOF
+chmod 600 .env
+
+# ② 起服务（数据持久化在 docker 卷 pgdata_mw；首次启动自动安装 citext）
+docker compose -f deploy/docker-compose.middleware.yml up -d
+docker compose -f deploy/docker-compose.middleware.yml ps     # healthy 即就绪
+
+# ③ 验证
+docker exec -it meddesk-pg psql -U meddesk -d meddesk -c 'SELECT version();'
+# 常用运维
+docker compose -f deploy/docker-compose.middleware.yml logs -f postgres
+docker compose -f deploy/docker-compose.middleware.yml down          # 停止，保留数据
+```
+
+要点：数据在 `pgdata_mw` 卷中，`down` 不丢数据，`down -v` **会删库**（勿在生产执行）；
+备份用第 8 节的 `pg_dump`（容器方式加 `docker exec meddesk-pg` 前缀）；
+端口仅绑定 `127.0.0.1`，应用必须与容器同机。
+
 ---
 
-## 3. Redis 7（可选，默认不装）
+## 3. Redis 7（可选；启用时同样两种方式二选一）
 
-MedDesk 默认 `MEDDESK_REDIS_ENABLED=false`，走进程内 Noop 降级（限流/失败计数/吊销名单在单进程内生效），**单实例部署无需 Redis**。仅多副本或需要跨进程共享时才装：
+MedDesk 默认 `MEDDESK_REDIS_ENABLED=false`，走进程内 Noop 降级（限流/失败计数/吊销名单在单进程内生效），**单实例部署无需 Redis**。仅多副本或需要跨进程共享时才启用：
+
+### 3.1 方式 A：宿主机安装
 
 ```bash
 apt -y install redis-server
@@ -93,9 +132,41 @@ apt -y install redis-server
 #   maxmemory-policy allkeys-lru
 #   requirepass <请替换为随机口令>
 systemctl restart redis-server
-# 然后在 /etc/meddesk/meddesk.env 中：MEDDESK_REDIS_ENABLED=true
 ```
 
+### 3.2 方式 B：docker compose
+
+[deploy/docker-compose.middleware.yml](../deploy/docker-compose.middleware.yml) **已同时包含 Redis**（`requirepass`/`maxmemory`/`allkeys-lru` 由 `.env` 控制，纯缓存语义不落盘）——按 2.2 起一次即同时获得 PG 与 Redis。若只想要 Redis 不要 PG：
+
+```bash
+docker compose -f deploy/docker-compose.middleware.yml up -d redis
+```
+
+### 3.3 环境变量与连接配置对照表
+
+**compose 侧变量**（写在 compose 文件同目录的 `.env`，方式 B 专用）：
+
+| 变量 | 默认 | 是否必填 | 说明 |
+|---|---|---|---|
+| `POSTGRES_USER` | `meddesk` | 否 | PG 业务角色名（也是超级用户，容器内初始化用） |
+| `POSTGRES_PASSWORD` | — | **是** | `openssl rand -base64 24`；缺失时 compose 拒绝启动 |
+| `POSTGRES_DB` | `meddesk` | 否 | 库名 |
+| `PG_PORT` | `5432` | 否 | 宿主机映射端口（仅 127.0.0.1） |
+| `REDIS_PASSWORD` | — | **是** | `openssl rand -base64 24` |
+| `REDIS_PORT` | `6379` | 否 | 宿主机映射端口 |
+| `REDIS_MAXMEMORY` | `256mb` | 否 | 内存上限，超限按 allkeys-lru 淘汰 |
+| `TZ` | `Asia/Shanghai` | 否 | 容器时区 |
+
+**应用侧变量**（`/etc/meddesk/meddesk.env`，两种方式只是连接串不同）：
+
+| 变量 | 方式 A（宿主机安装） | 方式 B（docker compose） |
+|---|---|---|
+| `MEDDESK_DB_URL` | `postgres://meddesk:<PG口令>@127.0.0.1:5432/meddesk?sslmode=disable` | `postgres://$POSTGRES_USER:$POSTGRES_PASSWORD@127.0.0.1:$PG_PORT/$POSTGRES_DB?sslmode=disable` |
+| `MEDDESK_REDIS_ENABLED` | 启用 Redis 时 `true` | 同左 |
+| `MEDDESK_REDIS_URL` | `redis://:<Redis口令>@127.0.0.1:6379/0` | `redis://:$REDIS_PASSWORD@127.0.0.1:$REDIS_PORT/0` |
+
+注意：口令若含 `@ : / # ?` 等 URL 保留字符需 URL 编码（或直接用 base64 输出里不含保留字符的变体）；
+改完 `meddesk.env` 执行 `systemctl restart meddesk` 生效。
 Redis 里没有任何不可替代的数据；挂掉或关闭时应用自动降级，不影响业务数据。
 
 ---

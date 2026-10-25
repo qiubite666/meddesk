@@ -1,0 +1,68 @@
+# ==============================================================================
+# MedDesk —— PostgreSQL 16 + Redis 7 中间件专用（应用跑在宿主机）
+# 用途：不想在宿主机 apt 安装 PG/Redis，但应用二进制仍以 systemd 方式运行的场景。
+# 全部可变项走环境变量插值（读取同目录 .env 或 shell export）；
+# 带 :? 的变量**必须提供**，缺失时 compose 直接报错拒绝启动（防呆）。
+# 端口只绑定 127.0.0.1：应用同机直连；如需跨机访问，自行改为内网网卡并配防火墙。
+# 安全提示：.env 中含数据库/Redis 口令，权限必须 600，且绝不提交进 git。
+# ==============================================================================
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: meddesk-pg
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-meddesk}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-meddesk}
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${PG_PORT:-5432}:5432"
+    volumes:
+      - pgdata_mw:/var/lib/postgresql/data
+      # 首次启动（数据卷为空）时自动安装 citext 扩展；与宿主机安装方式的语义一致
+      - ./scripts/initdb:/docker-entrypoint-initdb.d:ro
+      # 2C4G 小机调优（可选）：取消注释后按需调整该文件内容
+      # - ./postgres-tuning.conf:/etc/postgresql/postgresql.conf:ro
+    # 挂载调优文件时改用：command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-meddesk} -d ${POSTGRES_DB:-meddesk}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    # 2C4G 小机建议给 PG 约 1G 内存上限
+    mem_limit: 1g
+
+  redis:
+    image: redis:7-alpine
+    container_name: meddesk-redis
+    restart: unless-stopped
+    # 纯缓存语义：不需要 RDB/AOF 持久化（最坏情况=限流/吊销名单清空，应用自动降级）
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?请在 .env 中设置 REDIS_PASSWORD}
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      - --bind
+      - 0.0.0.0
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      # 通过环境变量把口令传给 redis-cli，避免写在镜像层
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      environment:
+        REDIS_PASSWORD: ${REDIS_PASSWORD:?请在 .env 中设置 REDIS_PASSWORD}
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    mem_limit: 384m
+
+volumes:
+  pgdata_mw:

@@ -342,6 +342,10 @@ docker compose -f deploy/docker-compose.dev.yml down
 docker compose -f deploy/docker-compose.dev.yml down -v
 ```
 
+> 本地开发用上面这份（口令硬编码仅限本机）。**生产环境**的 PG/Redis 容器化
+> （口令走环境变量、citext 自动初始化）见 `deploy/docker-compose.middleware.yml`
+> 与 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) 第 2–3 节的环境变量对照表。
+
 ### 6.3 准备环境变量
 
 ```bash
