@@ -336,7 +336,7 @@ func checkRows(req model.ExportRequest) error {
 // 且部分 .ttc 会解析失败）。推荐部署脚本直接下载单个 `.ttf`
 // （如 Noto Sans SC Regular）并通过 MEDDESK_PDF_FONT_PATH 指定。
 var fontCandidates = []string{
-	"/home/ops/service/fonts/NotoSansSC-Regular.ttf",
+	"/home/ops/service/meddesk/fonts/NotoSansSC-Regular.ttf",
 	"/opt/meddesk/fonts/NotoSansSC-Regular.ttf",
 	"/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf",
 	"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",

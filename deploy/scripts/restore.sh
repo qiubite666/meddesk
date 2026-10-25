@@ -16,7 +16,7 @@
 #   ./deploy/scripts/restore.sh --from 20261026-031700 --dry-run
 #   ./deploy/scripts/restore.sh --from 20261026-031700       # 交互式二次确认后恢复（DB+附件）
 #   ./deploy/scripts/restore.sh --from latest --db-only
-#   ./deploy/scripts/restore.sh --from latest --files-only --upload-dir /home/ops/service/uploads
+#   ./deploy/scripts/restore.sh --from latest --files-only --upload-dir /home/ops/service/meddesk/uploads
 #   ./deploy/scripts/restore.sh --from latest --force         # 跳过确认（危险）
 #
 # 恢复目标 PostgreSQL：可用 --db-url 覆盖，或读环境变量 MEDDESK_DB_URL。
@@ -25,7 +25,7 @@
 set -Eeuo pipefail
 
 DEST="${BACKUP_DEST:-/var/backups/meddesk}"
-UPLOAD_DIR="${MEDDESK_UPLOAD_DIR:-/home/ops/service/uploads}"
+UPLOAD_DIR="${MEDDESK_UPLOAD_DIR:-/home/ops/service/meddesk/uploads}"
 DB_URL="${MEDDESK_DB_URL:-postgres://meddesk:meddesk@127.0.0.1:5432/meddesk?sslmode=disable}"
 LOG_TAG="[meddesk-restore]"
 

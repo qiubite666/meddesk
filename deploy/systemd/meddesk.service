@@ -6,10 +6,10 @@
 #   sudo systemctl enable --now meddesk
 #
 # 【ops 布局约定】（与 docs/DEPLOYMENT.md、meddesk.env.example 保持一致）
-#   /home/ops/service/meddesk        -> 二进制（前端已内嵌，单文件）
-#   /home/ops/service/.meddesk.env   -> 环境变量文件（权限 0640，属主 root:ops）
-#   /home/ops/service/uploads/       -> 附件密文落盘（MEDDESK_UPLOAD_DIR）
-#   /home/ops/service/fonts/         -> PDF 中文字体（MEDDESK_PDF_FONT_PATH 所在目录）
+#   /home/ops/service/meddesk/meddesk        -> 二进制（前端已内嵌，单文件）
+#   /home/ops/service/meddesk/.meddesk.env   -> 环境变量文件（权限 0640，属主 root:ops）
+#   /home/ops/service/meddesk/uploads/       -> 附件密文落盘（MEDDESK_UPLOAD_DIR）
+#   /home/ops/service/meddesk/fonts/         -> PDF 中文字体（MEDDESK_PDF_FONT_PATH 所在目录）
 #   运行用户：ops（应用监听 :8080 非特权端口，无需 root / capabilities）
 #
 # 【安全基线说明】
@@ -42,12 +42,12 @@ User=ops
 Group=ops
 
 # ---------------------------------------------------------------- 进程与文件
-WorkingDirectory=/home/ops/service
-ExecStart=/home/ops/service/meddesk
+WorkingDirectory=/home/ops/service/meddesk
+ExecStart=/home/ops/service/meddesk/meddesk
 ExecReload=/bin/kill -HUP $MAINPID
 
 # 环境变量集中在这一个文件里（MEDDESK_* 系列，见 meddesk.env.example）
-EnvironmentFile=/home/ops/service/.meddesk.env
+EnvironmentFile=/home/ops/service/meddesk/.meddesk.env
 
 LimitNOFILE=65535
 LimitNPROC=4096
@@ -102,8 +102,8 @@ SystemCallFilter=@system-service
 SystemCallErrorNumber=EPERM
 
 # ProtectSystem=strict / ProtectHome=read-only 下必须显式放开的「可写」路径
-ReadWritePaths=/home/ops/service/uploads
-# 若上传目录尚未创建，先：sudo install -d -o ops -g ops -m 0750 /home/ops/service/uploads
+ReadWritePaths=/home/ops/service/meddesk/uploads
+# 若上传目录尚未创建，先：sudo install -d -o ops -g ops -m 0750 /home/ops/service/meddesk/uploads
 # 导出（PDF/CSV）是纯内存渲染，不落盘；不要放开其他写路径。
 
 [Install]

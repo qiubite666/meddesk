@@ -785,7 +785,7 @@ curl -fsS -X POST https://med.example.com/api/v1/export/csv \
 
 **字体探测顺序**（`MEDDESK_PDF_FONT_PATH` 为空时）
 
-1. `/home/ops/service/fonts/NotoSansSC-Regular.ttf`
+1. `/home/ops/service/meddesk/fonts/NotoSansSC-Regular.ttf`
 2. `/usr/share/fonts/truetype/noto/NotoSansSC-Regular.ttf`
 3. `/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc`
 4. `/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc`

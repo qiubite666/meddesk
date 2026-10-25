@@ -4,9 +4,9 @@
 #
 # 它做的事（按顺序，全部可重复执行/幂等）：
 #   1  检查运行环境（root/sudo、发行版、架构、磁盘空间）
-#   2  检查运行用户 ops 与目录结构（/home/ops/service 布局，见下）
+#   2  检查运行用户 ops 与目录结构（/home/ops/service/meddesk 布局，见下）
 #   3  安装二进制（从本地已构建的产物，或用 go build 现编）
-#   4  生成/写入环境变量文件 /home/ops/service/.meddesk.env（0640, root:ops）
+#   4  生成/写入环境变量文件 /home/ops/service/meddesk/.meddesk.env（0640, root:ops）
 #   5  PostgreSQL：建库建用户 + citext 扩展（--with-postgres，最小权限）
 #   6  Redis：本地监听 + maxmemory + requirepass（--with-redis）
 #   7  systemd 单元安装并 enable（路径 B）
@@ -21,10 +21,10 @@
 #   sudo ./deploy/scripts/install.sh --dry-run ...             # 只打印计划，不落盘
 #
 # 【ops 布局】（与 deploy/systemd/meddesk.service、meddesk.env.example 一致）
-#   /home/ops/service/meddesk       二进制（前端已内嵌）
-#   /home/ops/service/.meddesk.env  环境变量（含密钥，绝不提交 git）
-#   /home/ops/service/uploads/      附件密文
-#   /home/ops/service/fonts/        PDF 中文字体
+#   /home/ops/service/meddesk/meddesk       二进制（前端已内嵌）
+#   /home/ops/service/meddesk/.meddesk.env  环境变量（含密钥，绝不提交 git）
+#   /home/ops/service/meddesk/uploads/      附件密文
+#   /home/ops/service/meddesk/fonts/        PDF 中文字体
 #
 # ⚠ 安全约定：
 #   - 脚本**不会**自动生成并写入口令：所有敏感值必须是占位符或由你提供，
@@ -40,7 +40,7 @@ METHOD="systemd"          # systemd | compose
 DOMAIN="med.example.com"
 BINARY=""                 # 已构建好的二进制路径
 APP_USER="ops"
-SERVICE_DIR="/home/ops/service"
+SERVICE_DIR="/home/ops/service/meddesk"
 UPLOAD_DIR="$SERVICE_DIR/uploads"
 FONT_DIR="$SERVICE_DIR/fonts"
 ENV_FILE="$SERVICE_DIR/.meddesk.env"

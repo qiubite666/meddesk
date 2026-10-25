@@ -90,7 +90,7 @@ PG 默认只监听 `127.0.0.1`，应用与库同机时**不要**开放 `listen_a
 只起 **PG18 + Redis7** 两个容器（应用跑在宿主机），口令/端口全部走环境变量，必填缺失时直接拒绝启动。
 
 ```bash
-cd /home/ops/service/compose   # 建议目录；也可直接在 deploy/ 下执行
+cd /home/ops/service/meddesk/compose   # 建议目录；也可直接在 deploy/ 下执行
 # ① 准备 .env（与 compose 文件同目录，权限 600）
 cat > .env <<'EOF'
 POSTGRES_USER=meddesk
@@ -160,7 +160,7 @@ docker compose -f deploy/docker-compose.middleware.yml up -d redis
 | `REDIS_MAXMEMORY` | `256mb` | 否 | 内存上限，超限按 allkeys-lru 淘汰 |
 | `TZ` | `Asia/Shanghai` | 否 | 容器时区 |
 
-**应用侧变量**（`/home/ops/service/.meddesk.env`，两种方式只是连接串不同）：
+**应用侧变量**（`/home/ops/service/meddesk/.meddesk.env`，两种方式只是连接串不同）：
 
 | 变量 | 方式 A（宿主机安装） | 方式 B（docker compose） |
 |---|---|---|
@@ -189,17 +189,17 @@ ssh root@<服务器IP> '
 set -e
 # 运行用户 ops（若尚未创建：useradd -m -s /bin/bash ops）
 id ops >/dev/null 2>&1 || useradd -m -s /bin/bash ops
-install -d -o ops -g ops -m 0750 /home/ops/service /home/ops/service/uploads /home/ops/service/fonts
-install -m 0755 /tmp/meddesk /home/ops/service/meddesk
+install -d -o ops -g ops -m 0750 /home/ops/service/meddesk /home/ops/service/meddesk/uploads /home/ops/service/meddesk/fonts
+install -m 0755 /tmp/meddesk /home/ops/service/meddesk/meddesk
 # 中文字体（PDF 导出必需；缺失时导出返回 503，其余功能不受影响）
-bash deploy/scripts/get-font.sh   # 下载 Noto Sans SC 到 /home/ops/service/fonts/
+bash deploy/scripts/get-font.sh   # 下载 Noto Sans SC 到 /home/ops/service/meddesk/fonts/
 '
 ```
 
 写环境变量文件（也可直接跑 `deploy/scripts/install.sh` 自动生成，含 `--with-postgres --with-redis --issue-cert` 可选开关）：
 
 ```bash
-cat > /home/ops/service/.meddesk.env <<EOF
+cat > /home/ops/service/meddesk/.meddesk.env <<EOF
 MEDDESK_HTTP_ADDR=:8080
 MEDDESK_BASE_URL=https://med.example.com
 MEDDESK_TRUST_PROXY=true
@@ -207,12 +207,12 @@ MEDDESK_DB_URL=postgres://meddesk:<数据库口令>@127.0.0.1:5432/meddesk?sslmo
 MEDDESK_REDIS_ENABLED=false
 MEDDESK_JWT_SECRET=<openssl rand -base64 48 生成，至少 32 字节>
 MEDDESK_SIGNUP_ENABLED=false
-MEDDESK_PDF_FONT_PATH=/home/ops/service/fonts/NotoSansSC-Regular.ttf
-MEDDESK_UPLOAD_DIR=/home/ops/service/uploads
+MEDDESK_PDF_FONT_PATH=/home/ops/service/meddesk/fonts/NotoSansSC-Regular.ttf
+MEDDESK_UPLOAD_DIR=/home/ops/service/meddesk/uploads
 MEDDESK_LOG_FORMAT=json
 TZ=Asia/Shanghai
 EOF
-chown root:ops /home/ops/service/.meddesk.env && chmod 640 /home/ops/service/.meddesk.env
+chown root:ops /home/ops/service/meddesk/.meddesk.env && chmod 640 /home/ops/service/meddesk/.meddesk.env
 ```
 
 > `MEDDESK_SIGNUP_ENABLED=false` 表示注册仅限首个账号走命令行开启；个人自托管建议：注册第一个账号后立即关闭公开注册（在环境变量中改回 `false` 并重启）。
@@ -289,7 +289,7 @@ curl -fsS https://med.example.com/api/v1/auth/register \
 install -m 0750 deploy/scripts/backup.sh /usr/local/bin/meddesk-backup.sh
 crontab -e
 # 每日 03:30 备份，保留 30 天
-30 3 * * * /usr/local/bin/meddesk-backup.sh >> /home/ops/service/backup.log 2>&1
+30 3 * * * /usr/local/bin/meddesk-backup.sh >> /home/ops/service/meddesk/backup.log 2>&1
 ```
 
 异地容灾建议：crontab 里追加一步 `rclone copy /var/backups/meddesk remote:meddesk-backup`（或 rsync 到另一台机）。
@@ -329,12 +329,12 @@ EOF
 
 ```bash
 # ---- 升级 ----
-cp /home/ops/service/meddesk /home/ops/service/meddesk.bak.$(date +%F)   # 保留旧版
-install -m 0755 meddesk-new /home/ops/service/meddesk
+cp /home/ops/service/meddesk/meddesk /home/ops/service/meddesk/meddesk.bak.$(date +%F)   # 保留旧版
+install -m 0755 meddesk-new /home/ops/service/meddesk/meddesk
 systemctl restart meddesk && curl -fsS https://med.example.com/api/v1/health
 
 # ---- 回滚 ----
-install -m 0755 /home/ops/service/meddesk.bak.<日期> /home/ops/service/meddesk
+install -m 0755 /home/ops/service/meddesk/meddesk.bak.<日期> /home/ops/service/meddesk/meddesk
 systemctl restart meddesk
 ```
 

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # MedDesk —— 中文字体获取脚本
-#   目标：把一份可用于 PDF 中文渲染的字体放到 /home/ops/service/fonts/NotoSansSC-Regular.ttf
+#   目标：把一份可用于 PDF 中文渲染的字体放到 /home/ops/service/meddesk/fonts/NotoSansSC-Regular.ttf
 #
 # 为什么需要它：
 #   /api/v1/export/pdf 使用 go-pdf/fpdf 渲染中文。fpdf 需要 **TrueType 轮廓** 的字体文件，
@@ -12,12 +12,12 @@
 #   sudo ./deploy/scripts/get-font.sh                       # 自动按优先级尝试
 #   sudo ./deploy/scripts/get-font.sh --method apt          # 只用 Debian/Ubuntu 包
 #   sudo ./deploy/scripts/get-font.sh --method url --url https://<内网>/NotoSansSC-Regular.ttf
-#   sudo ./deploy/scripts/get-font.sh --dest /home/ops/service/fonts --target NotoSansSC-Regular.ttf
+#   sudo ./deploy/scripts/get-font.sh --dest /home/ops/service/meddesk/fonts --target NotoSansSC-Regular.ttf
 #   ./deploy/scripts/get-font.sh --check                    # 只校验当前字体是否可用
 #   ./deploy/scripts/get-font.sh --dry-run
 #
 # 完成后请确认 MEDDESK_PDF_FONT_PATH 指向该文件（留空时应用会自动按序探测，
-# /home/ops/service/fonts/NotoSansSC-Regular.ttf 是探测序列的第一项，通常无需显式配置）。
+# /home/ops/service/meddesk/fonts/NotoSansSC-Regular.ttf 是探测序列的第一项，通常无需显式配置）。
 #
 # ⚠ 关于字形来源的现实约束（务必读完）：
 #   Noto Sans SC 官方基本只发布 OTF/OTC/sub-font 形态，中文是多万分字形，
@@ -32,7 +32,7 @@
 set -Eeuo pipefail
 
 LOG_TAG="[meddesk-font]"
-FONT_DIR="${FONT_DIR:-/home/ops/service/fonts}"
+FONT_DIR="${FONT_DIR:-/home/ops/service/meddesk/fonts}"
 TARGET_NAME="${TARGET_NAME:-NotoSansSC-Regular.ttf}"
 METHOD="auto"              # auto | apt | url
 FONT_URL="${FONT_URL:-}"
@@ -204,7 +204,7 @@ if (( ! got )); then
 │ 离线备选方案（推荐，最可控）：                                          │
 │   1) 在能联网的机器上取得一份 NotoSansSC-Regular.ttf（内网 mirror /     │
 │      对象存储 / 已购买的商业字体授权版本），用 scp 传到本机：            │
-│         scp NotoSansSC-Regular.ttf root@<host>:/home/ops/service/fonts/      │
+│         scp NotoSansSC-Regular.ttf root@<host>:/home/ops/service/meddesk/fonts/      │
 │   2) 或放到仓库的 deploy/fonts/ 后重新 docker build（Dockerfile 会 COPY）│
 │   3) 或配置 MEDDESK_PDF_FONT_PATH 指向任意一个已存在的 .ttf              │
 │                                                                        │
@@ -229,10 +229,10 @@ cat <<'MSG'
 
 接下来：
   1) 若服务以 systemd 运行，确认 meddesk 用户对该文件有读权限：
-       sudo chmod 644 /home/ops/service/fonts/NotoSansSC-Regular.ttf
+       sudo chmod 644 /home/ops/service/meddesk/fonts/NotoSansSC-Regular.ttf
      systemd 的 ProtectSystem=strict 下 /opt 是只读挂载，安装后无需额外处理。
   2) 显式指定（可选，能省掉启动时的探测）：
-       echo 'MEDDESK_PDF_FONT_PATH=/home/ops/service/fonts/NotoSansSC-Regular.ttf' >> /home/ops/service/.meddesk.env
+       echo 'MEDDESK_PDF_FONT_PATH=/home/ops/service/meddesk/fonts/NotoSansSC-Regular.ttf' >> /home/ops/service/meddesk/.meddesk.env
        sudo systemctl restart meddesk
   3) 重启后导出一次 PDF 验证中文是否正常显示。
 MSG
