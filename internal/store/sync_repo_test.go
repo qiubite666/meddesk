@@ -65,7 +65,7 @@ func TestPaginate(t *testing.T) {
 func TestStoreWithDB(t *testing.T) {
 	url := os.Getenv("MEDDESK_TEST_DB_URL")
 	if url == "" {
-		t.Skip("跳过数据库用例：未设置 MEDDESK_TEST_DB_URL（需可连的 PostgreSQL 16 实例）")
+		t.Skip("跳过数据库用例：未设置 MEDDESK_TEST_DB_URL（需可连的 PostgreSQL 16+ 实例）")
 	}
 	ctx := context.Background()
 	s, err := Open(ctx, config.DBConfig{URL: url, MaxConns: 2})

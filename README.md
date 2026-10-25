@@ -157,7 +157,7 @@ MedDesk 是一个**自托管（self-hosted）**的个人 / 家庭数字工作台
        │          │           │            │
        ▼          ▼           ▼            │    （纯内存渲染，不落盘）
 ┌──────────────┐  ┌──────────────────┐     │
-│ PostgreSQL 16│  │  PostgreSQL 16   │     │
+│ PostgreSQL 18│  │  PostgreSQL 18   │     │
 │ users        │  │  sync_records    │     │
 │ refresh_tokens│ │  sync_state      │     │
 └──────────────┘  │  attachments     │     │
@@ -182,9 +182,9 @@ MedDesk 是一个**自托管（self-hosted）**的个人 / 家庭数字工作台
 
 ## 4. 技术选型与取舍
 
-### 4.1 主存：PostgreSQL 16 🥇（对比 MySQL 8）
+### 4.1 主存：PostgreSQL 18 🥇（对比 MySQL 8）
 
-| 维度 | PostgreSQL 16 | MySQL 8 | 对 MedDesk 的影响 |
+| 维度 | PostgreSQL 18（16/17 同） | MySQL 8 | 对 MedDesk 的影响 |
 |---|---|---|---|
 | `citext` 大小写不敏感类型 | 原生扩展 | 需靠 `collation` 绕 | 邮箱唯一性更干净 |
 | `timestamptz` | 原生，时区语义明确 | `DATETIME` 不带时区 | 客户端多时区不会踩坑 |
@@ -195,7 +195,7 @@ MedDesk 是一个**自托管（self-hosted）**的个人 / 家庭数字工作台
 | 许可证与中立性 | BSD-like | GPL/商业双授权 | 自托管项目更省心 |
 | 运维复杂度 | 略高（vacuum 等） | 略低 | 一期数据量极小（万行量级），可控 |
 
-> **结论**：MedDesk 的场景是「小数据量 + 强事务 + 大量二进制 + 未来要加半结构化字段」，PG 的优势几乎全部命中；运维复杂度在万行数据量下可以忽略，因此选 **PostgreSQL 16**。
+> **结论**：MedDesk 的场景是「小数据量 + 强事务 + 大量二进制 + 未来要加半结构化字段」，PG 的优势几乎全部命中；运维复杂度在万行数据量下可以忽略，因此选 **PostgreSQL 18**（当前最新稳定大版本；16/17 亦可，SQL 无版本特有特性）。
 
 ### 4.2 Redis 7：只做四类辅助工作，**不是数据源**
 
@@ -327,7 +327,7 @@ meddesk/
 |---|---|---|
 | Go | ≥ 1.26.4 | `go version` 确认 |
 | Node.js | 可选 | 仅用于 `make check-js`（`node --check`） |
-| PostgreSQL | 16 | `sudo apt-get install -y postgresql-16` 或用 Docker |
+| PostgreSQL | 18（16+ 均可） | apt 装 postgresql-18，或 `make deps-up` 用 Docker |
 | Redis | 7（可选） | 不想装就把 `MEDDESK_REDIS_ENABLED=false` |
 
 ### 6.2 起一个本地数据库

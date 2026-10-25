@@ -23,7 +23,7 @@ name: meddesk
 services:
   # ------------------------------------------------------------------ 数据库
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: meddesk-postgres
     restart: unless-stopped
     # 只监听回环，避免容器端口映射把 5432 暴露到宿主机公网网卡

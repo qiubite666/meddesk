@@ -8,7 +8,7 @@
 
 - [0. 两条路径怎么选](#0-两条路径怎么选)
 - [1. 系统准备](#1-系统准备)
-- [2. PostgreSQL 16（两种方式二选一）](#2-postgresql-16两种方式二选一)
+- [2. PostgreSQL 18（两种方式二选一）](#2-postgresql-18两种方式二选一)
 - [3. Redis 7（可选；启用时同样两种方式二选一）](#3-redis-7可选启用时同样两种方式二选一)
 - [4. 编译安装二进制](#4-编译安装二进制)
 - [5. systemd 单元](#5-systemd-单元)
@@ -27,7 +27,7 @@
 | | 路径 A：systemd 裸机 | 路径 B：Docker Compose |
 |---|---|---|
 | 适用 | 长期自托管、想精细控制资源与安全加固 | 快速验证、迁移服务器 |
-| 组件 | PG16 裸装 + 二进制 + Nginx（宿主机） | postgres + redis + app 三个容器 + 宿主机 Nginx |
+| 组件 | PG18 裸装 + 二进制 + Nginx（宿主机） | postgres + redis + app 三个容器 + 宿主机 Nginx |
 | Redis | **默认不装**（进程内降级，功能等价） | compose 自带 redis，默认启用 |
 | 升级 | 替换二进制 + `systemctl restart` | `docker compose up -d --build` |
 | 资源 | 约 200–350MB 常驻 | 约 450–700MB 常驻（多一层容器开销） |
@@ -55,7 +55,10 @@ timedatectl set-ntp true && timedatectl status | grep -E 'synchronized|NTP'
 
 ---
 
-## 2. PostgreSQL 16（两种方式二选一）
+## 2. PostgreSQL 18（两种方式二选一）
+
+> 版本说明：当前最新稳定大版本为 **PostgreSQL 18**（18.x 小版本滚动更新，如 18.6）。
+> 项目迁移 SQL 未使用任何版本特有特性，**16 / 17 / 18 均可运行**，下文以 18 为例。
 
 ### 2.1 方式 A：宿主机安装（apt + systemd，资源占用最低）
 
@@ -65,7 +68,7 @@ install -d /usr/share/postgresql-common/pgdg && curl -fsSL https://www.postgresq
   | gpg --dearmor -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg
 echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" \
   > /etc/apt/sources.list.d/pgdg.list
-apt update && apt -y install postgresql-16
+apt update && apt -y install postgresql-18   # PGDG 源同时提供 16/17/18，按需选择
 
 # 建角色与库（最小权限：不授 SUPERUSER / CREATEDB）
 sudo -u postgres psql <<'SQL'
@@ -78,13 +81,13 @@ SQL
 ```
 
 小机调优参数（2C4G）见 [deploy/postgres-tuning.conf](../deploy/postgres-tuning.conf)，
-复制到 `/etc/postgresql/16/main/conf.d/meddesk.conf` 后 `systemctl restart postgresql`。
+复制到 `/etc/postgresql/18/main/conf.d/meddesk.conf` 后 `systemctl restart postgresql`。
 PG 默认只监听 `127.0.0.1`，应用与库同机时**不要**开放 `listen_addresses = '*'`。
 
 ### 2.2 方式 B：docker compose（不动系统包，升级/迁移方便）
 
 配置文件：[deploy/docker-compose.middleware.yml](../deploy/docker-compose.middleware.yml)——
-只起 **PG16 + Redis7** 两个容器（应用跑在宿主机），口令/端口全部走环境变量，必填缺失时直接拒绝启动。
+只起 **PG18 + Redis7** 两个容器（应用跑在宿主机），口令/端口全部走环境变量，必填缺失时直接拒绝启动。
 
 ```bash
 cd /opt/meddesk/compose        # 建议目录；也可直接在 deploy/ 下执行

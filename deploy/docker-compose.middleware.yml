@@ -1,5 +1,5 @@
 # ==============================================================================
-# MedDesk —— PostgreSQL 16 + Redis 7 中间件专用（应用跑在宿主机）
+# MedDesk —— PostgreSQL 18 + Redis 7 中间件专用（应用跑在宿主机）
 # 用途：不想在宿主机 apt 安装 PG/Redis，但应用二进制仍以 systemd 方式运行的场景。
 # 全部可变项走环境变量插值（读取同目录 .env 或 shell export）；
 # 带 :? 的变量**必须提供**，缺失时 compose 直接报错拒绝启动（防呆）。
@@ -9,7 +9,7 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     container_name: meddesk-pg
     restart: unless-stopped
     environment:
