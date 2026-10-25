@@ -160,7 +160,7 @@ RUN set -eux; \
     # 非 root 运行（uid/gid 固定，便于宿主机给挂载卷 chown）
     groupadd -g 10001 meddesk; \
     useradd -u 10001 -g meddesk -M -s /usr/sbin/nologin meddesk; \
-    mkdir -p /var/lib/meddesk/uploads /var/log/meddesk; \
+    mkdir -p /var/lib/meddesk/data /var/log/meddesk; \
     chown -R meddesk:meddesk /var/lib/meddesk /var/log/meddesk
 
 WORKDIR /var/lib/meddesk
@@ -172,7 +172,7 @@ COPY --from=fonts /opt/meddesk/fonts /opt/meddesk/fonts
 
 ENV MEDDESK_ENV=prod \
     MEDDESK_HTTP_ADDR=:8080 \
-    MEDDESK_UPLOAD_DIR=/var/lib/meddesk/uploads \
+    MEDDESK_UPLOAD_DIR=/var/lib/meddesk/data \
     MEDDESK_PDF_FONT_PATH=/opt/meddesk/fonts/NotoSansSC-Regular.ttf \
     MEDDESK_LOG_FORMAT=json \
     TZ=Asia/Shanghai
@@ -193,7 +193,7 @@ ENTRYPOINT ["/usr/local/bin/meddesk"]
 #   COPY --from=fonts /opt/meddesk/fonts /opt/meddesk/fonts
 #   COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 #   ENV MEDDESK_ENV=prod MEDDESK_HTTP_ADDR=:8080 \
-#       MEDDESK_UPLOAD_DIR=/var/lib/meddesk/uploads \
+#       MEDDESK_UPLOAD_DIR=/var/lib/meddesk/data \
 #       MEDDESK_PDF_FONT_PATH=/opt/meddesk/fonts/NotoSansSC-Regular.ttf \
 #       MEDDESK_LOG_FORMAT=json TZ=Asia/Shanghai
 #   USER 65532:65532
@@ -203,6 +203,6 @@ ENTRYPOINT ["/usr/local/bin/meddesk"]
 # 使用 distroless 时必须同步处理三件事：
 #   1) 去掉 deploy/docker-compose.yml 里 app 的 healthcheck（无 shell），
 #      改用 depends_on + 宿主机侧 curl 探测；
-#   2) /var/lib/meddesk/uploads 需宿主机预先 chown 65532:65532（容器内无法 useradd/chown）；
+#   2) /var/lib/meddesk/data 需宿主机预先 chown 65532:65532（容器内无法 useradd/chown）；
 #   3) 排障时无法 docker exec -it sh，只能靠日志与应用自身的 /api/v1/ready。
 # ------------------------------------------------------------------------------
