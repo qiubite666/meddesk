@@ -38,3 +38,6 @@ coverage.html
 
 # ---- 前端 ----
 web/assets/fonts/local/
+
+.release-hdr
+.release-token
