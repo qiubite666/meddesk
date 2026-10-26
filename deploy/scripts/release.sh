@@ -20,7 +20,7 @@
 
 set -Eeuo pipefail
 
-VER="${1:?用法: release.sh <版本号>（例 v0.1.5）} [--skip-tests]"
+VER="${1:?用法: release.sh <版本号>（例 v0.1.5）}"
 case "$VER" in v[0-9]*) ;; *) echo "错误：版本号必须以 v 开头（如 v0.1.5）"; exit 1 ;; esac
 SKIP_TESTS=0; [[ "${2:-}" == "--skip-tests" ]] && SKIP_TESTS=1
 
