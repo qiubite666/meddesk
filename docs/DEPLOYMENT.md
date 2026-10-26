@@ -302,7 +302,7 @@ curl -fsS https://med.example.com/api/v1/auth/register \
 install -m 0750 deploy/scripts/backup.sh /usr/local/bin/meddesk-backup.sh
 crontab -e
 # 每日 03:30 备份，保留 30 天
-30 3 * * * /usr/local/bin/meddesk-backup.sh >> /home/ops/service/meddesk/backup.log 2>&1
+30 3 * * * /usr/local/bin/meddesk-backup.sh >> /var/backups/meddesk/backup.log 2>&1   # 目录由脚本自建
 ```
 
 异地容灾建议：crontab 里追加一步 `rclone copy /var/backups/meddesk remote:meddesk-backup`（或 rsync 到另一台机）。
