@@ -9,14 +9,29 @@
   var memoryDEK = null;
   var refreshPromise = null;
 
+  // 「保持登录」：refresh token 与 DEK 双写 localStorage——
+  // 添加到主屏（PWA）后重新打开时自动恢复登录态，无需重新登录/解锁。
+  // 安全边界：材料仅存本机（依赖设备锁屏保护），登出/401 时彻底清除。
   function storageGet(key) {
-    try { return window.sessionStorage.getItem(PREFIX + key); } catch (_) { return null; }
+    try {
+      if (key === 'refresh' || key === 'dek') {
+        var v = window.sessionStorage.getItem(PREFIX + key);
+        if (v != null) return v;
+        return window.localStorage.getItem(PREFIX + key);
+      }
+      return window.sessionStorage.getItem(PREFIX + key);
+    } catch (_) { return null; }
   }
 
   function storageSet(key, value) {
     try {
-      if (value == null) window.sessionStorage.removeItem(PREFIX + key);
-      else window.sessionStorage.setItem(PREFIX + key, String(value));
+      if (value == null) {
+        window.sessionStorage.removeItem(PREFIX + key);
+        if (key === 'refresh' || key === 'dek') window.localStorage.removeItem(PREFIX + key);
+        return;
+      }
+      window.sessionStorage.setItem(PREFIX + key, String(value));
+      if (key === 'refresh' || key === 'dek') window.localStorage.setItem(PREFIX + key, String(value));
     } catch (_) {
       // 隐私模式禁用存储时，会话仅维持在当前调用链中。
     }
@@ -286,6 +301,10 @@
     clearSession: clearSession,
     getDEK: getDEK,
     setDEK: setDEK,
-    hasSession: function () { return Boolean(storageGet('access') && storageGet('userId')); }
+    hasSession: function () {
+      if (Boolean(storageGet('access') && storageGet('userId'))) return true;
+      // PWA 重开场景：sessionStorage 已空，但本机持久化了 refresh + DEK → 可静默恢复
+      return Boolean(storageGet('refresh') && storageGet('dek'));
+    }
   };
 })(window);

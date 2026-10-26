@@ -73,3 +73,16 @@ self.addEventListener('fetch', function (event) {
     });
   }));
 });
+
+
+// 点击通知：聚焦已打开的应用窗口，否则新开一个（移动端 PWA 点击提醒直达页面）。
+self.addEventListener('notificationclick', function (event) {
+  event.notification.close();
+  event.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(function (list) {
+    for (var i = 0; i < list.length; i++) {
+      var client = list[i];
+      if ('focus' in client) return client.focus();
+    }
+    return self.clients.openWindow('/');
+  }));
+});
