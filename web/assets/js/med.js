@@ -727,7 +727,7 @@
           (m.med.stock != null ? '<div class="muted" style="font-size:12px">库存 ' + esc(m.med.stock) + ' ' + esc(m.med.dosageUnit || '') +
             (m.med.refillThreshold != null ? ' · 阈值 ' + esc(m.med.refillThreshold) : '') + '</div>' : '') +
           '</div>' +
-          '<div class="md-med__acts" style="display:flex;flex-direction:column;gap:6px">' +
+          '<div class="md-med__acts" style="display:flex;align-items:center;gap:4px">' +
           '<button class="btn-icon" type="button" data-act="med-copy" data-id="' + esc(m.med.id) + '" aria-label="复制">' + ICON.copy + '</button>' +
           '<button class="btn-icon" type="button" data-act="med-del" data-id="' + esc(m.med.id) + '" aria-label="删除">' + ICON.trash + '</button>' +
           '</div>' +
