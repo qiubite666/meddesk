@@ -14,7 +14,15 @@
  *   /api/v1/webdav/delete   {baseURL,user,pass,path}            → {ok}
  *   /api/v1/webdav/upload   multipart：config(JSON 字符串) + file → {ok,path}
  *   /api/v1/webdav/download {baseURL,user,pass,path}            → 文件二进制流
- *   path 为相对路径（如 docs/a.txt），空字符串表示根目录。
+ *   path 为相对 baseURL 的路径（如 docs/a.txt），空串或 / 表示根目录；
+ *   list 返回的 item.path 同样是相对根目录的完整路径。
+ *
+ * 后端约定（与 internal/webdav/webdav.go 对齐）：
+ *   user 必填、pass 可空串；baseURL 必须 https 且不得写成 https://账号:密码@域名/ 的形式；
+ *   items 恒为数组；mkdir 幂等、upload 自动创建父目录（无需先 mkdir）；
+ *   错误信封为 {code,message}，只读 code 分支（bad_request / unauthorized / not_found /
+ *   conflict / payload_too_large / unavailable），不解析 message；
+ *   远程请求超时 15s、单文件下载上限 200MB、单次列目录上限 2000 项（超限为 payload_too_large）。
  *
  * 凭据安全约定（改动时务必保持）：
  *   1. 配置 {baseURL,user,pass} 永不以明文写入 localStorage / sessionStorage；
@@ -113,6 +121,21 @@
   function joinPath(base, name) {
     if (!isSafeName(name)) return null;
     return base ? base + '/' + name : name;
+  }
+
+  // list 返回的 item.path 是「相对根目录的规范化路径」（无前导斜杠、目录无尾斜杠），
+  // 可直接回填给 download/delete/mkdir（文件名含空格 / 中文 / 特殊字符时的 URL 转义由后端负责）。
+  // 这里仍做一次兜底校验：带前导斜杠、含反斜杠或含 . / .. 段时退回本地拼接的 fallback，
+  // 保证任何异常数据都不会越出根目录。
+  function itemPath(value, fallback) {
+    var text = String(value == null ? '' : value);
+    if (!text || /^\//.test(text) || text.indexOf('\\') >= 0) return fallback || null;
+    var segments = text.split('/');
+    for (var index = 0; index < segments.length; index += 1) {
+      var segment = segments[index];
+      if (!segment || segment === '.' || segment === '..') return fallback || null;
+    }
+    return text;
   }
 
   function parentPath(path) {
@@ -435,6 +458,17 @@
       });
     }
 
+    // 后端约束：baseURL 必须 https（http 会被 400 bad_request 拒绝）、地址中不得内嵌凭据、
+    // 账号必填而密码可为空。这里先做前端校验，避免每次都靠错误码才发现。
+    function validateInput() {
+      var cfg = currentInputConfig();
+      if (!cfg) return { error: '请填写服务器地址（形如 ' + PLACEHOLDER_URL + '）' };
+      if (!/^https:\/\//i.test(cfg.baseURL)) return { error: '服务器地址必须以 https:// 开头（服务端不接受 http 地址）' };
+      if (cfg.baseURL.indexOf('@') >= 0) return { error: '地址中不要内嵌账号密码，请分别填写下方账号与密码' };
+      if (!cfg.user) return { error: '请填写账号：服务端要求账号必填（无密码的服务可留空密码）' };
+      return { cfg: cfg };
+    }
+
     function refreshStatus() {
       if (memoryOnly) {
         setStatus('当前无法加密保存，凭据仅本次会话有效：刷新页面后需要重新填写。', 'warn');
@@ -449,17 +483,13 @@
 
     saveButton.addEventListener('click', function () {
       tap();
-      var cfg = currentInputConfig();
-      if (!cfg) {
-        setStatus('请填写服务器地址（形如 https://你的域名/路径/）', 'error');
-        return;
-      }
-      if (!/^https?:\/\//i.test(cfg.baseURL)) {
-        setStatus('服务器地址需以 http:// 或 https:// 开头', 'error');
+      var check = validateInput();
+      if (check.error) {
+        setStatus(check.error, 'error');
         return;
       }
       setBusy(true, '正在保存…');
-      saveConfig(cfg).then(function (result) {
+      saveConfig(check.cfg).then(function (result) {
         setBusy(false, '');
         if (result && result.persisted) {
           toast('已加密保存', 'success');
@@ -477,17 +507,13 @@
 
     testButton.addEventListener('click', function () {
       tap();
-      var cfg = currentInputConfig();
-      if (!cfg) {
-        setStatus('请先填写服务器地址', 'error');
-        return;
-      }
-      if (!/^https?:\/\//i.test(cfg.baseURL)) {
-        setStatus('服务器地址需以 http:// 或 https:// 开头', 'error');
+      var check = validateInput();
+      if (check.error) {
+        setStatus(check.error, 'error');
         return;
       }
       setBusy(true, '正在测试连接…');
-      apiTest(cfg).then(function (payload) {
+      apiTest(check.cfg).then(function (payload) {
         setBusy(false, '');
         var exists = !payload || payload.exists !== false;
         if (!exists) {
@@ -547,11 +573,12 @@
         MD.ui.el('div', { class: 'field' }, [
           MD.ui.el('label', { class: 'muted', style: { fontSize: '13px', fontWeight: '600' }, text: '服务器地址' }),
           baseInput,
-          MD.ui.el('span', { class: 'muted', style: { fontSize: '12px' }, text: '形如 ' + PLACEHOLDER_URL + '（此处为占位示例）' })
+          MD.ui.el('span', { class: 'muted', style: { fontSize: '12px' }, text: '形如 ' + PLACEHOLDER_URL + '（占位示例）；需为 https 地址，账号密码不要写在地址里' })
         ]),
         MD.ui.el('div', { class: 'field' }, [
           MD.ui.el('label', { class: 'muted', style: { fontSize: '13px', fontWeight: '600' }, text: '账号' }),
-          userInput
+          userInput,
+          MD.ui.el('span', { class: 'muted', style: { fontSize: '12px' }, text: '账号必填；只需用户名/令牌的服务可将密码留空' })
         ]),
         MD.ui.el('div', { class: 'field' }, [
           MD.ui.el('label', { class: 'muted', style: { fontSize: '13px', fontWeight: '600' }, text: '密码' }),
@@ -583,6 +610,7 @@
     }).map(function (item) {
       return {
         name: String(item.name),
+        path: String(item.path == null ? '' : item.path),
         isDir: Boolean(item.isDir),
         size: Number(item.size) || 0,
         modified: item.modified || ''
@@ -736,7 +764,8 @@
     }
 
     function rowFor(item) {
-      var target = joinPath(state.path, item.name);
+      // 优先用后端给的 item.path，缺失或不合法时退回「当前目录 + 名称」的本地拼接。
+      var target = itemPath(item.path, joinPath(state.path, item.name));
       var meta = humanTime(item.modified);
       var main = MD.ui.el('button', {
         class: 'wd-row__main',
