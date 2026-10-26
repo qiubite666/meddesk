@@ -569,9 +569,10 @@
       //   a) 带 undoneAt 的 pending 完全不参与统计（A7 引擎无法识别 undoneAt，会把它判成漏服，故直接剔除）；
       //   b) 无 undoneAt 且已过宽限期的 pending 归一为 missed（漏服防线保留）。
       var list = [];
+      var revoked = 0; // 被撤销（不计入统计）的记录数，用于界面说明
       intakes.forEach(function (i) {
         if (i.status === 'pending') {
-          if (i.undoneAt) return; // 显式撤销：不计入分母，直到重新打卡
+          if (i.undoneAt) { revoked++; return; } // 显式撤销：不计入，直到重新打卡
           if ((i.scheduledFor || 0) + MISS_GRACE_MS < now) {
             list.push(Object.assign({}, i, { status: 'missed' }));
             return;
@@ -580,23 +581,37 @@
         list.push(i);
       });
       var r = MD.sched.adherence({ intakes: list, fromMs: fromMs, toMs: toMs }) || {};
+      var taken = r.taken || 0, skipped = r.skipped || 0, missed = r.missed || 0;
+      // 依从率口径：taken / (taken + missed)。
+      // 「跳过」是用户主动决策（如医嘱调整、暂不服），不计入依从率分母，另行展示，
+      // 否则一次主动跳过就会把依从率拉成 0%（界面全红），与医学/使用直觉都不符。
+      // 真正的漏服（missed，忘记吃药）才影响依从率。
+      var denom = taken + missed;
       return {
-        total: r.total || 0, taken: r.taken || 0, skipped: r.skipped || 0,
-        missed: r.missed || 0,
-        // rate === null 表示区间内没有任何完结打卡（分母为 0）：
-        // 必须保留 null 交给渲染层显示「空白/—」，强转 0 会被误画成红色 0%。
-        rate: (r.rate === null || r.rate === undefined) ? null : r.rate,
+        total: taken + skipped + missed, // 展示口径：所有完结记录
+        taken: taken,
+        skipped: skipped,
+        missed: missed,
+        revoked: revoked,
+        // rate === null 表示区间内没有任何「已服/漏服」记录（分母为 0）：
+        // 保留 null 交给渲染层显示「—/空白」，强转 0 会被误画成红色 0%。
+        rate: denom === 0 ? null : Math.round((taken / denom) * 10000) / 10000,
         streakDays: r.streakDays || 0
       };
     }
     // A7 未就绪时退化为按记录统计（不重复实现排程算法）
-    var t = 0, k = 0, s = 0, m = 0;
+    var k = 0, s = 0, m = 0, rv = 0;
     intakes.forEach(function (i) {
-      t++;
+      if (i.status === 'pending' && i.undoneAt) { rv++; return; }
       var st = normalizeStatus(i);
       if (st === 'taken') k++; else if (st === 'skipped') s++; else if (st === 'missed') m++;
     });
-    return { total: t, taken: k, skipped: s, missed: m, rate: t ? k / t : null, streakDays: 0 };
+    // 与 A7 分支同口径：跳过不计入依从率分母
+    var d2 = k + m;
+    return {
+      total: k + s + m, taken: k, skipped: s, missed: m, revoked: rv,
+      rate: d2 === 0 ? null : Math.round((k / d2) * 10000) / 10000, streakDays: 0
+    };
   }
 
   /** 归一化状态：计划时间已过 1 小时仍 pending → 漏服 */
@@ -841,6 +856,8 @@
       '<span>总次数 ' + a.total + '</span><span>已服 ' + a.taken + '</span>' +
       '<span>跳过 ' + a.skipped + '</span><span>漏服 ' + a.missed + '</span>' +
       '</div>' +
+      ((a.revoked || 0) > 0 ? '<div class="muted" style="font-size:11px;margin-top:2px">另有 ' + a.revoked + ' 条已撤销记录不计入</div>' : '') +
+      '<div class="muted" style="font-size:11px;margin-top:2px">依从率 = 已服 ÷（已服 + 漏服），跳过不计入</div>' +
       '<div class="muted" style="font-size:12px;margin-top:4px">连续达标 ' + (a.streakDays || 0) + ' 天</div>' +
       '</div>';
   }
