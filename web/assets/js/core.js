@@ -11,6 +11,9 @@
   }
 
   MD.version = '0.1.0';
+  // 构建指纹：由服务端在 index.html 中注入（window.MD_BUILD_ID），
+  // 用于在界面上展示「前端实际加载的构建」，便于确认发版后已拿到新资源。
+  MD.buildID = (typeof window !== 'undefined' && window.MD_BUILD_ID) ? window.MD_BUILD_ID : 'dev';
 
   MD.bus = {
     on: function (evt, fn) {

@@ -175,6 +175,9 @@ func mountSPA(r *gin.Engine, cfg *config.Config, log *slog.Logger) {
 		_, _ = buf.ReadFrom(f)
 		_ = f.Close()
 		indexHTML = injectRef(buf.Bytes())
+		// 同时把构建指纹暴露给前端（设置页/侧栏显示，便于用户确认已加载新版）
+		indexHTML = bytes.Replace(indexHTML, []byte("<head>"),
+			[]byte("<head><script>window.MD_BUILD_ID=\""+buildID+"\";</script>"), 1)
 	}
 	if f, err := root.Open("sw.js"); err == nil {
 		buf := new(bytes.Buffer)

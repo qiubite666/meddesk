@@ -24,7 +24,7 @@
     var accountButton = doc.getElementById('btn-account');
 
     brand.appendChild(MD.ui.el('div', { class: 'brand-lockup' }, [MD.icon('pill'), MD.ui.el('span', { text: 'MedDesk 药事台' })]));
-    sidebarFoot.textContent = '安全、离线优先 · v' + MD.version;
+    sidebarFoot.textContent = '安全、离线优先 · v' + MD.version + ' · ' + String(MD.buildID || 'dev').slice(0, 8);
     menuButton.appendChild(MD.icon('menu'));
     accountButton.appendChild(MD.icon('user'));
 
@@ -324,7 +324,7 @@
     ]);
     var privacyCard = MD.ui.el('section', { class: 'card stack' }, [
       MD.ui.el('h2', { class: 'section-title', text: '关于与隐私' }),
-      settingRow('MedDesk 药事台', '版本 ' + MD.version, MD.icon('pill')),
+      settingRow('MedDesk 药事台', '版本 ' + MD.version + ' · 构建 ' + String(MD.buildID || 'dev').slice(0, 8), MD.icon('pill')),
       MD.ui.el('p', { class: 'muted', text: '业务数据采用端到端加密。加密和解密均在当前设备完成，服务端只见密文，无法读取用药记录。JSON 备份为明文，请只保存在可信位置。' })
     ]);
 
