@@ -10,7 +10,9 @@
     return events[evt];
   }
 
-  MD.version = '0.1.0';
+  // 前端版本与 GitHub Release 一一对应：由服务端构建时注入（ldflags → index.html）。
+  // 开发模式（无注入）时回退到占位版本。
+  MD.version = (typeof window !== 'undefined' && window.MD_VERSION) ? window.MD_VERSION : 'dev';
   // 构建指纹：由服务端在 index.html 中注入（window.MD_BUILD_ID），
   // 用于在界面上展示「前端实际加载的构建」，便于确认发版后已拿到新资源。
   MD.buildID = (typeof window !== 'undefined' && window.MD_BUILD_ID) ? window.MD_BUILD_ID : 'dev';
