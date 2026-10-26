@@ -18,6 +18,7 @@
   var HOME_ID = 'tools';            // 工具箱首页路由 id
   var GROUP = '工具箱';             // 侧栏分组名
   var PREFIX = HOME_ID + '/';       // 子路由前缀
+  var CAT_PREFIX = PREFIX + 'cat/'; // 分类页路由前缀（tools/cat/<分类名>）
   var DEFAULT_CATEGORY = '其他';    // 未声明分类的工具归入此类
 
   // 结果卡片语气 → CSS 变量（复用 app.css 已有变量，不新增全局类）
@@ -37,10 +38,20 @@
     if (MD.router && typeof MD.router.go === 'function') MD.router.go(id);
   }
 
-  // 已注册的工具子路由（按 order、标题排序后的副本）
+  // 已注册的工具子路由（按 order、标题排序后的副本）。
+  // 注意：工具 parent 指向「分类页路由」，因此不能按 parent 过滤，改为按 id 前缀，
+  // 并排除分类页自身（tools/cat/*）。
   function subRoutes() {
     if (!MD.router || typeof MD.router.list !== 'function') return [];
-    return MD.router.list({ parent: HOME_ID });
+    return MD.router.list().filter(function (route) {
+      var id = String(route && route.id || '');
+      return id.indexOf(PREFIX) === 0 && id.indexOf(CAT_PREFIX) !== 0;
+    });
+  }
+
+  // 分类页路由 id：'计算工具' → 'tools/cat/计算工具'
+  function categoryRouteId(category) {
+    return CAT_PREFIX + String(category || DEFAULT_CATEGORY);
   }
 
   // 'tools/unit-price' → 'unit-price'
@@ -343,7 +354,8 @@
     }, [linkButton(GROUP, function () { go(HOME_ID); })]);
     if (category) {
       crumbs.appendChild(muted('/'));
-      crumbs.appendChild(muted(category));
+      // 中间层级可点击：返回该分类的工具列表页
+      crumbs.appendChild(linkButton(category, function () { go(categoryRouteId(category)); }));
     }
     if (title) {
       crumbs.appendChild(muted('/'));
@@ -434,11 +446,80 @@
     });
   }
 
+  /* ============================ 7.5 分类页 ============================ */
+
+  /**
+   * 确保某分类的分类页路由存在（侧栏「工具箱 › 计算工具」这一级）。
+   * 该路由自身可点击，进入后列出该分类下全部工具。
+   * @param {string} category 分类名
+   * @param {number} [minOrder] 该分类内最小 order，用于稳定侧栏排序
+   */
+  function ensureCategoryRoute(category, minOrder) {
+    var name = category || DEFAULT_CATEGORY;
+    var id = categoryRouteId(name);
+    var existing = null;
+    MD.router.list().forEach(function (route) { if (route.id === id) existing = route; });
+    if (existing) {
+      // 后注册的工具 order 可能更小，同步下调分类页 order，避免侧栏顺序漂移
+      if (minOrder != null && Number(existing.order) > Number(minOrder)) existing.order = Number(minOrder);
+      return existing;
+    }
+    return MD.router.register({
+      id: id,
+      title: name,
+      subtitle: '选择工具',
+      icon: 'toolbox',
+      group: GROUP,
+      parent: HOME_ID,
+      hidden: false,
+      // 不设 category：分类页是工具箱下的直接条目，避免被再次分块
+      order: minOrder == null ? 10 : Number(minOrder),
+      render: function (view) { renderCategory(view, name); }
+    });
+  }
+
+  // 分类页：面包屑 + 标题 + 该分类下工具卡片
+  function renderCategory(view, category) {
+    var group = groupTools(subRoutes()).filter(function (item) { return item.name === category; })[0];
+    var list = group ? group.items : [];
+
+    view.appendChild(el('nav', {
+      class: 'row row--wrap',
+      'aria-label': '面包屑导航',
+      style: { gap: '8px', fontSize: '13px', marginBottom: '14px' }
+    }, [linkButton(GROUP, function () { go(HOME_ID); }), muted('/'), muted(category)]));
+
+    view.appendChild(el('div', { class: 'row', style: { gap: '14px', marginBottom: '22px' } }, [
+      el('span', { style: { color: 'var(--brand)', lineHeight: '0' } }, MD.icon('toolbox')),
+      el('div', { style: { display: 'flex', flexDirection: 'column', gap: '5px' } }, [
+        el('div', { text: category, style: { fontSize: '19px', fontWeight: '800', lineHeight: '1.25' } }),
+        muted('共 ' + list.length + ' 个工具，全部在本地计算', '13px')
+      ])
+    ]));
+
+    if (!list.length) {
+      view.appendChild(el('div', { class: 'card empty' }, [
+        MD.icon('toolbox'),
+        el('strong', { text: '该分类暂无工具' }),
+        el('p', { class: 'muted', text: '工具上线后会自动出现在这里。' })
+      ]));
+      return;
+    }
+
+    var grid = el('div', { class: 'grid' });
+    list.forEach(function (route) { grid.appendChild(toolCard(route)); });
+    view.appendChild(grid);
+  }
+
   /* ============================ 8. 注册子工具 ============================ */
 
   function register(spec) {
     if (!spec || !spec.id || typeof spec.render !== 'function') throw new TypeError('工具配置无效');
     if (!MD.router || typeof MD.router.register !== 'function') throw new Error('路由未就绪，无法注册工具');
+
+    var category = spec.category || DEFAULT_CATEGORY;
+    // 先确保分类页存在：工具挂在分类页之下，侧栏只露出「计算工具」这一级
+    ensureCategoryRoute(category, spec.order);
 
     var route = MD.router.register({
       id: PREFIX + spec.id,
@@ -446,16 +527,19 @@
       subtitle: spec.subtitle || '',
       icon: spec.icon || 'toolbox',
       group: GROUP,
-      parent: HOME_ID,
-      // 工具在侧栏可见：挂在「工具箱 › <分类>」下，作为二级分类条目
-      hidden: false,
-      category: spec.category || DEFAULT_CATEGORY,
+      parent: categoryRouteId(category),
+      // 具体工具不进侧栏：从分类页进入，避免侧栏被一串工具名占满
+      hidden: true,
+      category: category,
       order: spec.order,
       render: spec.render
     });
 
-    // 首页已打开时新注册的工具应立即出现（工具脚本晚于本文件加载）
-    if (typeof MD.router.current === 'function' && MD.router.current() === HOME_ID) go(HOME_ID);
+    // 当前停在工具箱首页或该分类页时，注册新工具需重渲染以刷新入口
+    if (typeof MD.router.current === 'function') {
+      var current = MD.router.current();
+      if (current === HOME_ID || current === categoryRouteId(category)) go(current);
+    }
 
     return route;
   }

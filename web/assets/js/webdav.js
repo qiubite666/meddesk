@@ -573,7 +573,7 @@
         MD.ui.el('div', { class: 'field' }, [
           MD.ui.el('label', { class: 'muted', style: { fontSize: '13px', fontWeight: '600' }, text: '服务器地址' }),
           baseInput,
-          MD.ui.el('span', { class: 'muted', style: { fontSize: '12px' }, text: '形如 ' + PLACEHOLDER_URL + '（占位示例）；需为 https 地址，账号密码不要写在地址里' })
+          MD.ui.el('span', { class: 'muted', style: { fontSize: '12px' }, text: '形如 ' + PLACEHOLDER_URL + '（占位示例）；必须是 https 地址，账号密码不要写在地址里' })
         ]),
         MD.ui.el('div', { class: 'field' }, [
           MD.ui.el('label', { class: 'muted', style: { fontSize: '13px', fontWeight: '600' }, text: '账号' }),

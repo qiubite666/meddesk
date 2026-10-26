@@ -331,6 +331,14 @@
   var activeId = null;
   var routerStarted = false;
 
+  // hash 中的路由 id 可能被浏览器做百分号编码（分类名含中文），统一解码后再查表，
+  // 否则 #/tools/cat/计算工具 会因 id 不匹配而回退到首个路由。
+  function hashRouteId() {
+    var raw = (window.location.hash || '').replace(/^#\/?/, '');
+    if (!raw) return '';
+    try { return decodeURIComponent(raw); } catch (_) { return raw; }
+  }
+
   function sortedRoutes() {
     return routes.slice().sort(function (a, b) {
       return (Number(a.order) || 0) - (Number(b.order) || 0) || a.title.localeCompare(b.title, 'zh-CN');
@@ -514,10 +522,10 @@
       routerStarted = true;
       renderNavigation();
       window.addEventListener('hashchange', function () {
-        var id = (window.location.hash || '').replace(/^#\/?/, '');
+        var id = hashRouteId();
         if (id && id !== activeId) MD.router.go(id, { fromHash: true });
       });
-      var hashId = (window.location.hash || '').replace(/^#\/?/, '');
+      var hashId = hashRouteId();
       var initial = routeMap[hashId] && !routeMap[hashId].comingSoon ? hashId : null;
       if (!initial) {
         var first = sortedRoutes().filter(function (route) { return !route.comingSoon && !route.hidden; })[0];
