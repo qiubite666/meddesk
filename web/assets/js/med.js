@@ -1656,6 +1656,8 @@
       doSnooze(occKey, minutes);
     });
     MD.bus.on('data:changed', function () { refreshAll(); });
+    // 提醒触发 → 页面内横幅（系统通知不可用时的兜底，也作为系统通知之外的可见性保障）
+    MD.bus.on('remind:fire', function (p) { if (p && p.dose) { showDoseBanner(p.dose); } });
     // 契约 6.5 的 MD.remind.onFire(cb)：页面内提示提醒已触发（不在这里 refresh，避免与
     // pushReminders → remind.schedule 形成重入）。
     if (MD.remind && typeof MD.remind.onFire === 'function') {
@@ -1699,6 +1701,85 @@
     var box = S.root && S.root.querySelector('#md-exp-custom');
     if (!box) return;
     box.hidden = (e.target.value !== 'custom');
+  }
+
+  /**
+   * 页面内提醒横幅（系统通知不可用时的兜底）：
+   * 小米/华为等自带浏览器没有 Notification API，系统通知无法弹出；
+   * 前台打开页面时用置顶横幅 + 振动保证「到点就能看见」。
+   * 关键提醒不自动消失，普通提醒 10 秒后自动收起。
+   */
+  function showDoseBanner(dose) {
+    if (!dose || !dose.occKey) return;
+    var host = document.getElementById('md-alerts');
+    if (!host) {
+      host = document.createElement('div');
+      host.id = 'md-alerts';
+      host.style.cssText = 'position:fixed;left:0;right:0;top:0;z-index:99990;display:flex;flex-direction:column;gap:8px;padding:calc(10px + env(safe-area-inset-top, 0px)) 10px 10px;pointer-events:none';
+      (document.body || document.documentElement).appendChild(host);
+    }
+    // 同一 occurrence 已在屏则不重复弹
+    for (var i = 0; i < host.children.length; i++) {
+      if (host.children[i].getAttribute('data-occ') === dose.occKey) return;
+    }
+
+    var el = document.createElement('div');
+    el.setAttribute('data-occ', dose.occKey);
+    el.style.cssText = 'pointer-events:auto;background:#fff;color:#111;border-left:4px solid ' +
+      (dose.critical ? '#e5484d' : '#0e9f6e') + ';border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.18);padding:12px 14px;display:flex;flex-direction:column;gap:8px';
+    el.innerHTML =
+      '<div style="display:flex;align-items:center;gap:8px">' +
+      '<strong style="font-size:15px">' + (dose.critical ? '重要用药提醒' : '用药提醒') + '</strong>' +
+      '<span style="font-size:12px;color:#666">' + esc(fmtTime(dose.timeMs)) + '</span>' +
+      '<span style="flex:1"></span>' +
+      '<button type="button" data-a="close" aria-label="关闭" style="border:0;background:transparent;font-size:20px;line-height:1;color:#888;cursor:pointer;padding:0 4px">×</button>' +
+      '</div>' +
+      '<div style="font-size:14px">' + esc(dose.medName || '') + ' · ' + esc(dose.dosageText || '') +
+      (dose.strength ? ' ' + esc(dose.strength) : '') + '</div>' +
+      '<div style="display:flex;gap:8px">' +
+      '<button class="btn btn-primary" type="button" data-a="taken" style="flex:1;min-height:44px">已服用</button>' +
+      '<button class="btn btn-ghost" type="button" data-a="skip" style="flex:1;min-height:44px">跳过</button>' +
+      '<button class="btn btn-ghost" type="button" data-a="snooze" style="flex:1;min-height:44px">稍后10分</button>' +
+      '</div>';
+    host.appendChild(el);
+
+    var remove = function () { try { if (el.parentNode) el.parentNode.removeChild(el); } catch (e) { /* 忽略 */ } };
+    var meta = {
+      medicationId: dose.medId, profileId: dose.profileId,
+      scheduledFor: dose.timeMs, doseText: dose.dosageText
+    };
+
+    el.addEventListener('click', function (ev) {
+      var btn = ev.target && ev.target.closest ? ev.target.closest('[data-a]') : null;
+      if (!btn) return;
+      var a = btn.getAttribute('data-a');
+      if (a === 'close') { remove(); return; }
+      if (a === 'taken') {
+        applyIntake(dose.occKey, 'taken', meta).then(function () {
+          remove(); toast('已记录服用', 'success'); refreshAll();
+        }).catch(function (e) { toast('操作失败：' + msgOf(e), 'error'); });
+        return;
+      }
+      if (a === 'skip') {
+        applyIntake(dose.occKey, 'skipped', meta).then(function () {
+          remove(); toast('已标记跳过', 'success'); refreshAll();
+        }).catch(function (e) { toast('操作失败：' + msgOf(e), 'error'); });
+        return;
+      }
+      if (a === 'snooze') {
+        var until = nowMs() + 10 * 60000;
+        if (MD.remind && typeof MD.remind.snooze === 'function') {
+          try { MD.remind.snooze(dose.occKey, 10); } catch (e) { /* 忽略 */ }
+        }
+        applyIntake(dose.occKey, 'snoozed', Object.assign({}, meta, { snoozeUntil: until, note: '推迟 10 分钟' })).then(function () {
+          remove(); toast('已推迟 10 分钟', 'success'); refreshAll();
+        }).catch(function (e) { toast('操作失败：' + msgOf(e), 'error'); });
+      }
+    });
+
+    if (!dose.critical) {
+      setTimeout(remove, 10000); // 普通提醒 10 秒自动收起；关键提醒需人工处理
+    }
   }
 
   function register() {

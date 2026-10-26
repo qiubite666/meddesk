@@ -154,6 +154,20 @@
     });
   }
 
+  /** 通知能力诊断文案：一眼看清为何收不到通知（不支持 / 未授权 / 已拒绝） */
+  function remindDiagText() {
+    try {
+      if (typeof window.Notification === 'undefined') {
+        var ua = String(navigator.userAgent || '');
+        if (/iPhone|iPad|iPod/i.test(ua)) return '当前浏览器不支持：请先用 Safari「添加到主屏幕」，再从主屏图标进入';
+        return '当前浏览器不支持系统通知（小米/华为等自带浏览器常见）：请改用 Edge 或 Chrome 打开本站';
+      }
+      if (window.Notification.permission === 'granted') return '已授权 · 系统通知可用';
+      if (window.Notification.permission === 'denied') return '已被拒绝：请在浏览器站点设置或系统设置中允许本站通知';
+      return '未授权：点右侧按钮授权（安卓还需在系统设置中允许该浏览器通知 + 关闭省电限制）';
+    } catch (e) { return '未知（浏览器限制了通知能力查询）'; }
+  }
+
   function settingRow(title, description, control) {
     return MD.ui.el('div', { class: 'setting-item' }, [
       MD.ui.el('div', { class: 'setting-item__copy' }, [
@@ -303,7 +317,7 @@
         } else if (permission === 'unsupported_pwa') {
           MD.toast.show('iPhone/iPad 请先用 Safari 打开本站 → 分享 → 「添加到主屏幕」，从主屏图标进入后再允许通知', 'warn');
         } else if (permission === 'unsupported') {
-          MD.toast.show('当前浏览器不支持通知，请改用 Chrome/Edge 或 iOS 16.4+ 的 Safari', 'warn');
+          MD.toast.show('当前浏览器不支持系统通知（小米/华为等自带浏览器常见）：请改用 Edge 或 Chrome 打开本站；页面内横幅提醒仍可用', 'warn');
         } else if (permission === 'denied') {
           MD.toast.show('通知已被拒绝：请在浏览器站点设置或系统设置中允许本站通知后重试', 'warn');
         } else {
@@ -323,7 +337,8 @@
     var syncCard = MD.ui.el('section', { class: 'card stack' }, [
       MD.ui.el('h2', { class: 'section-title', text: '云端同步' }),
       syncRow,
-      settingRow('用药提醒', '系统通知需要一次性授权', remindButton),
+      settingRow('通知能力', remindDiagText(), MD.icon('clock')),
+      settingRow('用药提醒', '系统通知需要一次性授权；浏览器不支持时，页面内横幅提醒仍会生效', remindButton),
       settingRow('修改口令', '即将上线', passwordButton)
     ]);
     var backupControls = MD.ui.el('div', { class: 'row row--wrap' }, [exportButton, importButton, importInput]);
