@@ -509,6 +509,20 @@
   }
 
   doc.addEventListener('DOMContentLoaded', async function () {
+    // 版本变化自动重载（一次性）：发版后浏览器拿到新 index.html 时，
+    // 若构建指纹与上次记录不同，自动刷新一次——用户无需手动强刷。
+    // 循环防护：重载后指纹与记录一致即不再触发。
+    try {
+      var __prevBuild = window.localStorage.getItem('meddesk.buildID');
+      var __curBuild = window.MD_BUILD_ID || '';
+      if (__prevBuild && __curBuild && __prevBuild !== __curBuild) {
+        window.localStorage.setItem('meddesk.buildID', __curBuild);
+        window.location.reload();
+        return;
+      }
+      if (__curBuild) window.localStorage.setItem('meddesk.buildID', __curBuild);
+    } catch (e) { /* 存储不可用时跳过 */ }
+
     authScreen = doc.getElementById('auth-screen');
     try {
       await MD.db.init();

@@ -4,7 +4,12 @@
 // 每次部署新版本二进制后它必然变化 → 缓存名变化 → activate 自动清理旧缓存，
 // 从根本上杜绝「发版后页面仍用旧 JS」的问题。
 const BUILD_ID = '__BUILD_ID__';
-const V = BUILD_ID && BUILD_ID !== '__BUILD_ID__' ? '?v=' + BUILD_ID : '';
+// 哨兵拆写（'__'+'BUILD_ID__'）：服务端会把连续的 __BUILD_ID__ 整串替换成真实指纹，
+// 若比较表达式里也写占位符会被一并替换导致条件恒 false、V 恒空串——
+// 后果：SHELL 预缓存键丢失 ?v= 指纹，与页面实际请求（带指纹）键不一致，
+// SW 缓存永不命中，离线 PWA 加载不到 JS。拆写后 dev 模式（无注入）才回退空 V。
+const DEV_SENTINEL = '__' + 'BUILD_ID__';
+const V = BUILD_ID === DEV_SENTINEL ? '' : '?v=' + BUILD_ID;
 const CACHE_NAME = 'meddesk-shell-' + (BUILD_ID || 'dev');
 
 // 预缓存列表：静态资源统一带 ?v= 指纹参数，与服务端注入到 index.html 的引用一致，
