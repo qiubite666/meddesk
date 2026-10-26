@@ -148,7 +148,10 @@
 
 - `occKey` = `${scheduleId}@${timeMs}`：一次排程发生的幂等键。重复打卡=同 occKey upsert。
 - `status`：`pending` / `taken` 已服用 / `skipped` 已跳过 / `snoozed` 已推迟。
-  漏服（`missed`）与逾期是**派生态**：由排程引擎按 `timeMs < now-15min` 且未记录推导，不落库。
+  漏服（`missed`）与逾期是**派生态**：由排程引擎按「已过计划时间且未记录」推导，不落库。
+- `undoneAt`（可选，毫秒时间戳）：用户把已打卡记录**显式撤销为待服用**的时刻。
+  带 `undoneAt` 的 pending 记录**不再被自动归一为漏服**（不计入依从率分母），
+  直到重新打卡（打其他状态时该字段清零）。
 - `scheduledFor`：计划时刻毫秒；`takenAt`：实际打卡时刻。
 
 ---

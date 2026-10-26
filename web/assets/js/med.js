@@ -426,6 +426,8 @@
     rec.takenAt = (status === 'taken') ? (cur && cur.takenAt ? cur.takenAt : nowMs()) : 0;
     if (status === 'snoozed' && extra && extra.snoozeUntil) rec.snoozeUntil = extra.snoozeUntil;
     if (status !== 'snoozed') rec.snoozeUntil = 0;
+    // 撤销为待服用 = 用户显式动作：打 undoneAt，统计不再把它自动归一为漏服
+    rec.undoneAt = (status === 'pending') ? nowMs() : 0;
     return MD.data.intakes.save(rec);
   }
 
@@ -553,8 +555,10 @@
     if (MD.sched && typeof MD.sched.adherence === 'function') {
       // A7 只统计 taken/skipped/missed；这里先把「已过计划时间仍 pending」归一为 missed，避免漏服不计入分母
       var now = nowMs();
+      // undoneAt：用户显式「撤销为待服用」的时间戳——不再被自动归一为漏服（不计入分母），
+      // 直到重新打卡或再次标记，统计才会随之变化。
       var list = intakes.map(function (i) {
-        return (i.status === 'pending' && (i.scheduledFor || 0) + MISS_GRACE_MS < now)
+        return (i.status === 'pending' && !i.undoneAt && (i.scheduledFor || 0) + MISS_GRACE_MS < now)
           ? Object.assign({}, i, { status: 'missed' }) : i;
       });
       var r = MD.sched.adherence({ intakes: list, fromMs: fromMs, toMs: toMs }) || {};
@@ -576,7 +580,7 @@
   /** 归一化状态：计划时间已过 1 小时仍 pending → 漏服 */
   function normalizeStatus(i) {
     var st = i.status || 'pending';
-    if (st === 'pending' && (i.scheduledFor || 0) + MISS_GRACE_MS < nowMs()) return 'missed';
+    if (st === 'pending' && !i.undoneAt && (i.scheduledFor || 0) + MISS_GRACE_MS < nowMs()) return 'missed';
     return st;
   }
 
@@ -1413,6 +1417,7 @@
     rec.ver = (Number(rec.ver) || 0) + 1;
     rec.updatedAt = nowMs();
     rec.takenAt = status === 'taken' ? (it.takenAt || nowMs()) : 0;
+    rec.undoneAt = status === 'pending' ? nowMs() : 0;
     MD.data.intakes.save(rec).then(function () {
       ok(); toast('已更新为「' + (STATUS_TEXT[status] || status) + '」', 'success');
       closeSheet();
