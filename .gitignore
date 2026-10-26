@@ -9,6 +9,8 @@ deploy/scripts/initdb/*.local.sql
 /meddesk
 /meddesk.exe
 /dist/
+dist/
+*.tar.gz
 /build/
 *.exe
 *.dll

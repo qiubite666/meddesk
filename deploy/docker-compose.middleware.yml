@@ -23,9 +23,18 @@ services:
       - pgdata_mw:/var/lib/postgresql/data
       # 首次启动（数据卷为空）时自动安装 citext 扩展；与宿主机安装方式的语义一致
       - ./scripts/initdb:/docker-entrypoint-initdb.d:ro
-      # 2C4G 小机调优（可选）：取消注释后按需调整该文件内容
-      # - ./postgres-tuning.conf:/etc/postgresql/postgresql.conf:ro
-    # 挂载调优文件时改用：command: ["postgres", "-c", "config_file=/etc/postgresql/postgresql.conf"]
+      # 调优配置：config_file 方式（postgres-tuning.conf 为完整配置，与宿主机 conf.d 场景共用一份）
+      - ./postgres-tuning.conf:/etc/postgresql/postgresql.conf:ro
+    # ⚠ config_file 会屏蔽官方镜像「listen_addresses='*'」的默认补丁；
+    #   tuning.conf 里写的是 127.0.0.1（宿主机场景），容器内会导致端口映射静默失效
+    #   （healthcheck 通过但宿主机连不上）。命令行参数优先级高于 config_file，
+    #   在此显式监听全部容器接口——安全性由上方 ports 仅绑 127.0.0.1 保障。
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - listen_addresses=*
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-meddesk} -d ${POSTGRES_DB:-meddesk}"]
       interval: 10s
