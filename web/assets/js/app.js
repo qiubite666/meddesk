@@ -509,6 +509,24 @@
   }
 
   doc.addEventListener('DOMContentLoaded', async function () {
+    // 旧 Service Worker 自愈：页面 HTML 里没有版本注入脚本（= HTML 来自旧 SW 的过期缓存）
+    // 且当前在线时，注销全部 SW、清空所有缓存并重载一次。
+    // 新 HTML 到位后 window.MD_BUILD_ID 存在，不再触发——天然防循环；离线时跳过以保护离线可用性。
+    try {
+      if (!window.MD_BUILD_ID && navigator.onLine && navigator.serviceWorker) {
+        navigator.serviceWorker.getRegistrations().then(function (regs) {
+          return Promise.all(regs.map(function (r) { return r.unregister(); }));
+        }).then(function () {
+          if (window.caches && caches.keys) {
+            return caches.keys().then(function (keys) {
+              return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+            });
+          }
+        }).then(function () { window.location.reload(); }).catch(function () {});
+        return; // 自愈中，本次不继续初始化
+      }
+    } catch (e) { /* SW 不可用时跳过自愈 */ }
+
     // 版本变化自动重载（一次性）：发版后浏览器拿到新 index.html 时，
     // 若构建指纹与上次记录不同，自动刷新一次——用户无需手动强刷。
     // 循环防护：重载后指纹与记录一致即不再触发。

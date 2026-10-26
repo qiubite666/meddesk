@@ -1447,6 +1447,10 @@
                 refreshAll();
               });
             });
+            // 返回 false：阻止 action 外层微任务立即 closeSheet——
+            // 否则刚弹出的确认框会被同步返回的 undefined 触发的外层关闭逻辑吞掉（「点删除没反应」的根因）。
+            // 确认框生命周期由自身按钮管理：确认→删除→内部 closeSheet；取消→onClose 兜底。
+            return false;
           }
         }
       ]
