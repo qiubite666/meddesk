@@ -27,6 +27,7 @@ func Mount(rg *gin.RouterGroup, svc *Service) {
 	{
 		auth.POST("/register", h.register)
 		auth.POST("/login", h.login)
+		auth.POST("/salt", h.salt)
 		auth.POST("/refresh", h.refresh)
 		auth.POST("/logout", h.logout)
 		auth.POST("/logout-all", RequireAuth(svc), h.logoutAll)
@@ -63,6 +64,21 @@ func (h *Handler) login(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, resp)
+}
+
+// salt 处理新设备登录的盐值握手（防枚举：不存在也返回随机盐）。
+func (h *Handler) salt(c *gin.Context) {
+	var req model.SaltRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, apierr.Wrap(apierr.CodeBadRequest, err, "请求参数有误"))
+		return
+	}
+	salt, err := h.svc.AccountSalt(c.Request.Context(), req.Email)
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, model.SaltResponse{KDFSalt: salt})
 }
 
 // refresh 处理令牌刷新（轮换）。

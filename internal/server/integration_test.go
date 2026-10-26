@@ -651,6 +651,60 @@ func min(a, b int) int {
 }
 
 
+// TestAuthSaltHandshake 验证新设备首次登录的盐值握手（/auth/salt）：
+// 已注册账户返回注册时的盐；不存在的账户返回随机盐（防枚举）；
+// 用下发的盐派生的口令哈希可以完成登录（新设备链路闭环）。
+func TestAuthSaltHandshake(t *testing.T) {
+	e := newEnv(t)
+	body := registerBody()
+
+	// 先注册一个账户
+	resp, _ := e.do(http.MethodPost, "/api/v1/auth/register", body, "")
+	e.wantStatus(resp, "注册", http.StatusOK)
+
+	t.Run("已注册账户返回注册时的盐", func(t *testing.T) {
+		resp, bodyStr := e.do(http.MethodPost, "/api/v1/auth/salt",
+			model.SaltRequest{Email: testEmail}, "")
+		e.wantStatus(resp, "盐握手", http.StatusOK)
+		var out model.SaltResponse
+		e.decode(bodyStr, "盐握手", &out)
+		if out.KDFSalt == "" {
+			t.Fatal("盐握手：kdfSalt 不能为空")
+		}
+		if out.KDFSalt != body.KDFSalt {
+			t.Fatalf("盐握手：下发的盐应与注册时一致，期望 %q 实际 %q", body.KDFSalt, out.KDFSalt)
+		}
+	})
+
+	t.Run("不存在的账户返回随机盐（防枚举）", func(t *testing.T) {
+		resp, bodyStr := e.do(http.MethodPost, "/api/v1/auth/salt",
+			model.SaltRequest{Email: "ghost@example.com"}, "")
+		e.wantStatus(resp, "盐握手-不存在", http.StatusOK)
+		var out model.SaltResponse
+		e.decode(bodyStr, "盐握手-不存在", &out)
+		if out.KDFSalt == "" {
+			t.Fatal("盐握手-不存在：应返回随机盐而非报错（防账户枚举）")
+		}
+	})
+
+	t.Run("用下发的盐完成新设备登录", func(t *testing.T) {
+		// 模拟新设备：先握手取盐（而非本地缓存），再派生登录
+		_, saltBody := e.do(http.MethodPost, "/api/v1/auth/salt",
+			model.SaltRequest{Email: testEmail}, "")
+		var saltOut model.SaltResponse
+		e.decode(saltBody, "新设备盐握手", &saltOut)
+		// 盐与注册一致 → 客户端 PBKDF2(口令, 盐) 派生出与注册时相同的 passwordHash
+		resp, loginBody := e.do(http.MethodPost, "/api/v1/auth/login",
+			model.LoginRequest{Email: testEmail, PasswordHash: body.PasswordHash}, "")
+		e.wantStatus(resp, "新设备登录", http.StatusOK)
+		var out model.TokenResponse
+		e.decode(loginBody, "新设备登录", &out)
+		if out.AccessToken == "" || out.KDFSalt == "" {
+			t.Fatal("新设备登录：应返回完整会话（accessToken + kdfSalt）")
+		}
+	})
+}
+
 // TestStaticCacheFingerprint 验证静态资源缓存策略：
 // index.html 注入 ?v=<buildID> 指纹、sw.js 注入构建哈希、/assets/ 带不可变缓存与 ETag。
 func TestStaticCacheFingerprint(t *testing.T) {

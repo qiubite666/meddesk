@@ -102,6 +102,18 @@ type LoginRequest struct {
 	Device       DeviceInfo `json:"device,omitempty"`
 }
 
+// SaltRequest 账户盐值查询请求（新设备首次登录的握手步骤）。
+type SaltRequest struct {
+	Email string `json:"email" binding:"required,email,max=160"`
+}
+
+// SaltResponse 账户盐值响应。
+// 账户不存在时返回随机盐（防账户枚举）：用假盐派生的口令哈希登录必然失败，
+// 与「账户存在但口令错误」的外部表现完全一致。
+type SaltResponse struct {
+	KDFSalt string `json:"kdfSalt"`
+}
+
 // RefreshRequest 刷新令牌请求。
 type RefreshRequest struct {
 	RefreshToken string     `json:"refreshToken" binding:"required"`

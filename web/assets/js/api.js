@@ -221,8 +221,22 @@
       credentials = credentials || {};
       var email = String(credentials.email || '').trim().toLowerCase();
       var password = String(credentials.password || '');
+      // 盐值获取顺序：调用方显式提供 → 本机缓存 → 服务端握手（新设备首次登录）。
+      // /auth/salt 对不存在的账户也返回随机盐（防枚举），用假盐派生的哈希登录必然失败。
       var saltB64 = credentials.kdfSalt || knownAccountSalt(email);
-      if (!saltB64) throw new Error('此设备缺少账户盐值，当前协议无法完成首次设备登录');
+      if (!saltB64) {
+        try {
+          var saltResp = await request('/auth/salt', {
+            method: 'POST',
+            skipAuthRefresh: true,
+            skipUnauthorized: true,
+            body: JSON.stringify({ email: email })
+          });
+          saltB64 = saltResp && (saltResp.kdfSalt || saltResp.KDFSalt);
+        } catch (e) { /* 网络失败走下方统一报错 */ }
+        if (!saltB64) throw new Error('获取账户盐值失败，请检查网络后重试');
+        rememberAccountSalt(email, saltB64);
+      }
       var derived = await MD.crypto.derive(password, MD.crypto.b64ToBytes(saltB64));
       var payload = await request('/auth/login', {
         method: 'POST',

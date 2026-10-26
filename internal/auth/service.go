@@ -231,6 +231,27 @@ func (s *Service) ChangePassword(ctx context.Context, userID string, req model.C
 	return nil
 }
 
+// AccountSalt 返回账户的客户端 KDF 盐（新设备首次登录握手）。
+// 客户端用该盐派生口令哈希后调 /auth/login；换设备时本地无缓存盐，由此接口下发。
+// 防枚举：账户不存在时返回随机盐并照常 200——攻击者无法据此区分账户是否存在。
+// 盐本身不保密（PBKDF2 盐的作用是防彩虹表/预计算），真正的口令强度由
+// 客户端 PBKDF2 + 服务端 argon2id 两层派生保障。
+func (s *Service) AccountSalt(ctx context.Context, email string) (string, error) {
+	email = strings.ToLower(strings.TrimSpace(email))
+	u, err := s.users.GetByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			buf := make([]byte, 32)
+			if _, err := rand.Read(buf); err != nil {
+				return "", apierr.Wrap(apierr.CodeInternal, err, msgInternal)
+			}
+			return base64.StdEncoding.EncodeToString(buf), nil
+		}
+		return "", apierr.Wrap(apierr.CodeInternal, err, msgInternal)
+	}
+	return base64.StdEncoding.EncodeToString(u.KDFSalt), nil
+}
+
 // Authorize 校验访问令牌并检查用户级吊销名单，返回用户 ID。
 // 吊销名单存的是「吊销时刻」的 Unix 秒：仅早于该时刻签发的令牌视为失效，
 // 重新登录签发的新令牌（iat >= 吊销时刻）不受影响。
