@@ -685,9 +685,10 @@
       body = '<div>' + vm.doses.map(doseCard).join('') + '</div>';
     }
 
+    // 「清空示例数据」只在设置页提供（那里有数据管理分区），用药页不再放这个入口，
+    // 避免同一操作在两处出现、误触时还以为清掉了真实数据。
     var foot = '<div class="md-export__row" style="margin-top:10px">' +
       '<button class="btn btn-primary" data-act="med-add" type="button">' + ICON.plus + '添加药物</button>' +
-      '<button class="btn btn-ghost" data-act="sample-clear" type="button">' + ICON.trash + '清空示例数据</button>' +
       '</div>';
 
     setHtml(el, head + body + foot);
@@ -1548,7 +1549,6 @@
     if (act === 'hist-more') { S.historyDays += HISTORY_STEP; refreshAll(); return; }
     if (act === 'heat-prev') { S.heatMonth = shiftMonth(S.heatMonth, -1); refreshAll(); return; }
     if (act === 'heat-next') { S.heatMonth = shiftMonth(S.heatMonth, 1); refreshAll(); return; }
-    if (act === 'sample-clear') { confirmClearSamples(); return; }
     if (act === 'exp-csv' || act === 'exp-pdf') { runExport(act === 'exp-csv' ? 'csv' : 'pdf'); return; }
   }
 
@@ -1622,15 +1622,6 @@
         return Promise.all(tasks).then(function () { toast('已删除', 'success'); refreshAll(); });
       })
       .catch(function (e) { toast('删除失败：' + msgOf(e), 'error'); });
-  }
-
-  function confirmClearSamples() {
-    confirmBox({ title: '清空示例数据', message: '只删除带示例标记的记录，你的真实数据不受影响。', danger: true })
-      .then(function (yes) {
-        if (!yes) return;
-        return clearSamples().then(function () { toast('示例数据已清空', 'success'); refreshAll(); });
-      })
-      .catch(function (e) { toast('清空失败：' + msgOf(e), 'error'); });
   }
 
   /* ---- 导出 ---- */
