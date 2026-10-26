@@ -181,6 +181,10 @@ func mountSPA(r *gin.Engine, cfg *config.Config, log *slog.Logger) {
 			// 导致 window.MD_BUILD_ID 永远 undefined（版本显示 dev + 自愈逻辑空转无限刷新的根因）。
 			// meta 标签不受 script-src 约束，前端 core.js 从 meta 读取。
 			[]byte("<head>\n  <meta name=\"md-build-id\" content=\""+buildID+"\">\n  <meta name=\"md-version\" content=\""+Version+"\">"), 1)
+		// 把版本号写进 <title>：不依赖任何 JS，浏览器标签页即可看到实际加载的前端版本，
+		// 用于快速区分「拿到新 HTML」还是「旧 Service Worker 缓存」。
+		indexHTML = bytes.Replace(indexHTML, []byte("<title>丘比特的工作台</title>"),
+			[]byte("<title>丘比特的工作台 · "+Version+"</title>"), 1)
 	}
 	if f, err := root.Open("sw.js"); err == nil {
 		buf := new(bytes.Buffer)

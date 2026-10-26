@@ -1076,18 +1076,39 @@
   }
 
   /* ---- 药物表单 ---- */
-  function openMedForm(medId) {
+  /**
+   * 打开药物表单。
+   * @param {string|null} medId 编辑现有药物（null 表示新建）
+   * @param {{med:Object, sched:Object, defaultName:string}} [seed] 复制模式：
+   *   以 seed.med / seed.sched 作为全部字段的预填默认值，id 置空 → 保存时新建，
+   *   绝不覆盖原药；照片与服药历史不继承。
+   */
+  function openMedForm(medId, seed) {
     var d = S.data || { meds: [], schedules: [], profiles: [] };
     var m = null, sc = null;
-    d.meds.forEach(function (x) { if (x.id === medId) m = x; });
-    if (m) d.schedules.forEach(function (s) { if (s.medicationId === m.id) sc = s; });
+    var isCopy = !!(seed && seed.med);
+    if (isCopy) {
+      // 继承全部属性，但抹掉标识类字段：id 置空（新建）、ver 归零、照片不继承
+      m = Object.assign({}, seed.med, {
+        id: '',
+        name: seed.defaultName || ((seed.med.name || '') + '（副本）'),
+        ver: 0,
+        photoKeys: []
+      });
+      sc = seed.sched ? Object.assign({}, seed.sched, { id: '', medicationId: '', ver: 0 }) : null;
+    } else {
+      d.meds.forEach(function (x) { if (x.id === medId) m = x; });
+      if (m) d.schedules.forEach(function (s) { if (s.medicationId === m.id) sc = s; });
+    }
 
-    S.formPhotoKey = (m && m.photoKeys && m.photoKeys[0]) || '';
+    // 复制模式不继承原药照片（附件归属原药，共享会造成删除联动问题）
+    S.formPhotoKey = (!isCopy && m && m.photoKeys && m.photoKeys[0]) || '';
     var kind = (sc && sc.kind) || 'daily';
 
     var body = document.createElement('div');
     body.className = 'md-form';
     body.innerHTML =
+      (isCopy ? '<div class="muted" style="font-size:12px;margin-bottom:8px">已继承原药物的全部配置（剂量/规格/频次/时间/医生/药房/备注等），可直接修改任意字段后保存为新药物。服药历史与照片不复制。</div>' : '') +
       fieldRow('药名', inputText('md-f-name', m ? m.name : '', '例如：维生素 D3')) +
       fieldRow('剂量（数量）', inputText('md-f-amount', m ? m.dosageAmount : 1, '例如：1', 'number')) +
       '<div class="field"><span class="label">频次</span><div class="md-kindpick" id="md-f-kindpick">' +
@@ -1130,7 +1151,7 @@
       '</div></details>';
 
     openSheet({
-      title: m ? '编辑药物' : '添加药物',
+      title: isCopy ? '复制药物' : (m ? '编辑药物' : '添加药物'),
       body: body,
       actions: [{
         // 返回 false 时 A6 不关闭抽屉（校验未通过需保留已填内容）
@@ -1240,10 +1261,13 @@
     var times = [time1];
     if (kind === 'twice_daily') times.push(val(body, '#md-f-time2') || '20:00');
 
-    var id = m ? m.id : uid();
+    // 复制模式下 m 是预填模板（id 为空串），必须判空后新建——否则 rec.id 与
+    // sched.medicationId 都会是空串，导致新药与排程对不上（排程丢失）。
+    var id = (m && m.id) ? m.id : uid();
     var rec = {
       id: id,
-      profileId: val(body, '#md-f-profile') || curProfileId(),
+      // 档案：表单选择器优先（复制/编辑时预填为原药档案，用户可改）；兜底当前档案
+      profileId: val(body, '#md-f-profile') || (m && m.profileId) || curProfileId(),
       name: name,
       dosageAmount: Number(amount),
       dosageUnit: val(body, '#md-f-unit') || '片',
@@ -1517,17 +1541,21 @@
     refreshAll();
   }
 
-  /** 复制药物：点击后直接自动创建副本（除药名外继承全部属性与排程），无需填写 */
+  /**
+   * 复制药物：打开配置对话框（预填原药全部属性），可改任意字段后保存为新药物。
+   * 默认药名「原名（副本）」，重名依次追加序号。
+   */
   function promptCopyMed(id) {
     var m = null;
     ((S.data && S.data.meds) || []).forEach(function (x) { if (x.id === id) m = x; });
     if (!m) return;
-    // 自动命名：原名（副本）；重名时依次追加序号（副本 2）（副本 3）…
+    var sc = null;
+    ((S.data && S.data.schedules) || []).forEach(function (s) { if (s && s.medicationId === id) sc = s; });
     var existing = {};
     ((S.data && S.data.meds) || []).forEach(function (x) { existing[x.name] = true; });
     var newName = m.name + '（副本）';
     for (var n = 2; existing[newName]; n++) { newName = m.name + '（副本 ' + n + '）'; }
-    copyMedication(id, newName);
+    openMedForm(null, { med: m, sched: sc, defaultName: newName });
   }
 
   /** 以新药名创建副本：继承原药全部字段（photoKeys 清空），并复制其全部排程；服药历史不复制 */
