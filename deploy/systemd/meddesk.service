@@ -30,6 +30,9 @@
 [Unit]
 Description=MedDesk 个人数字工作台（端到端加密用药提醒）
 Documentation=https://github.com/qiubite666/meddesk
+# 重启限流（属 [Unit] 段；写在 [Service] 会被忽略并告警）
+StartLimitIntervalSec=300
+StartLimitBurst=5
 # 兼容两种数据库方案：
 #   宿主机安装 —— postgresql.service/redis-server.service 存在，After 负责排序、Wants 负责拉起；
 #   Docker compose —— 这些 unit 不存在，After/Wants 对不存在的 unit 自动忽略，不阻断启动。
@@ -60,8 +63,6 @@ LimitNPROC=4096
 Restart=always
 RestartSec=5s
 # 5 分钟内崩溃超过 5 次就不再拉起，避免 DB 不可用时疯狂重启刷爆日志
-StartLimitBurst=5
-StartLimitIntervalSec=300
 # 优雅停止：给正在进行的导出/上传留出收尾时间，超时后 SIGKILL
 TimeoutStopSec=30s
 KillSignal=SIGTERM
@@ -72,9 +73,8 @@ KillMode=mixed
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=meddesk
-# 日志速率兜底：控制台输出最多 5 秒 1000 条，防止异常时打爆 journald
-RateLimitBurst=1000
-RateLimitIntervalSec=5
+# 日志速率兜底属于 journald 的配置（/etc/systemd/journald.conf 的 RateLimitBurst/IntervalSec），
+# systemd unit 不支持这两个键（写了会被忽略并告警），故不在此处设置。
 
 # ---------------------------------------------------------------- 安全加固
 NoNewPrivileges=yes
