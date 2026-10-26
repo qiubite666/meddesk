@@ -1,6 +1,6 @@
 {
-  "name": "MedDesk 药事台",
-  "short_name": "MedDesk",
+  "name": "丘比特的小屋",
+  "short_name": "丘比特",
   "description": "安全、离线优先的个人用药管理工具",
   "start_url": "/",
   "scope": "/",
