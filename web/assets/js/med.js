@@ -64,6 +64,7 @@
     minus: svg('<path d="M5 12h14"/>'),
     skip: svg('<path d="M6 12h9M13 8l4 4-4 4"/>'),
     trash: svg('<path d="M4.5 7h15M9.5 7V4.8h5V7M6.5 7l1 12.2h9l1-12.2"/><path d="M10.5 10.5v6M13.5 10.5v6"/>'),
+    copy: svg('<rect x="8.5" y="8.5" width="11" height="11" rx="1.5"/><path d="M15.5 5.5v-1A1.5 1.5 0 0 0 14 3H5a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 5 15h.5"/>'),
     edit: svg('<path d="M4.5 19.5h4l10-10a2.1 2.1 0 0 0-3-3l-10 10v4Z"/><path d="M14 6.5 17.5 10"/>'),
     chevron: svg('<path d="M9 6l6 6-6 6"/>'),
     user: svg('<circle cx="12" cy="8.5" r="3.5"/><path d="M5 19.5c1.2-3.4 3.8-5 7-5s5.8 1.6 7 5"/>'),
@@ -726,7 +727,10 @@
           (m.med.stock != null ? '<div class="muted" style="font-size:12px">库存 ' + esc(m.med.stock) + ' ' + esc(m.med.dosageUnit || '') +
             (m.med.refillThreshold != null ? ' · 阈值 ' + esc(m.med.refillThreshold) : '') + '</div>' : '') +
           '</div>' +
+          '<div class="md-med__acts" style="display:flex;flex-direction:column;gap:6px">' +
+          '<button class="btn-icon" type="button" data-act="med-copy" data-id="' + esc(m.med.id) + '" aria-label="复制">' + ICON.copy + '</button>' +
           '<button class="btn-icon" type="button" data-act="med-del" data-id="' + esc(m.med.id) + '" aria-label="删除">' + ICON.trash + '</button>' +
+          '</div>' +
           '</div>';
       }).join('');
     }
@@ -1452,6 +1456,7 @@
     if (act === 'med-add') { openMedForm(null); return; }
     if (act === 'med-open') { openMedForm(id); return; }
     if (act === 'med-del') { confirmDeleteMed(id); return; }
+    if (act === 'med-copy') { promptCopyMed(id); return; }
     if (act === 'profile') { switchProfile(id); return; }
     if (act === 'profile-new') { openProfileForm(null); return; }
     if (act === 'profile-edit') { e.stopPropagation(); openProfileForm(id); return; }
@@ -1467,6 +1472,67 @@
     S.profileId = id || 'all';
     try { global.localStorage.setItem(LS_PROFILE, S.profileId); } catch (e) { /* 忽略 */ }
     refreshAll();
+  }
+
+  /** 复制药物：弹输入框取新药名，除药名外继承原药全部属性与排程（照片不复制） */
+  function promptCopyMed(id) {
+    var m = null;
+    ((S.data && S.data.meds) || []).forEach(function (x) { if (x.id === id) m = x; });
+    if (!m) return;
+    var body = document.createElement('div');
+    body.className = 'md-form';
+    body.innerHTML =
+      '<div class="muted" style="font-size:13px;margin-bottom:8px">将复制「' + esc(m.name) +
+      '」的剂量、频次、备注等全部属性（服药历史与照片不复制）。</div>' +
+      fieldRow('新药名', inputText('md-copy-name', m.name + '（副本）', '例如：阿莫西林（晚上）'));
+    openSheet({
+      title: '复制药物',
+      body: body,
+      actions: [{
+        label: '创建副本', kind: 'primary', onClick: function () {
+          var el = document.getElementById('md-copy-name');
+          var name = el ? String(el.value || '').trim() : '';
+          if (!name) { toast('请输入新药名', 'error'); if (el) el.focus(); return; }
+          copyMedication(id, name).then(function () {
+            if (MD.ui && typeof MD.ui.closeSheet === 'function') MD.ui.closeSheet();
+          });
+        }
+      }]
+    });
+    setTimeout(function () {
+      var el = document.getElementById('md-copy-name');
+      if (el) { el.focus(); try { el.select(); } catch (e2) { /* 忽略 */ } }
+    }, 60);
+  }
+
+  /** 以新药名创建副本：继承原药全部字段（photoKeys 清空），并复制其全部排程；服药历史不复制 */
+  function copyMedication(id, newName) {
+    var m = null;
+    ((S.data && S.data.meds) || []).forEach(function (x) { if (x.id === id) m = x; });
+    if (!m) return Promise.resolve();
+    var now = nowMs();
+    var nm = {};
+    for (var k in m) if (Object.prototype.hasOwnProperty.call(m, k)) nm[k] = m[k];
+    nm.id = uid();
+    nm.name = newName;
+    nm.ver = 1;
+    nm.updatedAt = now;
+    nm.photoKeys = [];            // 照片附件属于原药，不随复制（避免两个药共享同一附件）
+    var tasks = [MD.data.meds.save(nm)];
+    ((S.data && S.data.schedules) || []).forEach(function (sc) {
+      if (!sc || sc.medicationId !== id) return;
+      var ns = {};
+      for (var k2 in sc) if (Object.prototype.hasOwnProperty.call(sc, k2)) ns[k2] = sc[k2];
+      ns.id = uid();
+      ns.medicationId = nm.id;
+      ns.ver = 1;
+      ns.updatedAt = now;
+      tasks.push(MD.data.schedules.save(ns));
+    });
+    return Promise.all(tasks).then(function () {
+      toast('已复制为「' + newName + '」', 'success');
+      refreshAll();
+    }).catch(function (e) { toast('复制失败：' + msgOf(e), 'error'); });
   }
 
   function confirmDeleteMed(id) {
