@@ -569,7 +569,15 @@
         style: { margin: '0', fontSize: '13px' },
         text: '凭据（服务器地址、账号、密码）使用本机会话密钥 AES-GCM 加密后保存在本机浏览器数据库中，不会写入 localStorage，也不会上传明文；每次请求经本站后端转发到你的 WebDAV 服务器，后端不保存凭据。'
       }),
-      MD.ui.el('div', { class: 'wd-form' }, [
+      // 用 form 包裹填写区：① 消除 Chrome「Password field is not contained in a form」提示；
+      // ② 让在任一输入框回车等价于点「保存」。
+      MD.ui.el('form', {
+        class: 'wd-form',
+        onSubmit: function (event) {
+          if (event && typeof event.preventDefault === 'function') event.preventDefault();
+          if (saveButton) saveButton.click();
+        }
+      }, [
         MD.ui.el('div', { class: 'field' }, [
           MD.ui.el('label', { class: 'muted', style: { fontSize: '13px', fontWeight: '600' }, text: '服务器地址' }),
           baseInput,

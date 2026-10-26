@@ -314,6 +314,9 @@
     setSession: setSession,
     clearSession: clearSession,
     getDEK: getDEK,
+    // 底层请求封装对外暴露：WebDAV 等扩展模块需要复用同一套 Bearer 鉴权与 401 refresh，
+    // 否则各自裸 fetch 会丢掉自动续期。仅供本仓库内部模块使用。
+    request: request,
     setDEK: setDEK,
     hasSession: function () {
       if (Boolean(storageGet('access') && storageGet('userId'))) return true;
