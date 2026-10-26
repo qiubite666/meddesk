@@ -556,16 +556,28 @@
     if (MD.sched && typeof MD.sched.adherence === 'function') {
       // A7 只统计 taken/skipped/missed；这里先把「已过计划时间仍 pending」归一为 missed，避免漏服不计入分母
       var now = nowMs();
-      // undoneAt：用户显式「撤销为待服用」的时间戳——不再被自动归一为漏服（不计入分母），
-      // 直到重新打卡或再次标记，统计才会随之变化。
-      var list = intakes.map(function (i) {
-        return (i.status === 'pending' && !i.undoneAt && (i.scheduledFor || 0) + MISS_GRACE_MS < now)
-          ? Object.assign({}, i, { status: 'missed' }) : i;
+      // undoneAt：用户显式「撤销为待服用」的时间戳。两点语义：
+      //   a) 带 undoneAt 的 pending 完全不参与统计（A7 引擎无法识别 undoneAt，会把它判成漏服，故直接剔除）；
+      //   b) 无 undoneAt 且已过宽限期的 pending 归一为 missed（漏服防线保留）。
+      var list = [];
+      intakes.forEach(function (i) {
+        if (i.status === 'pending') {
+          if (i.undoneAt) return; // 显式撤销：不计入分母，直到重新打卡
+          if ((i.scheduledFor || 0) + MISS_GRACE_MS < now) {
+            list.push(Object.assign({}, i, { status: 'missed' }));
+            return;
+          }
+        }
+        list.push(i);
       });
       var r = MD.sched.adherence({ intakes: list, fromMs: fromMs, toMs: toMs }) || {};
       return {
         total: r.total || 0, taken: r.taken || 0, skipped: r.skipped || 0,
-        missed: r.missed || 0, rate: typeof r.rate === 'number' ? r.rate : 0, streakDays: r.streakDays || 0
+        missed: r.missed || 0,
+        // rate === null 表示区间内没有任何完结打卡（分母为 0）：
+        // 必须保留 null 交给渲染层显示「空白/—」，强转 0 会被误画成红色 0%。
+        rate: (r.rate === null || r.rate === undefined) ? null : r.rate,
+        streakDays: r.streakDays || 0
       };
     }
     // A7 未就绪时退化为按记录统计（不重复实现排程算法）
@@ -575,7 +587,7 @@
       var st = normalizeStatus(i);
       if (st === 'taken') k++; else if (st === 'skipped') s++; else if (st === 'missed') m++;
     });
-    return { total: t, taken: k, skipped: s, missed: m, rate: t ? k / t : 0, streakDays: 0 };
+    return { total: t, taken: k, skipped: s, missed: m, rate: t ? k / t : null, streakDays: 0 };
   }
 
   /** 归一化状态：计划时间已过 1 小时仍 pending → 漏服 */
@@ -796,10 +808,13 @@
   }
 
   function kpiCard(title, a) {
-    var pct = Math.round((a.rate || 0) * 100);
-    var color = a.rate >= 0.8 ? 'var(--ok)' : (a.rate >= 0.5 ? 'var(--warn)' : 'var(--danger)');
+    // rate === null：区间内无完结打卡（分母为 0）→ 显示「—」中性色，不判红。
+    var noData = (a.rate === null || a.rate === undefined);
+    var pct = noData ? null : Math.round(a.rate * 100);
+    var color = noData ? 'var(--text-dim, #888)'
+      : (a.rate >= 0.8 ? 'var(--ok)' : (a.rate >= 0.5 ? 'var(--warn)' : 'var(--danger)'));
     return '<div class="md-kpi"><div class="muted" style="font-size:12px">' + esc(title) + '</div>' +
-      '<div class="md-kpi__rate" style="color:' + color + '">' + pct + '%</div>' +
+      '<div class="md-kpi__rate" style="color:' + color + '">' + (noData ? '—' : pct + '%') + '</div>' +
       '<div class="md-kpi__grid">' +
       '<span>总次数 ' + a.total + '</span><span>已服 ' + a.taken + '</span>' +
       '<span>跳过 ' + a.skipped + '</span><span>漏服 ' + a.missed + '</span>' +
@@ -814,10 +829,11 @@
     var bw = W / n, gap = Math.min(2, bw * 0.22);
     var parts = [];
     bars.forEach(function (b, i) {
-      var h = Math.max(1.5, Math.round(b.rate * (H - padB - 4)));
+      var noData = (b.rate === null || b.rate === undefined) || b.total === 0; // 无完结打卡 → 空白占位
+      var h = noData ? 1.5 : Math.max(1.5, Math.round(b.rate * (H - padB - 4)));
       var x = i * bw + gap / 2, w = Math.max(1, bw - gap);
       var y = H - padB - h;
-      var fill = b.total === 0 ? 'var(--border)' : (b.rate >= 0.8 ? 'var(--ok)' : (b.rate >= 0.5 ? 'var(--warn)' : 'var(--danger)'));
+      var fill = noData ? 'var(--border)' : (b.rate >= 0.8 ? 'var(--ok)' : (b.rate >= 0.5 ? 'var(--warn)' : 'var(--danger)'));
       parts.push('<rect x="' + x.toFixed(2) + '" y="' + y + '" width="' + w.toFixed(2) + '" height="' + h + '" rx="1.5" fill="' + fill + '"/>');
     });
     var ticks = [0, 9, 19, 29].map(function (i) {
@@ -838,9 +854,10 @@
     }).join('');
     var cells = heat.cells.map(function (c) {
       if (!c) return '<div class="md-heat__cell" style="opacity:.25"></div>';
-      var bg = c.total === 0 ? 'transparent' : heatColor(c.rate, c.missed, c.total);
-      return '<div class="md-heat__cell" style="background:' + bg + '" title="' + heat.month + '-' + c.day +
-        ' 依从率 ' + Math.round(c.rate * 100) + '%">' + c.day + '</div>';
+      var noData = c.total === 0 || c.rate === null || c.rate === undefined;
+      var bg = noData ? 'transparent' : heatColor(c.rate, c.missed, c.total);
+      var tip = noData ? '无完结记录' : '依从率 ' + Math.round(c.rate * 100) + '%';
+      return '<div class="md-heat__cell" style="background:' + bg + '" title="' + heat.month + '-' + c.day + ' ' + tip + '">' + c.day + '</div>';
     }).join('');
     return '<div class="md-heat__head">' +
       '<button class="btn-icon" type="button" data-act="heat-prev" aria-label="上一月">' + ICON.minus + '</button>' +
@@ -854,7 +871,7 @@
   }
 
   function heatColor(rate, missed, total) {
-    if (!total) return 'transparent';
+    if (!total || rate === null || rate === undefined) return 'transparent';
     var r = clamp(rate, 0, 1);
     var badRatio = clamp((missed || 0) / total, 0, 1);
     var hue = 4 + r * 140 - badRatio * 20;
@@ -972,7 +989,7 @@
     actWrap.appendChild(cancel);
     panel.appendChild(actWrap);
     wrap.appendChild(panel);
-    wrap.addEventListener('click', function (e) { if (e.target === wrap) close(); });
+    // 降级弹窗同样不响应遮罩点击关闭（与 MD.ui.sheet 行为一致）
     function close() { if (wrap.parentNode) wrap.parentNode.removeChild(wrap); }
     if (host.hidden !== undefined) host.hidden = false;
     host.appendChild(wrap);

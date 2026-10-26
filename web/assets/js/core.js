@@ -298,13 +298,12 @@
       if ((options.actions || []).length) panel.appendChild(actions);
       host.appendChild(panel);
       var onKey = function (event) { if (event.key === 'Escape') MD.ui.closeSheet(); };
-      var onBackdrop = function (event) { if (event.target === host) MD.ui.closeSheet(); };
+      // 点击遮罩/空白处不关闭弹窗（用户要求：避免误触丢失已填内容）；
+      // 关闭途径仅保留：右上角关闭按钮、底部取消按钮、Escape 键。
       doc.addEventListener('keydown', onKey);
-      host.addEventListener('click', onBackdrop);
       close.addEventListener('click', function () { MD.ui.closeSheet(); });
       sheetCleanup = function () {
         doc.removeEventListener('keydown', onKey);
-        host.removeEventListener('click', onBackdrop);
         if (typeof options.onClose === 'function') options.onClose();
       };
       window.setTimeout(function () { close.focus(); }, 0);
