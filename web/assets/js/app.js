@@ -23,7 +23,7 @@
     var themeButton = doc.getElementById('btn-theme');
     var accountButton = doc.getElementById('btn-account');
 
-    brand.appendChild(MD.ui.el('div', { class: 'brand-lockup' }, [MD.icon('pill'), MD.ui.el('span', { text: '丘比特的工作台' })]));
+    brand.appendChild(MD.ui.el('div', { class: 'brand-lockup' }, [MD.icon('home-heart'), MD.ui.el('span', { text: '丘比特的工作台' })]));
     sidebarFoot.textContent = '安全、离线优先 · v' + MD.version + ' · ' + String(MD.buildID || 'dev').slice(0, 8);
     menuButton.appendChild(MD.icon('menu'));
     accountButton.appendChild(MD.icon('user'));
@@ -145,7 +145,7 @@
       comingSoon: false,
       render: function (el) {
         el.appendChild(MD.ui.el('div', { class: 'card empty' }, [
-          MD.icon('pill'),
+          MD.icon('home-heart'),
           MD.ui.el('strong', { text: '用药模块正在加载' }),
           MD.ui.el('p', { class: 'muted', text: '平台层已就绪，请稍后刷新页面。' })
         ]));
@@ -324,7 +324,7 @@
     ]);
     var privacyCard = MD.ui.el('section', { class: 'card stack' }, [
       MD.ui.el('h2', { class: 'section-title', text: '关于与隐私' }),
-      settingRow('丘比特的工作台', '版本 ' + MD.version + ' · 构建 ' + String(MD.buildID || 'dev').slice(0, 8), MD.icon('pill')),
+      settingRow('丘比特的工作台', '版本 ' + MD.version + ' · 构建 ' + String(MD.buildID || 'dev').slice(0, 8), MD.icon('home-heart')),
       MD.ui.el('p', { class: 'muted', text: '业务数据采用端到端加密。加密和解密均在当前设备完成，服务端只见密文，无法读取用药记录。JSON 备份为明文，请只保存在可信位置。' })
     ]);
 
@@ -337,7 +337,7 @@
 
   function authBrand() {
     return MD.ui.el('div', { class: 'auth-card__brand' }, [
-      MD.icon('pill'),
+      MD.icon('home-heart'),
       MD.ui.el('div', {}, [
         MD.ui.el('h1', { text: '丘比特的工作台' }),
         MD.ui.el('p', { class: 'muted', text: '安全管理每一次用药' })

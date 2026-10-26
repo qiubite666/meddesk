@@ -454,12 +454,16 @@
 
     // 供事件处理按 occKey 反查上下文（只读缓存，不参与渲染）
     S.doseMap = {};
+    var medById = {};
+    meds.forEach(function (m) { medById[m.id] = m; });
     var profileNameOf = {};
     d.profiles.forEach(function (p) { profileNameOf[p.id] = p.name; });
     doses.forEach(function (x) {
       S.doseMap[x.occKey] = x;
       if (!x.profileName) x.profileName = profileNameOf[x.profileId] || '';
       if (!x.dosageText) x.dosageText = '';
+      var _m = medById[x.medId];
+      x.strengthText = (_m && _m.strength) || '';
     });
 
     var done = 0, overdueCount = 0;
@@ -477,7 +481,8 @@
       var need = m.stock != null && m.refillThreshold != null && Number(m.stock) <= Number(m.refillThreshold);
       return {
         med: m,
-        schedText: sc && MD.sched && MD.sched.describe ? MD.sched.describe(sc) : '未设置排程',
+        strengthText: m.strength || '',
+        schedText: sc ? schedTextShort(sc) : '未设置排程',
         needRefill: need,
         photoKey: (m.photoKeys && m.photoKeys[0]) || ''
       };
@@ -518,7 +523,9 @@
       var ds = startOfDay(addDays(now, -b));
       var de = ds + 86400000;
       var dayIntakes = intakes.filter(function (i) { return i.scheduledFor >= ds && i.scheduledFor < de; });
-      var a = adherenceOf(dayIntakes, ds, de);
+      // 今天：统计终点必须是「当前时刻」而非当天 24:00——否则 22:00 的未来计划
+      // 会被 A7 漏服判定（due <= 区间终点-15min）误判为漏服，导致今日柱红色。
+      var a = adherenceOf(dayIntakes, ds, b === 0 ? Math.min(now, de) : de);
       bars.push({ dayMs: ds, key: dayKey(ds), rate: a.rate, total: a.total, taken: a.taken, missed: a.missed, isToday: b === 0 });
     }
 
@@ -532,7 +539,9 @@
     for (i2 = 1; i2 <= heat.count; i2++) {
       var dms = monthStartMs(mk) + (i2 - 1) * 86400000;
       var dIntakes = intakes.filter(function (x) { return x.scheduledFor >= dms && x.scheduledFor < dms + 86400000; });
-      var aa = adherenceOf(dIntakes, dms, dms + 86400000);
+      // 今天：终点用当前时刻（理由同 bars——未来计划不算漏服）
+      var dEnd = (dms === startOfDay(now)) ? now : dms + 86400000;
+      var aa = adherenceOf(dIntakes, dms, dEnd);
       heat.cells.push({ day: i2, dayMs: dms, rate: aa.rate, total: aa.total, taken: aa.taken, missed: aa.missed });
     }
 
@@ -697,7 +706,7 @@
       (x.critical ? '<span class="badge badge--danger">关键</span>' : '') +
       (st !== 'pending' ? '<span class="badge' + (tone ? ' badge--' + tone : '') + '">' + esc(txt) + '</span>' : '') +
       '</div>' +
-      '<div class="muted" style="font-size:13px">' + [x.dosageText, x.profileName].filter(Boolean).map(esc).join(' · ') + '</div>' +
+      '<div class="muted" style="font-size:13px">' + [[x.dosageText, x.strengthText].filter(Boolean).join(' '), x.profileName].filter(Boolean).map(esc).join(' · ') + '</div>' +
       (overdueLabel ? '<div class="md-dose__warn">' + ICON.alert + ' ' + esc(overdueLabel) + '</div>' : '') +
       '</div>' + acts + '</div>';
   }
@@ -735,7 +744,7 @@
           (m.needRefill ? '<span class="badge badge--danger">需补药</span>' : '') +
           (m.med.critical ? '<span class="badge badge--warn">关键</span>' : '') +
           '</div>' +
-          '<div class="muted" style="font-size:13px">' + esc(doseTextOf(m.med)) + ' · ' + esc(m.schedText) + '</div>' +
+          '<div class="muted" style="font-size:13px">' + esc([doseTextOf(m.med), m.strengthText].filter(Boolean).join(' ')) + ' · ' + esc(m.schedText) + '</div>' +
           (m.med.stock != null ? '<div class="muted" style="font-size:12px">库存 ' + esc(m.med.stock) + ' ' + esc(m.med.dosageUnit || '') +
             (m.med.refillThreshold != null ? ' · 阈值 ' + esc(m.med.refillThreshold) : '') + '</div>' : '') +
           '</div>' +
@@ -748,6 +757,19 @@
     }
     setHtml(el, head + body);
     fillThumbs(el);
+  }
+
+  /** 排程描述（展示精简版）：去掉「（YYYY-MM-DD 起）」开始时间与「自定义间隔」前缀 */
+  function schedTextShort(sc) {
+    var s = (MD.sched && MD.sched.describe ? MD.sched.describe(sc) : '') || '';
+    // 去掉起始日期，保留「…止」结束日期（若有）
+    s = s.replace(/（([^）]*)）/g, function (whole, inner) {
+      var parts = inner.split('，').filter(function (p) { return !/\d{4}-\d{2}-\d{2}\s*起$/.test(p.trim()); });
+      return parts.length ? '（' + parts.join('，') + '）' : '';
+    });
+    // cycle 描述去重：kindLabel 已含「（21天服/7天停）」，tail 的「服 N 天停 M 天」信息重复
+    s = s.replace('周期性用药（21天服/7天停） 服', '周期性用药 服');
+    return s.replace(/^自定义间隔\s*/, '').replace(/\s+/g, ' ').trim();
   }
 
   function doseTextOf(m) {
@@ -1491,35 +1513,17 @@
     refreshAll();
   }
 
-  /** 复制药物：弹输入框取新药名，除药名外继承原药全部属性与排程（照片不复制） */
+  /** 复制药物：点击后直接自动创建副本（除药名外继承全部属性与排程），无需填写 */
   function promptCopyMed(id) {
     var m = null;
     ((S.data && S.data.meds) || []).forEach(function (x) { if (x.id === id) m = x; });
     if (!m) return;
-    var body = document.createElement('div');
-    body.className = 'md-form';
-    body.innerHTML =
-      '<div class="muted" style="font-size:13px;margin-bottom:8px">将复制「' + esc(m.name) +
-      '」的剂量、频次、备注等全部属性（服药历史与照片不复制）。</div>' +
-      fieldRow('新药名', inputText('md-copy-name', m.name + '（副本）', '例如：阿莫西林（晚上）'));
-    openSheet({
-      title: '复制药物',
-      body: body,
-      actions: [{
-        label: '创建副本', kind: 'primary', onClick: function () {
-          var el = document.getElementById('md-copy-name');
-          var name = el ? String(el.value || '').trim() : '';
-          if (!name) { toast('请输入新药名', 'error'); if (el) el.focus(); return; }
-          copyMedication(id, name).then(function () {
-            if (MD.ui && typeof MD.ui.closeSheet === 'function') MD.ui.closeSheet();
-          });
-        }
-      }]
-    });
-    setTimeout(function () {
-      var el = document.getElementById('md-copy-name');
-      if (el) { el.focus(); try { el.select(); } catch (e2) { /* 忽略 */ } }
-    }, 60);
+    // 自动命名：原名（副本）；重名时依次追加序号（副本 2）（副本 3）…
+    var existing = {};
+    ((S.data && S.data.meds) || []).forEach(function (x) { existing[x.name] = true; });
+    var newName = m.name + '（副本）';
+    for (var n = 2; existing[newName]; n++) { newName = m.name + '（副本 ' + n + '）'; }
+    copyMedication(id, newName);
   }
 
   /** 以新药名创建副本：继承原药全部字段（photoKeys 清空），并复制其全部排程；服药历史不复制 */
