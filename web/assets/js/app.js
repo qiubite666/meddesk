@@ -24,7 +24,8 @@
     var accountButton = doc.getElementById('btn-account');
 
     brand.appendChild(MD.ui.el('div', { class: 'brand-lockup' }, [MD.icon('home-heart'), MD.ui.el('span', { text: '丘比特的工作台' })]));
-    sidebarFoot.textContent = '安全、离线优先 · v' + MD.version + ' · ' + String(MD.buildID || 'dev').slice(0, 8);
+    // 版本号本身已带 v 前缀（服务端 ldflags 注入形如 v0.2.3），不再额外加 'v' 避免出现「vv0.2.3」
+    sidebarFoot.textContent = '安全、离线优先 · ' + (MD.version || '未注入') + ' · ' + String(MD.buildID || 'dev').slice(0, 8);
     menuButton.appendChild(MD.icon('menu'));
     accountButton.appendChild(MD.icon('user'));
 
@@ -297,7 +298,17 @@
       remindButton.disabled = true;
       try {
         var permission = await MD.remind.ensurePermission();
-        MD.toast.show(permission === 'granted' ? '已开启用药提醒' : '通知权限未授予，请在浏览器设置中允许', permission === 'granted' ? 'success' : 'warn');
+        if (permission === 'granted') {
+          MD.toast.show('已开启用药提醒', 'success');
+        } else if (permission === 'unsupported_pwa') {
+          MD.toast.show('iPhone/iPad 请先用 Safari 打开本站 → 分享 → 「添加到主屏幕」，从主屏图标进入后再允许通知', 'warn');
+        } else if (permission === 'unsupported') {
+          MD.toast.show('当前浏览器不支持通知，请改用 Chrome/Edge 或 iOS 16.4+ 的 Safari', 'warn');
+        } else if (permission === 'denied') {
+          MD.toast.show('通知已被拒绝：请在浏览器站点设置或系统设置中允许本站通知后重试', 'warn');
+        } else {
+          MD.toast.show('通知权限未授予，请在浏览器设置中允许本站通知', 'warn');
+        }
       } catch (error) {
         MD.toast.show(error.message || '无法申请通知权限', 'error');
       } finally {
@@ -509,11 +520,15 @@
   }
 
   doc.addEventListener('DOMContentLoaded', async function () {
-    // 旧 Service Worker 自愈：页面 HTML 里没有版本注入脚本（= HTML 来自旧 SW 的过期缓存）
-    // 且当前在线时，注销全部 SW、清空所有缓存并重载一次。
-    // 新 HTML 到位后 window.MD_BUILD_ID 存在，不再触发——天然防循环；离线时跳过以保护离线可用性。
+    // 旧 Service Worker 自愈（带一次性锁，绝不循环刷新）：
+    // 判定：MD.buildID === 'dev' 表示 HTML 里没有构建 meta（旧 SW 缓存吐出或未注入）。
+    // 锁：localStorage 记录上次自愈时间，10 分钟内最多执行一次——即使判定异常也不会无限 reload。
     try {
-      if (!window.MD_BUILD_ID && navigator.onLine && navigator.serviceWorker) {
+      var HEAL_KEY = 'meddesk.heal.at';
+      var HEAL_WINDOW = 10 * 60 * 1000;
+      var lastHeal = Number(window.localStorage.getItem(HEAL_KEY) || 0) || 0;
+      if (MD.buildID === 'dev' && navigator.onLine && navigator.serviceWorker && (Date.now() - lastHeal > HEAL_WINDOW)) {
+        window.localStorage.setItem(HEAL_KEY, String(Date.now()));
         navigator.serviceWorker.getRegistrations().then(function (regs) {
           return Promise.all(regs.map(function (r) { return r.unregister(); }));
         }).then(function () {
@@ -531,9 +546,13 @@
     // 若构建指纹与上次记录不同，自动刷新一次——用户无需手动强刷。
     // 循环防护：重载后指纹与记录一致即不再触发。
     try {
+      var RELOAD_KEY = 'meddesk.reload.at';
+      var lastReload = Number(window.localStorage.getItem(RELOAD_KEY) || 0) || 0;
       var __prevBuild = window.localStorage.getItem('meddesk.buildID');
-      var __curBuild = window.MD_BUILD_ID || '';
-      if (__prevBuild && __curBuild && __prevBuild !== __curBuild) {
+      var __curBuild = (MD.buildID && MD.buildID !== 'dev') ? MD.buildID : '';
+      // 10 分钟窗口内最多自动重载一次，避免任何判定抖动导致循环刷新
+      if (__prevBuild && __curBuild && __prevBuild !== __curBuild && (Date.now() - lastReload > 10 * 60 * 1000)) {
+        window.localStorage.setItem(RELOAD_KEY, String(Date.now()));
         window.localStorage.setItem('meddesk.buildID', __curBuild);
         window.location.reload();
         return;

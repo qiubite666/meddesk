@@ -322,7 +322,19 @@
   /** 请求通知权限 -> Promise<'granted'|'denied'|'default'>；不支持时静默返回 'denied' */
   function ensurePermission() {
     init();
-    if (!state.supported) { return Promise.resolve('denied'); }
+    if (!state.supported) {
+      // 区分「不支持」与「iOS 未安装为 PWA」——两者提示文案不同：
+      // iOS Safari 普通标签页里没有 Notification 对象，必须「添加到主屏幕」后从主屏打开才可用。
+      var ua = String((global.navigator && global.navigator.userAgent) || '');
+      var isIOS = /iPhone|iPad|iPod/i.test(ua);
+      var isStandalone = false;
+      try {
+        isStandalone = (global.matchMedia && global.matchMedia('(display-mode: standalone)').matches) ||
+          (global.navigator && global.navigator.standalone === true);
+      } catch (e) { /* 忽略 */ }
+      if (isIOS && !isStandalone) { return Promise.resolve('unsupported_pwa'); }
+      return Promise.resolve('unsupported');
+    }
     if (state.permission === 'granted') { return Promise.resolve('granted'); }
     return new Promise(function (resolve) {
       var settled = false;

@@ -177,7 +177,10 @@ func mountSPA(r *gin.Engine, cfg *config.Config, log *slog.Logger) {
 		indexHTML = injectRef(buf.Bytes())
 		// 同时把构建指纹暴露给前端（设置页/侧栏显示，便于用户确认已加载新版）
 		indexHTML = bytes.Replace(indexHTML, []byte("<head>"),
-			[]byte("<head><script>window.MD_BUILD_ID=\""+buildID+"\";window.MD_VERSION=\""+Version+"\";</script>"), 1)
+			// 用 meta 传递构建信息：nginx 的 CSP `script-src 'self'` 会拦截内联 <script>，
+			// 导致 window.MD_BUILD_ID 永远 undefined（版本显示 dev + 自愈逻辑空转无限刷新的根因）。
+			// meta 标签不受 script-src 约束，前端 core.js 从 meta 读取。
+			[]byte("<head>\n  <meta name=\"md-build-id\" content=\""+buildID+"\">\n  <meta name=\"md-version\" content=\""+Version+"\">"), 1)
 	}
 	if f, err := root.Open("sw.js"); err == nil {
 		buf := new(bytes.Buffer)

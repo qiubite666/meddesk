@@ -10,12 +10,18 @@
     return events[evt];
   }
 
-  // 前端版本与 GitHub Release 一一对应：由服务端构建时注入（ldflags → index.html）。
-  // 开发模式（无注入）时回退到占位版本。
-  MD.version = (typeof window !== 'undefined' && window.MD_VERSION) ? window.MD_VERSION : 'dev';
-  // 构建指纹：由服务端在 index.html 中注入（window.MD_BUILD_ID），
-  // 用于在界面上展示「前端实际加载的构建」，便于确认发版后已拿到新资源。
-  MD.buildID = (typeof window !== 'undefined' && window.MD_BUILD_ID) ? window.MD_BUILD_ID : 'dev';
+  // 构建信息由服务端注入到 index.html 的 <meta>（而非内联 <script>）：
+  // nginx CSP `script-src 'self'` 会拦截内联脚本，导致版本号恒为 undefined。
+  function readMeta(name) {
+    try {
+      var el = document.querySelector('meta[name="' + name + '"]');
+      return el ? String(el.getAttribute('content') || '') : '';
+    } catch (e) { return ''; }
+  }
+  // 前端版本与 GitHub Release 一一对应：服务端 ldflags 版本经 meta 下发。
+  MD.version = readMeta('md-version') || (typeof window !== 'undefined' && window.MD_VERSION) || 'dev';
+  // 构建指纹：用于界面展示实际加载的构建 + 版本变化自动重载判定。
+  MD.buildID = readMeta('md-build-id') || (typeof window !== 'undefined' && window.MD_BUILD_ID) || 'dev';
 
   MD.bus = {
     on: function (evt, fn) {
