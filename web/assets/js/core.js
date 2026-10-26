@@ -337,12 +337,69 @@
     });
   }
 
+  // 导航高亮：除自身命中外，子路由（声明 parent 的路由）激活时其父级也高亮，
+  // 否则进入「工具箱 / 单价计算器」后侧栏「工具箱」会丢失选中态。
+  function isActiveRoute(route) {
+    if (!route || !activeId) return false;
+    if (route.id === activeId) return true;
+    var current = routeMap[activeId];
+    return !!(current && current.parent && current.parent === route.id);
+  }
+
+  /**
+   * 按 group 聚合并保持组内顺序；组间顺序取该组内最小 order，
+   * 保证同名分组只渲染一次。
+   * @param {Array} list 已排序且已过滤 hidden 的路由
+   * @returns {Array<{name:string, items:Array}>}
+   */
+  function groupedRoutes(list) {
+    var order = [];
+    var map = Object.create(null);
+    list.forEach(function (route) {
+      var name = route.group || '功能';
+      if (!map[name]) {
+        map[name] = { name: name, items: [], order: Number(route.order) || 0 };
+        order.push(map[name]);
+      }
+      map[name].items.push(route);
+      var routeOrder = Number(route.order) || 0;
+      if (routeOrder < map[name].order) map[name].order = routeOrder;
+    });
+    order.sort(function (a, b) { return a.order - b.order; });
+    order.forEach(function (entry) { entry.blocks = categoriseRoutes(entry.items); });
+    return order;
+  }
+
+  /**
+   * 组内按 category 再分一层（如「工具箱 › 计算工具 › 单价计算器」）。
+   * 未声明 category 的路由归为无标题块，与分类块按各自最小 order 排序。
+   * @param {Array} items 组内已排序路由
+   * @returns {Array<{title:string, items:Array}>}
+   */
+  function categoriseRoutes(items) {
+    var blocks = [];
+    var map = Object.create(null);
+    items.forEach(function (route) {
+      var title = route.category || '';
+      if (!map[title]) {
+        map[title] = { title: title, items: [], order: Number(route.order) || 0 };
+        blocks.push(map[title]);
+      }
+      map[title].items.push(route);
+      var routeOrder = Number(route.order) || 0;
+      if (routeOrder < map[title].order) map[title].order = routeOrder;
+    });
+    blocks.sort(function (a, b) { return a.order - b.order; });
+    return blocks;
+  }
+
   function routeButton(route, tab) {
+    var active = isActiveRoute(route);
     var button = MD.ui.el('button', {
-      class: (tab ? 'tab-item' : 'nav-item') + (route.id === activeId ? ' is-active' : ''),
+      class: (tab ? 'tab-item' : 'nav-item') + (route.category ? ' nav-item--sub' : '') + (active ? ' is-active' : ''),
       type: 'button',
       dataset: { route: route.id },
-      'aria-current': route.id === activeId ? 'page' : null,
+      'aria-current': active ? 'page' : null,
       onClick: function () { MD.haptic.tap(); MD.router.go(route.id); }
     });
     button.appendChild(MD.icon(route.icon || 'pill'));
@@ -362,22 +419,27 @@
     if (!doc) return;
     var nav = doc.getElementById('nav-list');
     var tabbar = doc.getElementById('tabbar');
-    var list = sortedRoutes();
+    // hidden 路由（工具箱子页等）不进主导航与底部标签栏：它只在所属容器内导航，
+    // 直接暴露会让侧栏出现一堆零散条目。
+    var list = sortedRoutes().filter(function (route) { return !route.hidden; });
     if (nav) {
       MD.ui.clear(nav);
-      var group = null;
-      list.forEach(function (route) {
-        var nextGroup = route.group || '功能';
-        if (nextGroup !== group) {
-          group = nextGroup;
-          nav.appendChild(MD.ui.el('div', { class: 'nav-group', text: group }));
-        }
-        nav.appendChild(routeButton(route, false));
+      // 先按「组」聚合再渲染：若沿用全局 order 单序列，组内 order 与其他组交叉时
+      // 会渲染出两个同名分组标题（如「工具箱 … 设置 … 工具箱」）。
+      groupedRoutes(list).forEach(function (entry) {
+        nav.appendChild(MD.ui.el('div', { class: 'nav-group', text: entry.name }));
+        entry.blocks.forEach(function (block) {
+          // block.title 为空表示该组下无分类的直挂条目，不渲染分类标题
+          if (block.title) nav.appendChild(MD.ui.el('div', { class: 'nav-group nav-group--sub', text: block.title }));
+          block.items.forEach(function (route) { nav.appendChild(routeButton(route, false)); });
+        });
       });
     }
     if (tabbar) {
       MD.ui.clear(tabbar);
-      list.slice(0, 4).forEach(function (route) { tabbar.appendChild(routeButton(route, true)); });
+      // 底部标签栏只放一级入口：子路由（工具箱下各工具）放进来会挤掉主模块。
+      list.filter(function (route) { return !route.parent; }).slice(0, 4)
+        .forEach(function (route) { tabbar.appendChild(routeButton(route, true)); });
     }
   }
 
@@ -432,6 +494,21 @@
       return true;
     },
     current: function () { return activeId; },
+    /**
+     * 查询已注册路由（返回副本，调用方可安全遍历）。
+     * @param {Object} [filter] 支持 {parent, category, hidden:false}
+     * @returns {Array} 按 order、标题排序后的路由数组
+     */
+    list: function (filter) {
+      var out = routes.slice();
+      filter = filter || {};
+      if (filter.parent != null) out = out.filter(function (route) { return route.parent === filter.parent; });
+      if (filter.category != null) out = out.filter(function (route) { return route.category === filter.category; });
+      if (filter.hidden === false) out = out.filter(function (route) { return !route.hidden; });
+      return out.sort(function (a, b) {
+        return (Number(a.order) || 0) - (Number(b.order) || 0) || a.title.localeCompare(b.title, 'zh-CN');
+      });
+    },
     start: function () {
       if (routerStarted) return activeId;
       routerStarted = true;
@@ -443,7 +520,7 @@
       var hashId = (window.location.hash || '').replace(/^#\/?/, '');
       var initial = routeMap[hashId] && !routeMap[hashId].comingSoon ? hashId : null;
       if (!initial) {
-        var first = sortedRoutes().filter(function (route) { return !route.comingSoon; })[0];
+        var first = sortedRoutes().filter(function (route) { return !route.comingSoon && !route.hidden; })[0];
         initial = first && first.id;
       }
       if (initial) MD.router.go(initial, { fromHash: hashId === initial });

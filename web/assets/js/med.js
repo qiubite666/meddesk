@@ -1836,7 +1836,7 @@
       title: '用药提醒',
       subtitle: '今日剂量与依从性',
       icon: 'pill',
-      group: '核心',
+      group: '健康',
       order: 1,
       render: render
     });

@@ -141,7 +141,7 @@
       title: '用药管理',
       subtitle: '今日用药与药品档案',
       icon: 'pill',
-      group: '核心',
+      group: '健康',
       order: 10,
       comingSoon: false,
       render: function (el) {
@@ -354,7 +354,13 @@
       MD.ui.el('p', { class: 'muted', text: '业务数据采用端到端加密。加密和解密均在当前设备完成，服务端只见密文，无法读取用药记录。JSON 备份为明文，请只保存在可信位置。' })
     ]);
 
-    view.appendChild(MD.ui.el('div', { class: 'stack' }, [themeCard, syncCard, dataCard, privacyCard]));
+    // 文件存储（WebDAV）配置区由 webdav.js 提供：模块未加载时自动跳过，保持解耦。
+    var cards = [themeCard, syncCard, dataCard];
+    if (MD.webdav && typeof MD.webdav.settingsSection === 'function') {
+      cards.push(MD.webdav.settingsSection());
+    }
+    cards.push(privacyCard);
+    view.appendChild(MD.ui.el('div', { class: 'stack' }, cards));
   }
 
   function hideAuth() {

@@ -110,6 +110,18 @@ MedDesk 是一个**自托管（self-hosted）**的个人 / 家庭数字工作台
 - [x] 服务端二次哈希 argon2id；刷新令牌轮换 + 重放检测
 - [x] 关闭公开注册开关（`MEDDESK_SIGNUP_ENABLED=false`）
 
+### 2.8 工具箱与文件存储
+
+- [x] **工具箱首页**（`tools`）：按分类罗列工具，新增工具自动收录
+- [x] **单价计算器**（`tools/unit-price`）：A/B 比价，同量纲自动折算
+- [x] **贷款计算器**（`tools/loan`）：等额本息 / 等额本金 + 按月（年）还款计划表
+- [x] **油耗计算器**（`tools/fuel`）：百公里油耗与每公里成本
+- [x] **单位换算器**（`tools/convert`）：长度 / 重量 / 体积 / 温度
+- [x] **四个计算器全部本地计算**，零网络请求、零数据上传
+- [x] **文件存储**（`files`）：后端 `/api/v1/webdav/*` 代理你自己的 WebDAV 服务
+- [x] 凭据用会话 DEK（AES-GCM）加密存 IndexedDB，不明文落 localStorage；服务端不落盘、不记日志
+- [x] 后端护栏：仅 https + 禁内网/回环 + 不跟随重定向 + 路径边界校验 + 15s 超时 + 体积上限
+
 ---
 
 ## 3. 架构总览
@@ -274,7 +286,8 @@ meddesk/
 │   │   └── migrations/            # 0001_init.sql（幂等）
 │   ├── syncsvc/                   # 加密 push/pull/stats/reset
 │   ├── attachments/               # 密文附件上传/下载/删除
-│   └── export/                    # PDF/CSV（纯内存渲染）
+│   ├── export/                    # PDF/CSV（纯内存渲染）
+│   └── webdav/                    # WebDAV 代理（凭据不落盘、SSRF 与路径边界校验）
 │
 ├── web/                           # 前端（零构建、零外链）
 │   ├── index.html
@@ -293,6 +306,12 @@ meddesk/
 │           ├── remind.js          # 提醒调度
 │           ├── med.js             # 用药模块视图
 │           ├── export.js          # 导出交互
+│           ├── tools.js           # 工具箱容器：首页 + 统一外壳 + 表单/结果构件
+│           ├── tool-unit-price.js # 单价计算器（tools/unit-price）
+│           ├── tool-loan.js       # 贷款计算器（tools/loan）
+│           ├── tool-fuel.js       # 油耗计算器（tools/fuel）
+│           ├── tool-convert.js    # 单位换算器（tools/convert）
+│           ├── webdav.js          # 文件存储：设置页配置区 + files 路由
 │           └── app.js             # 启动引导
 │
 ├── deploy/
@@ -314,8 +333,39 @@ meddesk/
     ├── DEPLOYMENT.md              # 从零到上线 11 步
     ├── DATA-MODEL.md              # 数据模型与同步协议
     ├── SECURITY.md                # 威胁模型与安全基线
-    └── EXTENDING.md               # 如何新增模块
+    ├── EXTENDING.md               # 如何新增模块
+    └── TOOLS.md                   # 工具箱与文件存储（WebDAV）
 ```
+
+---
+
+## 5.1 工具箱与文件存储模块结构
+
+两大模块都挂在侧栏「**工具箱**」分组下，但性质完全不同：
+
+| 模块 | 数据去哪了 | 是否需要服务端 |
+|---|---|---|
+| **工具箱**（计算器） | **不出浏览器**，纯本地计算 | 否（零网络请求） |
+| **文件存储**（WebDAV） | 经自己的 MedDesk 服务端代理到你的网盘 | 是（后端代理 + 前端凭据加密存储） |
+
+```
+工具箱（侧栏分组）
+├── tools                     工具箱首页：按分类展示工具卡片
+│   ├── tools/unit-price      单价计算器   （hidden 子路由，父项高亮）
+│   ├── tools/loan            贷款计算器
+│   ├── tools/fuel            油耗计算器
+│   └── tools/convert         单位换算器
+└── files                     文件存储（WebDAV，后端 /api/v1/webdav/* 代理）
+```
+
+要点：
+
+- 工具子路由声明 `parent: 'tools'` + `hidden: true`——**不进侧栏与底部 Tab**，只在工具箱容器内部导航，激活时「工具箱」保持高亮。
+- 新增工具 = 新建一个 `web/assets/js/tool-<id>.js` + 在 `index.html` 脚本链加一行，**零后端改动**（见 [docs/TOOLS.md](docs/TOOLS.md) 第 10 节）。
+- 文件存储的凭据用**会话 DEK（AES-GCM）加密后存 IndexedDB**，绝不明文落 localStorage；服务端**不落盘、不记日志**，凭据只走 HTTPS **请求体**（不进 URL，避免被访问日志记录）。
+- ⚠ **文件本身不进 E2EE 信封**：文件按原样转发到你的 WebDAV 服务，该服务的运营方可以看到明文——敏感文件请先自行加密或自己托管 WebDAV。
+
+详见 👉 **[docs/TOOLS.md](docs/TOOLS.md)**；安全边界见 [docs/SECURITY.md](docs/SECURITY.md) 第 8 节。
 
 ---
 
@@ -556,6 +606,7 @@ curl -fsS https://med.example.com/api/v1/health
 | [docs/DATA-MODEL.md](docs/DATA-MODEL.md) | 服务端关系模型、客户端域模型、同步协议、IndexedDB |
 | [docs/SECURITY.md](docs/SECURITY.md) | 密钥派生、令牌策略、威胁模型与能力边界 |
 | [docs/EXTENDING.md](docs/EXTENDING.md) | 新增模块的标准步骤与二期预留点 |
+| [docs/TOOLS.md](docs/TOOLS.md) | 工具箱（四个计算器）与文件存储（WebDAV）用法、契约与安全边界 |
 
 ---
 

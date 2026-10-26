@@ -36,6 +36,14 @@
     <symbol id="i-lock" viewBox="0 0 24 24"><rect x="4" y="10" width="16" height="11" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></symbol>
     <symbol id="i-logout" viewBox="0 0 24 24"><path d="M10 17l5-5-5-5m5 5H3M14 4h5a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-5"/></symbol>
     <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <!-- 以下为工具箱与文件存储模块新增图标（stroke 风格，与既有 sprite 保持一致） -->
+    <symbol id="i-toolbox" viewBox="0 0 24 24"><path d="M3 7h18v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/><path d="M2 7h20M10 7V5a1.5 1.5 0 0 1 1.5-1.5h1A1.5 1.5 0 0 1 14 5v2M7 13h10"/></symbol>
+    <symbol id="i-scale" viewBox="0 0 24 24"><path d="M12 3v18M7 21h10"/><path d="M12 5 4 8l-2 5a3 3 0 0 0 6 0Z"/><path d="m12 5 8 3 2 5a3 3 0 0 1-6 0Z"/></symbol>
+    <symbol id="i-banknote" viewBox="0 0 24 24"><rect x="2" y="6" width="20" height="12" rx="2"/><circle cx="12" cy="12" r="3"/><path d="M6 12h.01M18 12h.01"/></symbol>
+    <symbol id="i-fuel" viewBox="0 0 24 24"><path d="M3 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16"/><path d="M13 9h3a2 2 0 0 1 2 2v6a1.5 1.5 0 0 0 3 0V9l-2-4"/><path d="M3 21h10"/></symbol>
+    <symbol id="i-swap" viewBox="0 0 24 24"><path d="M4 8h13l-3-3M20 16H7l3 3"/></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h3.6a2 2 0 0 1 1.4.6L11 7h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V7Z"/></symbol>
+    <symbol id="i-upload-cloud" viewBox="0 0 24 24"><path d="M7 18a4 4 0 0 1 .6-8A5 5 0 0 1 17 9.5a3.5 3.5 0 0 1 .5 8.5"/><path d="M12 21V12m-3 3 3-3 3 3"/></symbol>
   </svg>
 
   <div class="app" id="app">
@@ -71,6 +79,13 @@
   <script src="/assets/js/remind.js" defer></script>
   <script src="/assets/js/med.js" defer></script>
   <script src="/assets/js/export.js" defer></script>
+  <!-- 工具箱：容器与共享契约必须早于各工具页加载（工具在脚本执行期即注册） -->
+  <script src="/assets/js/tools.js" defer></script>
+  <script src="/assets/js/tool-unit-price.js" defer></script>
+  <script src="/assets/js/tool-loan.js" defer></script>
+  <script src="/assets/js/tool-fuel.js" defer></script>
+  <script src="/assets/js/tool-convert.js" defer></script>
+  <script src="/assets/js/webdav.js" defer></script>
   <script src="/assets/js/app.js" defer></script>
 </body>
 </html>

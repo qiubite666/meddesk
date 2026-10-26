@@ -27,6 +27,7 @@ import (
 	"github.com/qiubite666/meddesk/internal/model"
 	"github.com/qiubite666/meddesk/internal/store"
 	"github.com/qiubite666/meddesk/internal/syncsvc"
+	"github.com/qiubite666/meddesk/internal/webdav"
 )
 
 // Version 服务版本号，可通过 -ldflags "-X ...server.Version=v1.2.3" 覆盖。
@@ -75,7 +76,10 @@ func New(d Deps) (*gin.Engine, error) {
 	r.Use(middleware.Logger(log))
 	r.Use(middleware.SecurityHeaders())
 	r.Use(middleware.CORS(cfg.CORS.AllowedOrigins))
-	r.Use(middleware.BodyLimit(cfg.Upload.MaxBytes))
+	// 请求体上限按路径区分：WebDAV 走的是网盘文件，远大于业务附件上限（默认 8 MiB）。
+	r.Use(middleware.BodyLimitByPath(cfg.Upload.MaxBytes, []middleware.PathLimit{
+		{Prefix: "/api/v1/webdav/", Bytes: webdavUploadLimit},
+	}))
 
 	// 存活与就绪探针（不鉴权、不计入业务限流）。
 	r.GET("/api/v1/health", func(c *gin.Context) {
@@ -120,11 +124,21 @@ func New(d Deps) (*gin.Engine, error) {
 	attachments.Mount(v1, attachments.NewService(d.Store.Attachments(), cfg.Upload), requireAuth)
 	export.Mount(v1, export.NewService(cfg.PDF), requireAuth)
 
+	// WebDAV 代理：目标服务不返回 CORS 头，浏览器无法直连，故由本站转发。
+	// 凭据随请求传入，后端不持久化、不记日志；访问范围由 webdav 包做路径与 SSRF 校验。
+	webdavGroup := v1.Group("/webdav")
+	webdavGroup.Use(requireAuth)
+	webdav.RegisterWebDAV(webdavGroup)
+
 	// 前端静态资源：优先内嵌 FS，开发模式读磁盘。
 	mountSPA(r, cfg, log)
 
 	return r, nil
 }
+
+// webdavUploadLimit 是 WebDAV 上传的请求体上限（200 MiB），与 internal/webdav 的
+// 下载上限保持一致：网盘单文件通常远大于业务附件，沿用 8 MiB 会误伤正常上传。
+const webdavUploadLimit = 200 << 20
 
 // probe 把 error 转成健康状态字符串。
 func probe(err error) string { return probeBool(err == nil) }
