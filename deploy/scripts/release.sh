@@ -96,8 +96,7 @@ else
   if [[ -z "$REL_ID" ]]; then
     curl -sS -X POST -H "$AUTH" -H "Content-Type: application/json" \
       -d "{\"tag_name\":\"${VER}\",\"name\":\"MedDesk ${VER}\",\"draft\":false,\"prerelease\":false,\"body\":\"MedDesk ${VER}（sha256 二进制: ${BIN_SHA} / 完整包: ${TGZ_SHA}）\"}" \
-      "${REPO_API}/releases" > /tmp/rel.json
-    REL_ID=$(python -c "import json;print(json.load(open('/tmp/rel.json')).get('id',''))")
+      "${REPO_API}/releases" | python -c "import json,sys;print(json.load(sys.stdin).get('id',''))"
   fi
   if [[ -z "$REL_ID" ]]; then echo "  ⚠ Release 创建失败（权限或已存在冲突），请手动检查"; else
     for f in "dist/release/${NAME}" "$TARBALL"; do
@@ -105,8 +104,7 @@ else
       curl -sS -X POST -H "$AUTH" -H "Content-Type: application/octet-stream" \
         --data-binary "@${f}" \
         "${REPO_API//api.github.com/uploads.github.com}/releases/${REL_ID}/assets?name=${ANAME}" \
-        > /tmp/asset.json
-      echo "  上传 ${ANAME}: $(python -c "import json;d=json.load(open('/tmp/asset.json'));print(d.get('state', d.get('message','?')))")"
+        | python -c "import json,sys;d=json.load(sys.stdin);print(d.get('state', d.get('message','?')))"
     done
     echo "  Release: https://github.com/qiubite666/meddesk/releases/tag/${VER}"
   fi
