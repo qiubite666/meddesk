@@ -2,10 +2,15 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -133,35 +138,100 @@ func probeBool(ok bool) string {
 }
 
 // mountSPA 挂载单页应用：静态文件优先，未命中回退 index.html（支持前端路由刷新）。
+//
+// 缓存策略（解决「发版后页面仍用旧 JS」）：
+//  1. 启动时对内嵌前端全部文件计算内容哈希 buildID；
+//  2. index.html 的所有 /assets/ 引用被注入 ?v=<buildID> 指纹参数，指纹变化 → URL 变化 →
+//     浏览器/CDN 必然重新拉取（配合 /assets/ 的 immutable 长缓存是安全的）；
+//  3. sw.js 注入同样的 buildID 作为 Service Worker 缓存名后缀，activate 时自动清理旧缓存；
+//  4. index.html / sw.js / manifest 响应 no-cache（每次校验），静态资源附 ETag 支持 304 协商。
 func mountSPA(r *gin.Engine, cfg *config.Config, log *slog.Logger) {
-	var root http.FileSystem
+	var fsys fs.FS
 	if cfg.WebDir != "" {
 		log.Info("静态资源使用磁盘目录（开发模式）", "dir", cfg.WebDir)
-		root = http.Dir(cfg.WebDir)
+		fsys = os.DirFS(cfg.WebDir)
 	} else {
 		sub, err := fs.Sub(meddesk.WebFS, "web")
 		if err != nil {
 			// 不会发生：//go:embed all:web 已保证目录存在；仅作兜底，避免启动即崩。
 			log.Error("内嵌前端资源不可用，回退到根目录", "error", err)
-			root = http.FS(meddesk.WebFS)
+			fsys = meddesk.WebFS
 		} else {
-			root = http.FS(sub)
+			fsys = sub
 		}
 	}
+	root := http.FS(fsys)
 	fileServer := http.FileServer(root)
 
-	// 外壳文件禁止强缓存，避免发版后浏览器仍用旧索引。
-	noCache := func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-		fileServer.ServeHTTP(w, r)
+	// ---- 构建哈希与注入 ----
+	buildID := computeBuildID(fsys)
+	var reRef = regexp.MustCompile(`(?i)(src|href)="(/assets/[^"]+)"`)
+	injectRef := func(data []byte) []byte {
+		return reRef.ReplaceAll(data, []byte(`$1="`+"$2?v="+buildID+`"`))
 	}
-	r.GET("/", gin.WrapH(http.HandlerFunc(noCache)))
-	r.GET("/index.html", gin.WrapH(http.HandlerFunc(noCache)))
-	r.GET("/sw.js", gin.WrapH(http.HandlerFunc(noCache)))
-	r.GET("/manifest.webmanifest", gin.WrapH(fileServer))
-	// 带指纹的静态资源可长期缓存。
+	var indexHTML, swJS []byte
+	if f, err := root.Open("index.html"); err == nil {
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(f)
+		_ = f.Close()
+		indexHTML = injectRef(buf.Bytes())
+	}
+	if f, err := root.Open("sw.js"); err == nil {
+		buf := new(bytes.Buffer)
+		_, _ = buf.ReadFrom(f)
+		_ = f.Close()
+		swJS = bytes.ReplaceAll(buf.Bytes(), []byte("__BUILD_ID__"), []byte(buildID))
+	}
+	log.Info("前端静态资源构建指纹就绪", "buildID", buildID)
+
+	// writeBytes：直接输出注入后的字节并附加 no-cache 头。
+	writeBytes := func(w http.ResponseWriter, r *http.Request, data []byte, ctype string) {
+		w.Header().Set("Content-Type", ctype)
+		w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+		w.Header().Set("ETag", `"`+buildID+`"`)
+		if match := r.Header.Get("If-None-Match"); match != "" && match == `"`+buildID+`"` {
+			w.WriteHeader(http.StatusNotModified)
+			return
+		}
+		_, _ = w.Write(data)
+	}
+	serveIndex := func(w http.ResponseWriter, r *http.Request) {
+		if len(indexHTML) == 0 {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		writeBytes(w, r, indexHTML, "text/html; charset=utf-8")
+	}
+	serveSW := func(w http.ResponseWriter, r *http.Request) {
+		if len(swJS) == 0 {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		writeBytes(w, r, swJS, "application/javascript; charset=utf-8")
+	}
+	r.GET("/", gin.WrapH(http.HandlerFunc(serveIndex)))
+	r.GET("/index.html", gin.WrapH(http.HandlerFunc(serveIndex)))
+	r.GET("/sw.js", gin.WrapH(http.HandlerFunc(serveSW)))
+	// manifest：no-cache + ETag 协商（内容小，304 开销可忽略）。
+	r.GET("/manifest.webmanifest", func(c *gin.Context) {
+		etag := `"` + buildID + `"`
+		c.Header("Cache-Control", "no-cache, must-revalidate")
+		c.Header("ETag", etag)
+		if c.GetHeader("If-None-Match") == etag {
+			c.AbortWithStatus(http.StatusNotModified)
+			return
+		}
+		fileServer.ServeHTTP(c.Writer, c.Request)
+	})
+	// 静态资源：URL 已由 index.html 注入 ?v=<buildID> 指纹，指纹变化 → URL 变化 →
+	// 浏览器/CDN 必然重新拉取，因此这里的长缓存 + immutable 是安全的；ETag 兜底 304 协商。
 	r.GET("/assets/*filepath", func(c *gin.Context) {
-		c.Header("Cache-Control", "public, max-age=604800, immutable")
+		c.Header("Cache-Control", "public, max-age=31536000, immutable")
+		c.Header("ETag", `"`+buildID+`"`)
+		if c.GetHeader("If-None-Match") == `"`+buildID+`"` {
+			c.AbortWithStatus(http.StatusNotModified)
+			return
+		}
 		fileServer.ServeHTTP(c.Writer, c.Request)
 	})
 
@@ -184,6 +254,26 @@ func mountSPA(r *gin.Engine, cfg *config.Config, log *slog.Logger) {
 		c.Request.URL.Path = "/"
 		fileServer.ServeHTTP(c.Writer, c.Request)
 	})
+}
+
+// computeBuildID 对前端静态目录全部文件内容计算 sha256，取前 12 位 hex 作为构建指纹。
+// 任一前端文件变化都会改变该值，从而驱动浏览器与 Service Worker 更新缓存。
+func computeBuildID(fsys fs.FS) string {
+	h := sha256.New()
+	_ = fs.WalkDir(fsys, ".", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		data, err := fs.ReadFile(fsys, path)
+		if err != nil {
+			return nil
+		}
+		h.Write([]byte(path))
+		h.Write([]byte{0})
+		h.Write(data)
+		return nil
+	})
+	return hex.EncodeToString(h.Sum(nil))[:12]
 }
 
 // writeError 统一错误输出：状态码由错误码映射，避免暴露内部细节。

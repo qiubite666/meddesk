@@ -649,3 +649,78 @@ func min(a, b int) int {
 	}
 	return b
 }
+
+
+// TestStaticCacheFingerprint 验证静态资源缓存策略：
+// index.html 注入 ?v=<buildID> 指纹、sw.js 注入构建哈希、/assets/ 带不可变缓存与 ETag。
+func TestStaticCacheFingerprint(t *testing.T) {
+	e := newEnv(t)
+	get := func(path string) (*http.Response, string) {
+		resp, err := e.client.Get(e.srv.URL + path)
+		if err != nil {
+			t.Fatalf("GET %s: %v", path, err)
+		}
+		defer resp.Body.Close()
+		var sb strings.Builder
+		_, _ = io.Copy(&sb, resp.Body)
+		return resp, sb.String()
+	}
+
+	t.Run("index 注入指纹且禁止强缓存", func(t *testing.T) {
+		resp, body := get("/index.html")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("期望 200，实际 %d", resp.StatusCode)
+		}
+		if cc := resp.Header.Get("Cache-Control"); !strings.Contains(cc, "no-cache") {
+			t.Fatalf("index.html 的 Cache-Control 应含 no-cache，实际 %q", cc)
+		}
+		if resp.Header.Get("ETag") == "" {
+			t.Fatal("index.html 应带 ETag")
+		}
+		if !strings.Contains(body, "?v=") {
+			t.Fatal("index.html 的静态引用应注入 ?v=<buildID> 指纹")
+		}
+		if !strings.Contains(body, `/assets/js/med.js?v=`) {
+			t.Fatal("index.html 应注入 med.js 的带指纹引用")
+		}
+	})
+
+	t.Run("sw.js 注入构建哈希", func(t *testing.T) {
+		resp, body := get("/sw.js")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("期望 200，实际 %d", resp.StatusCode)
+		}
+		if strings.Contains(body, "__BUILD_ID__") {
+			t.Fatal("sw.js 不应残留 __BUILD_ID__ 占位符（服务端应已注入）")
+		}
+		if !strings.Contains(body, "meddesk-shell-") {
+			t.Fatal("sw.js 应使用带构建哈希后缀的缓存名")
+		}
+	})
+
+	t.Run("assets 不可变缓存与 ETag 协商", func(t *testing.T) {
+		resp, _ := get("/assets/css/app.css")
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("期望 200，实际 %d", resp.StatusCode)
+		}
+		cc := resp.Header.Get("Cache-Control")
+		if !strings.Contains(cc, "immutable") || !strings.Contains(cc, "max-age=31536000") {
+			t.Fatalf("/assets/ 应为一年期不可变缓存，实际 %q", cc)
+		}
+		etag := resp.Header.Get("ETag")
+		if etag == "" {
+			t.Fatal("/assets/ 应带 ETag")
+		}
+		// If-None-Match 命中 → 304
+		req, _ := http.NewRequest(http.MethodGet, e.srv.URL+"/assets/css/app.css", nil)
+		req.Header.Set("If-None-Match", etag)
+		resp304, err := e.client.Do(req)
+		if err != nil {
+			t.Fatalf("304 请求失败: %v", err)
+		}
+		defer resp304.Body.Close()
+		if resp304.StatusCode != http.StatusNotModified {
+			t.Fatalf("If-None-Match 命中时应返回 304，实际 %d", resp304.StatusCode)
+		}
+	})
+}
