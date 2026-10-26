@@ -19,8 +19,7 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "127.0.0.1:${PG_PORT:-5432}:5432"
-    volumes:
-      - pgdata_mw:/var/lib/postgresql/data
+      - /home/ops/service/docker/meddesk/data:/var/lib/postgresql/data
       # 首次启动（数据卷为空）时自动安装 citext 扩展；与宿主机安装方式的语义一致
       - ./scripts/initdb:/docker-entrypoint-initdb.d:ro
       # 调优配置：config_file 方式（postgres-tuning.conf 为完整配置，与宿主机 conf.d 场景共用一份）
@@ -73,5 +72,3 @@ services:
       retries: 10
     mem_limit: 320m
 
-volumes:
-  pgdata_mw:
