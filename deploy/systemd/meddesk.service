@@ -30,11 +30,15 @@
 [Unit]
 Description=MedDesk 个人数字工作台（端到端加密用药提醒）
 Documentation=https://github.com/qiubite666/meddesk
-After=network-online.target postgresql.service redis-server.service
-Wants=network-online.target
+# 兼容两种数据库方案：
+#   宿主机安装 —— postgresql.service/redis-server.service 存在，After 负责排序、Wants 负责拉起；
+#   Docker compose —— 这些 unit 不存在，After/Wants 对不存在的 unit 自动忽略，不阻断启动。
+# ⚠ 不能用 Requires=postgresql.service：compose 方案下该 unit 不存在，会导致本服务直接启动失败。
+#   Docker 方案下容器由自身的 restart 策略拉起；应用连不上库时会退出并由 Restart=always 重试自愈。
+After=network-online.target docker.service postgresql.service redis-server.service
+Wants=network-online.target docker.service
 # Redis 只是可选的限流/吊销名单后端（MEDDESK_REDIS_ENABLED=false 可降级），
 # 因此用 Wants 而非 Requires：Redis 挂了应用仍应能带降级启动。
-Requires=postgresql.service
 
 [Service]
 Type=simple
