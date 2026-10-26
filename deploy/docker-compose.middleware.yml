@@ -19,10 +19,15 @@ services:
       TZ: ${TZ:-Asia/Shanghai}
     ports:
       - "127.0.0.1:${PG_PORT:-5432}:5432"
-      - /home/ops/service/docker/meddesk/data:/var/lib/postgresql/data
-      # 首次启动（数据卷为空）时自动安装 citext 扩展；与宿主机安装方式的语义一致
+    volumes:
+      # PG 18+ 镜像要求挂载到父目录（/var/lib/postgresql）：
+      # 数据实际落在 data/18/docker/，为将来 pg_upgrade --link 升级铺路；
+      # 直接挂载 /var/lib/postgresql/data 会被 18+ 入口脚本拒绝启动。
+      # 首次启动 entrypoint 自动 chown 该目录给容器内 postgres 用户。
+      - /home/ops/service/docker/meddesk/data:/var/lib/postgresql
+      # 首次启动（数据目录为空）时自动安装 citext 扩展
       - ./scripts/initdb:/docker-entrypoint-initdb.d:ro
-      # 调优配置：config_file 方式（postgres-tuning.conf 为完整配置，与宿主机 conf.d 场景共用一份）
+      # 调优配置：config_file 方式（与宿主机 conf.d 场景共用一份）
       - ./postgres-tuning.conf:/etc/postgresql/postgresql.conf:ro
     # ⚠ config_file 会屏蔽官方镜像「listen_addresses='*'」的默认补丁；
     #   tuning.conf 里写的是 127.0.0.1（宿主机场景），容器内会导致端口映射静默失效
@@ -40,7 +45,7 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
-    # 内存上限 500m（配套：shared_buffers ≤128MB，见 postgres-tuning.conf）
+    # 内存上限 500m（配套：shared_buffers=128MB，见 postgres-tuning.conf）
     mem_limit: 500m
 
   redis:
@@ -71,4 +76,3 @@ services:
       timeout: 5s
       retries: 10
     mem_limit: 320m
-
