@@ -538,6 +538,45 @@
     window.navigator.serviceWorker.register('/sw.js').catch(function () {
       // Service Worker 注册失败不阻断主应用。
     });
+    // 新 SW 接管后自动重载一次：sw.js 里 skipWaiting + clients.claim 会让新版本立刻接管，
+    // 但当前页面仍是旧 HTML 渲染出来的，不重载就看不到新界面（发版后「看不到新功能」的主因）。
+    // hadController 用于跳过「首次安装」那一次，避免首次访问白刷一次。
+    try {
+      var hadController = !!window.navigator.serviceWorker.controller;
+      var reloaded = false;
+      window.navigator.serviceWorker.addEventListener('controllerchange', function () {
+        if (!hadController) { hadController = true; return; }
+        if (reloaded) return;
+        reloaded = true;
+        window.location.reload();
+      });
+    } catch (_) { /* 不支持时静默 */ }
+  }
+
+  /**
+   * 静默比对服务端构建指纹与当前页面指纹。
+   * 场景：页面来自旧缓存（SW 尚未换版）→ 页面本身不会重载，用户就会长期停留在旧界面。
+   * 命中不一致时在侧栏底部挂一个「有新版本 · 点击刷新」，由用户决定何时刷新（不打断录入）。
+   */
+  function watchBuildFreshness() {
+    if (!MD.buildID || MD.buildID === 'dev' || typeof window.fetch !== 'function') return;
+    window.setTimeout(function () {
+      window.fetch('/', { method: 'HEAD', cache: 'no-store' }).then(function (res) {
+        var tag = String(res.headers.get('ETag') || '').replace(/"/g, '');
+        if (!tag || tag === MD.buildID) return;
+        var foot = doc.getElementById('sidebar-foot');
+        if (!foot || foot.querySelector('#build-update')) return;
+        var btn = MD.ui.el('button', {
+          class: 'btn btn-ghost',
+          type: 'button',
+          id: 'build-update',
+          style: { marginTop: '8px', width: '100%' },
+          text: '有新版本 · 点击刷新',
+          onClick: function () { window.location.reload(); }
+        });
+        foot.appendChild(btn);
+      }).catch(function () { /* 离线或跨域失败时忽略 */ });
+    }, 2500);
   }
 
   doc.addEventListener('DOMContentLoaded', async function () {
@@ -599,6 +638,7 @@
       restoreSession();
       MD.sync.startAuto(60000);
       registerServiceWorker();
+      watchBuildFreshness();
     } catch (error) {
       MD.ui.clear(authScreen);
       authScreen.appendChild(MD.ui.el('section', { class: 'auth-card card' }, [
