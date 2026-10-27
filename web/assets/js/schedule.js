@@ -29,6 +29,7 @@
   var KINDS = [
     { id: 'daily', label: '每日' },
     { id: 'twice_daily', label: '每日两次' },
+    { id: 'thrice_daily', label: '每日三次' },
     { id: 'interval_hours', label: '按小时间隔' },
     { id: 'specific_dates', label: '指定日期' },
     { id: 'custom_interval', label: '自定义间隔' },
@@ -37,6 +38,7 @@
 
   var DEFAULT_TIMES = ['08:00'];
   var DEFAULT_TWICE_TIMES = ['08:00', '20:00'];
+  var DEFAULT_THRICE_TIMES = ['08:00', '13:00', '20:00'];
 
   /* ------------------------------------------------------- 基础时间工具 */
   function pad2(n) { return (n < 10 ? '0' : '') + n; }
@@ -162,6 +164,10 @@
       if (times.length === 0) { return DEFAULT_TWICE_TIMES.slice(); }
       return times.slice(0, 2);
     }
+    if (kind === 'thrice_daily') {
+      if (times.length === 0) { return DEFAULT_THRICE_TIMES.slice(); }
+      return times.slice(0, 3);
+    }
     if (kind === 'interval_hours') {
       return times.length ? times.slice(0, 1) : DEFAULT_TIMES.slice();
     }
@@ -229,6 +235,7 @@
     switch (schedule.kind) {
       case 'daily':
       case 'twice_daily':
+      case 'thrice_daily':
         return true;
       case 'interval_hours':
         // 每天从起始时间起按小时间隔发生（当天 24:00 前的部分），跨天次日重新开始
@@ -369,6 +376,7 @@
         tail = joinTimes(times);
         break;
       case 'twice_daily':
+      case 'thrice_daily':
         tail = joinTimes(times);
         break;
       case 'interval_hours':
@@ -450,6 +458,7 @@
 
     var fromMs = startOfDay(nowMs) - YESTERDAY_SPAN_MS; // 昨天的 00:00
     var toMs = startOfDay(nowMs) + DAY_MS - 1;          // 今天的 23:59:59.999
+    var todayStartMs = startOfDay(nowMs);               // 用于区分「昨天的」与「今天的」剂量
     var out = [];
 
     for (var i = 0; i < schedules.length; i++) {
@@ -492,6 +501,11 @@
         } else {
           status = 'pending';
         }
+
+        // 昨天的剂量只在「未完成」时顺延展示：昨天已服用/已跳过的不要再占用今日列表，
+        // 否则跨过零点后同一种药会同时出现「昨天已完成」与「今天待处理」两条，看起来就是重复提醒。
+        // 昨天漏服(missed)与待处理(pending)仍然保留，保证昨天没做完的不会凭空消失。
+        if (occ.timeMs < todayStartMs && (status === 'taken' || status === 'skipped')) { continue; }
 
         var name = med ? (med.name || String(med.id || '').slice(0, 8)) : String(sch.medicationId || '').slice(0, 8);
         out.push({

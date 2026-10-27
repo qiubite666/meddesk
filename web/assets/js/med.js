@@ -40,6 +40,7 @@
   var FALLBACK_KINDS = [
     { id: 'daily', label: '每日' },
     { id: 'twice_daily', label: '每日两次' },
+    { id: 'thrice_daily', label: '每日三次' },
     { id: 'interval_hours', label: '按小时间隔' },
     { id: 'specific_dates', label: '指定日期' },
     { id: 'custom_interval', label: '自定义间隔' },
@@ -1219,12 +1220,17 @@
   function renderKindFields(body, kind, sc) {
     var box = body.querySelector('#md-f-kind');
     if (!box) return;
-    var times = (sc && sc.times && sc.times.length) ? sc.times : (kind === 'twice_daily' ? ['08:00', '20:00'] : ['08:00']);
+    var defaultTimes = kind === 'thrice_daily' ? ['08:00', '13:00', '20:00']
+      : (kind === 'twice_daily' ? ['08:00', '20:00'] : ['08:00']);
+    var times = (sc && sc.times && sc.times.length) ? sc.times : defaultTimes;
     var html = '';
-    if (kind === 'daily' || kind === 'twice_daily') {
+    if (kind === 'daily' || kind === 'twice_daily' || kind === 'thrice_daily') {
       html = '<div class="md-row2">' +
         fieldRow('首次服药时间', inputText('md-f-time', times[0], '', 'time')) +
-        (kind === 'twice_daily' ? fieldRow('第二次时间', inputText('md-f-time2', times[1] || '20:00', '', 'time')) : '') +
+        ((kind === 'twice_daily' || kind === 'thrice_daily')
+          ? fieldRow('第二次时间', inputText('md-f-time2', times[1] || '20:00', '', 'time')) : '') +
+        (kind === 'thrice_daily'
+          ? fieldRow('第三次时间', inputText('md-f-time3', times[2] || '20:00', '', 'time')) : '') +
         '</div>';
     } else if (kind === 'interval_hours') {
       html = '<div class="md-row2">' +
@@ -1277,7 +1283,10 @@
     var kind = kindBtn ? kindBtn.getAttribute('data-kind') : 'daily';
     var time1 = val(body, '#md-f-time') || '08:00';
     var times = [time1];
-    if (kind === 'twice_daily') times.push(val(body, '#md-f-time2') || '20:00');
+    if (kind === 'twice_daily' || kind === 'thrice_daily') {
+      times.push(val(body, '#md-f-time2') || (kind === 'thrice_daily' ? '13:00' : '20:00'));
+    }
+    if (kind === 'thrice_daily') times.push(val(body, '#md-f-time3') || '20:00');
 
     // 复制模式下 m 是预填模板（id 为空串），必须判空后新建——否则 rec.id 与
     // sched.medicationId 都会是空串，导致新药与排程对不上（排程丢失）。
