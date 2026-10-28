@@ -41,3 +41,15 @@ web/assets/fonts/local/
 
 .release-hdr
 .release-token
+
+# ---- Capacitor / Android ----
+node_modules/
+# android/ 整体是 `npx cap add android` 的生成物（约 200 个文件：Gradle 脚本、res、
+# assets 等），可再生，故整体忽略。
+# 例外：android/app/src/main/java/fun/qiubite/meddesk/alarm/ 下的 3 个手写 Kotlin
+# 文件是全仓库唯一不可再生的原生源码，已用 `git add -f` 强制跟踪；git 对已跟踪文件
+# 会跳过 ignore 规则，两者可以共存。不要删掉那次强制 add，也不要改成忽略例外语法。
+android/
+*.apk
+*.aab
+local.properties

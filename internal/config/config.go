@@ -3,6 +3,7 @@ package config
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -146,11 +147,101 @@ func Load() (*Config, error) {
 		},
 	}
 
+	// CORS 白名单只告警不阻断：一次误配不应该让服务起不来，
+	// 否则线上一改环境变量就可能被挡在门外，问题反而更难发现。
+	for _, w := range ValidateOrigins(c.CORS.AllowedOrigins) {
+		log.Printf("[warn] CORS 配置: %s", w)
+	}
+
 	if err := c.Validate(); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
+
+// DefaultAppOrigins 返回 Capacitor 打包客户端的容器源清单（每次返回新切片，避免调用方改动共享状态）。
+//
+// App 内的页面由设备本地 WebView 提供，页面 Origin 由打包配置决定、与 API 域名无关：
+//   - Android：契约固定 androidScheme=https，页面源为 https://localhost；
+//   - iOS：Capacitor 默认 capacitor://localhost（本次不做 iOS，列出仅为兼容默认行为）；
+//   - 自定义 scheme 或本地联调时会出现 http://localhost。
+//
+// 安全含义：localhost 是整台机器共享的源，放行它等于允许本机运行的任意网页
+// 携带用户凭据读取本 API 的数据。因此这里**不**做内置自动放行，
+// 必须由运维显式写入 MEDDESK_CORS_ALLOWED_ORIGINS；
+// 白名单为空时 middleware.CORS 仍维持「只放行同源」的默认语义。
+func DefaultAppOrigins() []string {
+	return []string{"capacitor://localhost", "https://localhost", "http://localhost"}
+}
+
+// ValidateOrigins 逐个校验 CORS 白名单条目，返回人类可读的告警文案列表（无问题则返回 nil）。
+// 约定：只告警不返回 error，调用方自行决定如何记录。
+func ValidateOrigins(origins []string) []string {
+	var warnings []string
+	for _, raw := range origins {
+		o := strings.TrimSpace(raw)
+		if o == "" {
+			continue
+		}
+		// 带凭据的 CORS 里通配会被浏览器直接拒绝，放行它只会造成「配了却以为生效」的错觉。
+		if o == "*" {
+			warnings = append(warnings, `CORS 白名单中的 "*" 已忽略：本服务带凭据，不支持通配，请逐条列出源`)
+			continue
+		}
+		scheme, rest, ok := strings.Cut(o, "://")
+		if !ok || scheme == "" || rest == "" {
+			warnings = append(warnings, fmt.Sprintf("CORS 白名单条目 %q 不是合法 origin，应为 scheme://host[:port]，例如 https://localhost", o))
+			continue
+		}
+		if !validOriginScheme(scheme) {
+			warnings = append(warnings, fmt.Sprintf("CORS 白名单条目 %q 的 scheme 不合法（只允许字母开头，可含字母、数字、+、-、.）", o))
+			continue
+		}
+		// origin 不允许带路径或查询串：带了说明填的是站点地址而非源，匹配时永远不会命中。
+		// 先于字符校验判断，好让告警文案指向真正的问题。
+		if strings.ContainsAny(rest, "/?#") {
+			warnings = append(warnings, fmt.Sprintf("CORS 白名单条目 %q 含路径或查询串，origin 只应写到 host[:port]", o))
+			continue
+		}
+		if !validOriginHostPort(rest) {
+			warnings = append(warnings, fmt.Sprintf("CORS 白名单条目 %q 的 host[:port] 含非法字符（只允许字母、数字、.、-、:、[、]）", o))
+			continue
+		}
+	}
+	return warnings
+}
+
+// validOriginScheme 判断 scheme 是否形如字母开头、后续为字母/数字/+/-/.。
+func validOriginScheme(s string) bool {
+	if s == "" {
+		return false
+	}
+	if !isAlpha(s[0]) {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if !isAlphaNum(c) && c != '+' && c != '-' && c != '.' {
+			return false
+		}
+	}
+	return true
+}
+
+// validOriginHostPort 判断 host[:port] 部分（可含 IPv6 方括号）是否只含合法字符。
+func validOriginHostPort(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !isAlphaNum(c) && c != '.' && c != '-' && c != ':' && c != '[' && c != ']' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+func isAlpha(c byte) bool { return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' }
+
+func isAlphaNum(c byte) bool { return isAlpha(c) || (c >= '0' && c <= '9') }
 
 // Validate 校验必填项与取值范围，失败时给出可操作的错误信息。
 func (c *Config) Validate() error {

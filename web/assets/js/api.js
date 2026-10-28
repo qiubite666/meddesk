@@ -2,8 +2,48 @@
   'use strict';
 
   var MD = window.MD = window.MD || {};
-  var BASE = '/api/v1';
+
+  // 注意：REMOTE_API_BASE 必须声明在 `var BASE = apiBase()` 之前。
+  // var 会提升但赋值不会，若写在后面，apiBase() 在初始化期读到的就是 undefined，
+  // 原生环境未设覆盖值时会拼出 "undefined/api/v1"，表现为所有接口全部失败。
+  // 默认值写成可覆盖形式：换域名或自建实例时，只需在 index.html 里
+  // <script>window.MD_API_BASE='https://你的域名/api/v1'</script> 即可。
+  var REMOTE_API_BASE = 'https://meddesk.qiubite.fun/api/v1';
+
+  var BASE = apiBase();
   var PREFIX = 'meddesk.';
+
+  /**
+   * 决定 API 基址。
+   *
+   * 【为什么需要这个判断】
+   * Capacitor 安卓壳里把所有网页资产打包进 APK，页面源不再是服务器域名，
+   * 而是 https://localhost（capacitor.config.json 的 androidScheme 指定）。
+   * 此时 fetch('/api/v1/...') 会被解析成 https://localhost/api/v1/...，
+   * 打到设备自身必然失败——App 装上后表现为「账号密码都对但什么都加载不出来」。
+   * 因此原生环境必须切到绝对地址；浏览器与 PWA 仍走同源相对路径，行为完全不变。
+   */
+  function apiBase() {
+    try {
+      if (window.Capacitor && typeof window.Capacitor.isNativePlatform === 'function'
+        && window.Capacitor.isNativePlatform()) {
+        var override = window.MD_API_BASE;
+        if (typeof override === 'string') {
+          var v = override.replace(/\/+$/, '');
+          // 公网域名强制 https：凭据与密文信封绝不能走明文通道。
+          var isHttps = /^https:\/\/\S+/i.test(v);
+          // 仅本机与私有网段放行 http，否则模拟器/局域网联调时会「改了配置却不生效」，
+          // 表现为请求静默回落到内置默认地址，极难排查。
+          var isLocalHttp = /^http:\/\/(localhost|127\.0\.0\.1|10\.\d+\.\d+\.\d+|192\.168\.\d+\.\d+|172\.(?:1[6-9]|2\d|3[01])\.\d+\.\d+)(?::\d+)?(?:\/\S*)?$/i.test(v);
+          if (isHttps || isLocalHttp) return v;
+        }
+        return REMOTE_API_BASE;
+      }
+    } catch (e) {
+      // 壳环境探测本身出错时按浏览器处理，宁可用相对路径也不要静默发到错误地址。
+    }
+    return '/api/v1';
+  }
   var sessionFields = ['access', 'refresh', 'userId', 'expiresAt', 'kdfSalt', 'wrappedDek', 'dekIv'];
   var unauthorizedHandlers = [];
   var memoryDEK = null;

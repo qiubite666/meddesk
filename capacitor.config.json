@@ -1,0 +1,7 @@
+{
+  "appId": "fun.qiubite.meddesk",
+  "appName": "MedDesk",
+  "webDir": "web",
+  "androidScheme": "https",
+  "plugins": {}
+}

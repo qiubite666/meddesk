@@ -63,7 +63,7 @@
     return 'Asia/Shanghai';
   }
 
-  function download(blob, filename) {
+  function legacyDownload(blob, filename) {
     var url = URL.createObjectURL(blob);
     var a = document.createElement('a');
     a.href = url;
@@ -73,6 +73,16 @@
     a.click();
     document.body.removeChild(a);
     setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+  }
+
+  // 原生环境（Capacitor WebView）里 <a download> 没有任何组件接管，点击后静默失败；
+  // 故改走 MD.exportShare 的系统分享面板，浏览器行为保持原样。
+  function download(blob, filename) {
+    if (window.MD && MD.exportShare && MD.exportShare.isNative()) {
+      MD.exportShare.saveBlob(blob, filename).catch(function () { legacyDownload(blob, filename); });
+      return;
+    }
+    legacyDownload(blob, filename);
   }
 
   function msgOf(e) {

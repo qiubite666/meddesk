@@ -78,13 +78,24 @@
   <script src="/assets/js/schedule.js" defer></script>
   <script src="/assets/js/remind.js" defer></script>
   <script src="/assets/js/med.js" defer></script>
+  <!-- 安卓原生壳适配：三个模块都先探测运行环境，浏览器/PWA 下自动降级为无操作，
+       且必须在工具箱容器（tools.js）之前加载，以便共享同一套降级约定。 -->
+  <script src="/assets/js/export-share.js" defer></script>
   <script src="/assets/js/export.js" defer></script>
+  <script src="/assets/js/native-record.js" defer></script>
+  <script src="/assets/js/native-alarm.js" defer></script>
   <!-- 工具箱：容器与共享契约必须早于各工具页加载（工具在脚本执行期即注册） -->
   <script src="/assets/js/tools.js" defer></script>
   <script src="/assets/js/tool-unit-price.js" defer></script>
   <script src="/assets/js/tool-loan.js" defer></script>
   <script src="/assets/js/tool-fuel.js" defer></script>
   <script src="/assets/js/tool-convert.js" defer></script>
+  <!-- 健康工具：与「计算工具」同级，各自独立成页，从分类页进入 -->
+  <script src="/assets/js/tool-health-bmi.js" defer></script>
+  <script src="/assets/js/tool-health-bfp.js" defer></script>
+  <script src="/assets/js/tool-health-bmr.js" defer></script>
+  <script src="/assets/js/tool-health-ideal-weight.js" defer></script>
+  <script src="/assets/js/tool-health-fitness-age.js" defer></script>
   <script src="/assets/js/webdav.js" defer></script>
   <script src="/assets/js/app.js" defer></script>
 </body>

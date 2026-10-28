@@ -83,6 +83,25 @@
         { id: 'f', name: '华氏度', factor: 1 },
         { id: 'k', name: '开尔文', factor: 1 }
       ]
+    },
+    // 时间：基准单位取「毫秒」而不是「秒」。
+    // 原因：以毫秒为基准时，全部 factor 都是精确整数，在 IEEE-754 双精度下可无损表示，
+    // 换算与往返都不引入浮点误差；若改用秒为基准，毫秒的 factor 会退化成 0.001 这类
+    // 二进制无法精确表示的小数，反而给每次「毫秒 ↔ 秒」的换算带来舍入误差。
+    // 换算口径固定为：1 年 = 365 天（不区分闰年）、1 周 = 7 天、1 天 = 24 小时、
+    // 1 小时 = 60 分、1 分 = 60 秒、1 秒 = 1000 毫秒。
+    {
+      id: 'time', label: '时间', base: '毫秒',
+      from: 'h', to: 'min',
+      units: [
+        { id: 'ms', name: '毫秒', factor: 1 },
+        { id: 's', name: '秒', factor: 1000 },
+        { id: 'min', name: '分', factor: 60 * 1000 },
+        { id: 'h', name: '小时', factor: 60 * 60 * 1000 },
+        { id: 'd', name: '天', factor: 24 * 60 * 60 * 1000 },
+        { id: 'w', name: '周', factor: 7 * 24 * 60 * 60 * 1000 },
+        { id: 'y', name: '年', factor: 365 * 24 * 60 * 60 * 1000 }
+      ]
     }
   ];
 
@@ -339,7 +358,7 @@
     var note = MD.ui.el('p', {
       class: 'muted',
       style: { margin: '0', fontSize: '12px' },
-      text: '长度/重量/体积按固定倍率换算；温度采用偏移公式：°F = °C × 9/5 + 32，K = °C + 273.15。'
+      text: '长度/重量/体积/时间按固定倍率换算；温度采用偏移公式：°F = °C × 9/5 + 32，K = °C + 273.15。'
     });
 
     content.appendChild(MD.ui.el('div', { class: 'card' }, [
@@ -363,7 +382,7 @@
   MD.tools.register({
     id: TOOL_ID,
     title: '单位换算器',
-    subtitle: '长度/重量/体积/温度',
+    subtitle: '长度/重量/体积/温度/时间',
     icon: 'swap',
     category: '计算工具',
     order: 40,
