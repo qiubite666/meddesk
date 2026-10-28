@@ -117,6 +117,31 @@
   function hasDek(grantId) { return Boolean(dekCache[grantId]); }
 
   /**
+   * 取出缓存里的 owner DEK。
+   *
+   * 存在的唯一理由：兑换成功后调用方必须立刻用它做一次本地持久化
+   * （用自己账号的 DEK 再包一层），否则页面刷新即永久失联。
+   * 除这个用途外，调用方不应长时间持有该字节数组。
+   */
+  function getDek(grantId) { return dekCache[grantId] || null; }
+
+  /**
+   * 注入已解出的 owner DEK。
+   *
+   * 【为什么需要这个入口】
+   * 短码是一次性的：兑换成功即绑定当前账号，之后再拿同一个码兑换会被拒。
+   * 而 owner 的 DEK 只缓存在内存里，页面一刷新就没了 —— 若没有恢复通道，
+   * 查看方刷新一次就**永久失去**访问权。所以兑换成功后调用方必须用自己
+   * 账号的 DEK 把 ownerDek 再加密一份落盘（见 family.js 的 sealOwnerDek），
+   * 下次进入时解出来通过本方法注回缓存，不再依赖短码。
+   */
+  function adoptDek(grantId, dek) {
+    if (!grantId || !dek) return false;
+    dekCache[grantId] = dek;
+    return true;
+  }
+
+  /**
    * 拉取并解密 owner 的记录。
    * @param {string} grantId
    * @param {{sinceSeq?:number, limit?:number}} [opts]
@@ -183,6 +208,8 @@
     createGrant: createGrant,
     redeem: redeem,
     hasDek: hasDek,
+    getDek: getDek,
+    adoptDek: adoptDek,
     fetchRecords: fetchRecords,
     listGrants: listGrants,
     revoke: revoke,

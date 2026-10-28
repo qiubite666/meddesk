@@ -50,7 +50,13 @@
   };
 
   // 页面内状态：单一路由，内部切换视图，避免为每个子页注册路由
-  var S = { tab: 'archive', view: 'list', memberId: null, msg: '', err: '', busy: false, lastCode: '' };
+  var S = {
+    tab: 'archive', view: 'list', memberId: null,
+    msg: '', err: '', busy: false,
+    lastCode: '',      // 8 位短码（新方式）
+    legacyCode: '',    // 长码快照（旧方式，独立字段，避免互相覆盖）
+    showLegacy: false  // 是否展开离线快照区
+  };
 
   function nowMs() {
     return (MD.util && typeof MD.util.nowMs === 'function') ? MD.util.nowMs() : Date.now();
@@ -337,6 +343,15 @@
   function renderDetail(host, member, data) {
     clear(host);
 
+    // 实时拉取失败会在这里留一条告警，避免用户以为看到的是最新数据
+    if (S.err) {
+      host.appendChild(el('p', {
+        class: 'muted',
+        text: S.err,
+        style: { color: 'var(--danger)', fontSize: '13px', margin: '0 0 10px' }
+      }));
+    }
+
     host.appendChild(el('div', { class: 'row', style: { gap: '10px', alignItems: 'center', marginBottom: '14px' } }, [
       el('button', {
         class: 'btn btn-ghost', type: 'button', text: '返回',
@@ -344,7 +359,11 @@
       }),
       el('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: '0' } }, [
         el('div', { text: member.name || '未命名', style: { fontSize: '17px', fontWeight: '700' } }),
-        el('span', { class: 'muted', text: (member.relation || '') + (data ? (' · 数据截至 ' + fmtDate(data.exportedAt)) : '') })
+        el('span', {
+          class: 'muted',
+          text: (member.relation || '')
+            + (data ? (' · ' + (data.realtime ? '实时' : '快照') + ' ' + fmtDateTime(data.exportedAt)) : '')
+        })
       ])
     ]));
 
@@ -358,7 +377,7 @@
         el('strong', { text: '尚未关联数据' }),
         el('p', {
           class: 'muted',
-          text: '请到「家庭关联」页粘贴对方提供的关联码与口令，即可查看其药物清单、用药历史与依从性。'
+          text: '请到「家庭关联」页输入对方给的 8 位关联码，即可查看其药物清单、用药历史与依从性。'
         }),
         el('button', {
           class: 'btn btn-primary', type: 'button', text: '去关联',
@@ -408,7 +427,9 @@
 
     host.appendChild(el('p', {
       class: 'muted',
-      text: '数据来自对方主动分享的快照，非实时同步。需要最新数据请让对方重新生成关联码。',
+      text: data.realtime
+        ? '数据实时读取自对方的账号（每次进入本页刷新）。对方撤销授权后将无法继续查看。'
+        : '数据来自对方主动分享的离线快照，非实时。需要最新数据请让对方重新生成关联码。',
       style: { fontSize: '12px', margin: '4px 0 0' }
     }));
   }
@@ -440,7 +461,7 @@
     if (S.view === 'detail') {
       var member = await getMember(S.memberId);
       if (!member) { S.view = 'list'; paint(); return; }
-      var data = await getSnapshot(member.id);
+      var data = await loadMemberData(member);
       renderDetail(host, member, data);
       return;
     }
@@ -492,7 +513,304 @@
 
   /* ============================ 7. 视图：家庭关联 ============================ */
 
+  /* ==================== 5.5 短码关联：实时数据通路 ==================== */
+
+  // 用「我自己账号的 DEK」把对方的 DEK 再加密一份，存到 member 记录上。
+  //
+  // 【为什么不继续用短码派生密钥】
+  // 短码是 8 位数字，职责只有「一次性把密钥交出去」。它兑换即作废，
+  // 页面一刷新就没法再用它解包 —— 若没有替代的解锁材料，查看方刷新一次
+  // 就永久失去访问权。所以换一把长期可用的锁：我自己账号的 DEK
+  // （服务端拿不到，且随账号加密同步）。对方的 DEK 仍然只有密文过服务端。
+  async function sealOwnerDek(member, ownerDek) {
+    var myDek = MD.api && MD.api.getDEK ? MD.api.getDEK() : null;
+    if (!myDek) throw new Error('账号未解锁，请重新登录');
+    var body = await MD.crypto.encrypt(myDek, JSON.stringify(Array.prototype.slice.call(ownerDek)));
+    member.dekIv = body.ivB64;
+    member.dekCt = body.ctB64;
+    member.updatedAt = nowMs();
+    await MD.data.family.save(member);
+  }
+
+  async function openOwnerDek(member) {
+    if (!member || !member.dekIv || !member.dekCt) return null;
+    var myDek = MD.api && MD.api.getDEK ? MD.api.getDEK() : null;
+    if (!myDek) return null;
+    try {
+      var plain = await MD.crypto.decrypt(myDek, member.dekIv, member.dekCt);
+      return new Uint8Array(JSON.parse(plain));
+    } catch (e) {
+      // 换了账号或本地材料损坏时，降级为「需要重新关联」，不要把页面卡死
+      return null;
+    }
+  }
+
+  // 把对方的 sync 记录还原成详情页认识的结构（与快照 data 同形）。
+  // 只挑 medication 与 intake 两张表：其余表（schedule/profile）不进入展示，
+  // 避免越界暴露与该页面承诺无关的内容。
+  function recordsToSnapshot(records, days) {
+    var now = nowMs();
+    var span = Math.max(1, Math.min(365, Number(days) || 90));
+    var fromMs = now - span * DAY_MS;
+
+    var meds = [], intakes = [], medMap = {};
+    (records || []).forEach(function (r) {
+      if (!r || r.deleted || !r.data) return;
+      if (r.table === 'medication') { medMap[r.id] = r.data; meds.push(r.data); }
+      else if (r.table === 'intake') { intakes.push(r.data); }
+    });
+
+    var medList = meds.filter(function (m) { return m && m.deleted !== true; })
+      .map(function (m) {
+        return { name: m.name || '未命名药物', dosage: m.dosage || m.doseText || m.dose || '' };
+      });
+
+    // 先按时间窗筛一次，history 与 adherence 共用。
+    // 注意：MD.sched.adherence 内部不会自己剔除越界记录，若把全集传进去，
+    // 200 天前的服药记录也会被算进「近 90 天」，依从率随之虚高。
+    var windowIntakes = intakes.filter(function (it) {
+      if (!it || it.deleted === true) return false;
+      var t = Number(it.scheduledFor || 0);
+      return t >= fromMs && t <= now;
+    });
+
+    var history = windowIntakes.map(function (it) {
+      var med = medMap[it.medicationId];
+      return {
+        t: Number(it.scheduledFor || 0),
+        s: String(it.status || 'pending'),
+        n: med ? (med.name || '未命名药物') : '未知药物'
+      };
+    }).sort(function (a, b) { return b.t - a.t; }).slice(0, 400);
+
+    var adherence = { total: 0, taken: 0, skipped: 0, missed: 0, rate: null, streakDays: 0 };
+    if (MD.sched && typeof MD.sched.adherence === 'function') {
+      adherence = MD.sched.adherence({ intakes: windowIntakes, fromMs: fromMs, toMs: now });
+    }
+
+    return {
+      v: 2, realtime: true, exportedAt: now, days: span,
+      meds: medList, history: history, adherence: adherence
+    };
+  }
+
+  // 分页拉全量。20 页上限是硬闸：游标万一不推进也不会无限翻页，
+  // 而个人用药数据远超 200 条的情况本身就不正常。
+  async function pullAll(grantId) {
+    var acc = [], sinceSeq = 0, pages = 0, hasMore = true;
+    while (hasMore && pages < 20) {
+      var page = await MD.familyLink.fetchRecords(grantId, { sinceSeq: sinceSeq, limit: 200 });
+      var items = (page && page.records) || [];
+      acc = acc.concat(items);
+      if (!items.length) break;
+      if (page.nextSeq) sinceSeq = page.nextSeq;
+      hasMore = Boolean(page && page.hasMore);
+      pages++;
+    }
+    return acc;
+  }
+
+  // 详情页取数：实时优先，失败回退上次快照（离线时不至于白屏）
+  async function loadMemberData(member) {
+    if (!member) return null;
+    if (member.grantId && MD.familyLink) {
+      var ownerDek = await openOwnerDek(member);
+      if (ownerDek) {
+        MD.familyLink.adoptDek(member.grantId, ownerDek);
+        try {
+          var recs = await pullAll(member.grantId);
+          return recordsToSnapshot(recs, 90);
+        } catch (e) {
+          S.err = '实时数据拉取失败，显示的是上次快照：' + (e && e.message ? e.message : '未知错误');
+        }
+      }
+    }
+    return await getSnapshot(member.id);
+  }
+
   function renderLink(host) {
+    clear(host);
+
+    // 提示区统一放顶部：生成、兑换、复制、授权列表的结果都写这里。
+    // whiteSpace: pre-line 是为了让「授权列表」这种多行文本能正常换行。
+    var msg = el('p', {
+      class: 'muted',
+      style: { minHeight: '18px', margin: '0 0 12px', fontSize: '13px', whiteSpace: 'pre-line' }
+    });
+    if (S.err) { msg.textContent = S.err; msg.style.color = 'var(--danger)'; }
+    else if (S.msg) { msg.textContent = S.msg; }
+
+    /* ---------- ① 数据所有方：生成 8 位短码 ---------- */
+    var codeView = el('div', {
+      style: {
+        fontFamily: 'monospace', fontSize: '26px', fontWeight: '700',
+        letterSpacing: '5px', textAlign: 'center', padding: '14px 6px',
+        borderRadius: '10px', background: 'rgba(127,127,127,0.10)',
+        display: S.lastCode ? 'block' : 'none'
+      },
+      text: (S.lastCode && MD.familyLink) ? MD.familyLink.formatCode(S.lastCode) : ''
+    });
+
+    host.appendChild(el('div', { class: 'card', style: { marginBottom: '14px' } }, [
+      el('div', { style: { fontWeight: '700', marginBottom: '6px' } }, [el('span', { text: '① 我是数据所有方：生成 8 位关联码' })]),
+      el('p', {
+        class: 'muted',
+        text: '生成一串 8 位数字，家人输入后即可查看你的药物清单、用药历史与依从性。数字一次性使用，兑换后即绑定对方账号。',
+        style: { fontSize: '13px', margin: '0 0 10px' }
+      }),
+      el('div', { class: 'stack', style: { gap: '10px' } }, [
+        codeView,
+        el('div', { class: 'row row--wrap', style: { gap: '10px' } }, [
+          el('button', {
+            class: 'btn btn-primary', type: 'button', text: '生成关联码',
+            onClick: async function () {
+              S.err = ''; S.msg = '';
+              try {
+                if (!MD.familyLink) throw new Error('短码模块未加载，请刷新页面');
+                var res = await MD.familyLink.createGrant();
+                S.lastCode = res.code;   // 先落状态，再整页重绘，才能回显
+                S.msg = '已生成。请在 24 小时内让对方输入，逾期自动失效。';
+                toast('关联码已生成');
+              } catch (e) {
+                S.err = '生成失败：' + (e && e.message ? e.message : '未知错误');
+              }
+              paint();
+            }
+          }),
+          el('button', {
+            class: 'btn btn-ghost', type: 'button', text: '复制数字',
+            onClick: function () {
+              if (!S.lastCode) { toast('还没有生成关联码', 'error'); return; }
+              try {
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                  navigator.clipboard.writeText(S.lastCode);
+                  toast('已复制');
+                } else { toast('请长按上方数字手动复制'); }
+              } catch (e) { toast('请长按上方数字手动复制'); }
+            }
+          })
+        ]),
+        el('button', {
+          class: 'btn btn-ghost', type: 'button', text: '查看我发出的授权',
+          onClick: async function () {
+            S.err = ''; S.msg = '';
+            try {
+              if (!MD.familyLink) throw new Error('短码模块未加载，请刷新页面');
+              var list = await MD.familyLink.listGrants();
+              if (!list || !list.length) {
+                S.msg = '还没有发出过授权';
+              } else {
+                S.msg = list.map(function (g, i) {
+                  var state = g.status === 'active' ? '已激活'
+                    : (g.status === 'pending' ? '待兑换' : '已失效');
+                  return (i + 1) + '. ' + state + ' · ' + fmtDateTime(g.createdAt || 0);
+                }).join('\n');
+              }
+            } catch (e) {
+              S.err = '读取授权失败：' + (e && e.message ? e.message : '未知错误');
+            }
+            paint();
+          }
+        })
+      ])
+    ]));
+
+    /* ---------- ② 查看方：输入短码 ---------- */
+    var codeIn = el('input', {
+      class: 'input', type: 'text', inputmode: 'numeric', maxlength: '9',
+      placeholder: '输入 8 位数字', autocomplete: 'off'
+    });
+    var targetSelect = el('select', { class: 'select' });
+
+    listMembers().then(function (members) {
+      clear(targetSelect);
+      if (!members.length) {
+        targetSelect.appendChild(el('option', { value: '', text: '（先新增一个家庭档案）' }));
+        return;
+      }
+      members.forEach(function (m) {
+        targetSelect.appendChild(el('option', { value: m.id, text: m.name + '（' + (m.relation || '') + '）' }));
+      });
+    });
+
+    host.appendChild(el('div', { class: 'card', style: { marginBottom: '14px' } }, [
+      el('div', { style: { fontWeight: '700', marginBottom: '6px' } }, [el('span', { text: '② 我是查看方：输入关联码' })]),
+      el('p', {
+        class: 'muted',
+        text: '数字只能使用一次。关联成功后，对方后续的用药变化会实时出现在这里。',
+        style: { fontSize: '13px', margin: '0 0 10px' }
+      }),
+      el('div', { class: 'stack', style: { gap: '10px' } }, [
+        el('div', { class: 'field' }, [el('span', { class: 'label', text: '8 位关联码' }), codeIn]),
+        el('div', { class: 'field' }, [el('span', { class: 'label', text: '保存到哪个档案' }), targetSelect]),
+        el('button', {
+          class: 'btn btn-primary', type: 'button', text: '关联并查看',
+          onClick: async function () {
+            S.err = ''; S.msg = '';
+            try {
+              if (!MD.familyLink) throw new Error('短码模块未加载，请刷新页面');
+              var memberId = targetSelect.value;
+              if (!memberId) throw new Error('请先新增一个家庭档案，再选择保存位置');
+              var member = await getMember(memberId);
+              if (!member) throw new Error('目标档案不存在');
+
+              var res = await MD.familyLink.redeem(codeIn.value);
+              var ownerDek = MD.familyLink.getDek(res.grantId);
+              if (!ownerDek) throw new Error('密钥恢复失败，请让对方重新生成关联码');
+
+              // 短码已作废，所以必须立刻用自己账号的 DEK 把对方 DEK 落盘，
+              // 这是之后唯一的解锁途径。
+              member.grantId = res.grantId;
+              member.ownerId = res.ownerId || '';
+              member.linkedAt = nowMs();
+              await sealOwnerDek(member, ownerDek);
+
+              var recs = await pullAll(res.grantId);
+              var snap = recordsToSnapshot(recs, 90);
+              await putSnapshot(member.id, snap);   // 离线兜底
+              member.snapshotAt = nowMs();
+              member.updatedAt = nowMs();
+              await MD.data.family.save(member);
+
+              toast('关联成功');
+              S.tab = 'archive'; S.view = 'detail'; S.memberId = memberId;
+              paint();
+            } catch (e) {
+              S.err = '关联失败：' + (e && e.message ? e.message : '未知错误');
+              paint();
+            }
+          }
+        })
+      ])
+    ]));
+
+    /* ---------- ③ 离线快照（旧方式，折叠保留） ---------- */
+    host.appendChild(el('div', { class: 'card' }, [
+      el('div', {
+        class: 'row',
+        style: { justifyContent: 'space-between', alignItems: 'center', cursor: 'pointer', gap: '10px' },
+        onClick: function () { S.showLegacy = !S.showLegacy; paint(); }
+      }, [
+        el('div', { style: { fontWeight: '700' } }, [el('span', { text: '离线快照（旧方式，需口令）' })]),
+        el('span', { class: 'muted', text: S.showLegacy ? '收起' : '展开', style: { fontSize: '13px', flex: '0 0 auto' } })
+      ]),
+      S.showLegacy
+        ? (function () {
+            var box = el('div', { style: { marginTop: '12px' } });
+            renderLinkLegacy(box);
+            return box;
+          })()
+        : el('p', {
+            class: 'muted',
+            text: '双方都能联网时无需此方式。它把数据打包成一段文本带走，适合无网络场景，但不会自动更新。',
+            style: { fontSize: '12px', margin: '8px 0 0' }
+          })
+    ]));
+
+    host.appendChild(msg);
+  }
+
+  function renderLinkLegacy(host) {
     clear(host);
 
     var codeBox = el('textarea', {
@@ -503,7 +821,7 @@
     });
     // 关键：生成后页面会整页重绘，textarea 是新建节点，
     // 必须从状态回填，否则「提示已生成但框里是空的」。
-    codeBox.value = S.lastCode || '';
+    codeBox.value = S.legacyCode || '';
 
     var passOut = el('input', {
       class: 'input', type: 'text', placeholder: '设置一个至少 6 位的口令',
@@ -513,10 +831,6 @@
     var daysIn = el('input', {
       class: 'input', type: 'number', value: '90', min: '7', max: '365', step: '1'
     });
-
-    var msg = el('p', { class: 'muted', style: { minHeight: '18px', margin: '0', fontSize: '13px' } });
-    if (S.err) { msg.textContent = S.err; msg.style.color = 'var(--danger)'; }
-    else if (S.msg) { msg.textContent = S.msg; }
 
     host.appendChild(el('div', { class: 'card', style: { marginBottom: '14px' } }, [
       el('div', { style: { fontWeight: '700', marginBottom: '6px' } }, [el('span', { text: '① 我是数据所有方：生成关联码' })]),
@@ -535,7 +849,7 @@
               S.err = ''; S.msg = ''; paintBusy(host, true);
               try {
                 var code = await makeCode(passOut.value, daysIn.value);
-                S.lastCode = code;   // 先落状态，再重绘，才能回显
+                S.legacyCode = code;   // 先落状态，再重绘，才能回显
                 S.msg = '已生成，请把关联码和口令分别发给家人（建议不要在同一聊天里一起发）';
                 toast('关联码已生成');
               } catch (e) {
@@ -547,7 +861,7 @@
           el('button', {
             class: 'btn btn-ghost', type: 'button', text: '复制关联码',
             onClick: function () {
-              var payload = codeBox.value || S.lastCode;
+              var payload = codeBox.value || S.legacyCode;
               if (!payload) { toast('还没有生成关联码', 'error'); return; }
               try {
                 if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -625,7 +939,6 @@
       ])
     ]));
 
-    host.appendChild(msg);
   }
 
   function paintBusy(host, busy) {

@@ -131,6 +131,12 @@ RETURNING `+familyColumns, lookup, FamilyGrantActive, viewerID, FamilyGrantPendi
 	if err == nil {
 		return g, nil
 	}
+	// 同一对账号只允许存在一条 active 授权（family_grants_pair_uidx）。
+	// 若该查看方此前已关联过这个 owner 的另一条短码，这条 UPDATE 会撞唯一索引。
+	// 这是业务上的「已建立关联」，不是服务端故障 —— 必须回 409 而不是 500。
+	if isUniqueViolation(err) {
+		return nil, newConflict("你与该账号已建立关联")
+	}
 	if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}

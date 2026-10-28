@@ -206,11 +206,12 @@ func (s *Service) Redeem(ctx context.Context, viewerID, clientIP, code string) (
 
 	g, err := s.repo.Redeem(ctx, s.lookupOf(norm), viewerID)
 	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return nil, apierr.New(apierr.CodeNotFound, "短码不存在或已过期")
-		}
-		if errors.Is(err, store.ErrConflict) {
-			return nil, apierr.New(apierr.CodeConflict, "该短码已被使用")
+		// 统一文案，不区分「不存在」「已过期」「已被他人兑换」「你已关联该账号」。
+		// 理由：短码只有 8 位数字（约 26.6 bit），限流是它唯一的爆破防线。
+		// 一旦错误信息能区分状态，攻击者就能把爆破目标从「猜中一个有效码」
+		// 降级为「猜中一个曾经存在的码」，命中率提升若干个数量级。
+		if errors.Is(err, store.ErrConflict) || errors.Is(err, store.ErrNotFound) {
+			return nil, apierr.New(apierr.CodeConflict, "短码无效或已被使用")
 		}
 		return nil, wrapErr(err, "兑换失败")
 	}

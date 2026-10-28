@@ -66,7 +66,15 @@ func New(d Deps) (*gin.Engine, error) {
 	r := gin.New()
 	// 反向代理后置：是否信任 Nginx 传来的 X-Forwarded-* 头。
 	if cfg.TrustProxy {
-		_ = r.SetTrustedProxies([]string{"0.0.0.0/0", "::/0"})
+		// 只信任本机回环：nginx 与服务同机部署（443 → 127.0.0.1:8089），
+		// 真实客户端 IP 由它通过 X-Forwarded-For 写入。
+		//
+		// 为什么不能信任 0.0.0.0/0：那等于接受任意来源伪造的 XFF。
+		// gin 的 ClientIP() 会从右往左跳过「可信代理」，全部可信时最终取到
+		// XFF 最左边那个值 —— 攻击者每次换一个伪造 IP，就能绕过所有基于
+		// ClientIP 的限流（登录、家庭短码兑换等）。短码只有 8 位数字，
+		// 限流是它唯一的爆破防线，这条必须收紧。
+		_ = r.SetTrustedProxies([]string{"127.0.0.1", "::1"})
 	} else {
 		_ = r.SetTrustedProxies(nil)
 	}
