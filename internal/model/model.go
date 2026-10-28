@@ -14,11 +14,18 @@ const (
 	TableSchedule   = "schedule"   // 用药排程
 	TableIntake     = "intake"     // 服药记录（事件型）
 	TableSetting    = "setting"    // 跨设备同步的设置
+	TableFamily     = "family"     // 家庭健康档案（家庭关联）
 )
 
 // KnownTables 返回允许同步的表名白名单。
+//
+// 【必须与 web/assets/js/data.js 的 TABLES 保持一致】
+// 这张表是硬白名单：前端推来的任何 table 不在其中，服务端会以 400 拒绝
+// **整个批次**（不是单条），连带把用药记录、排程一起卡住，前端只表现为
+// 「同步失败」。v0.3.7 新增 family 表时漏了这里，导致家庭档案从未同步成功，
+// 因此加了 TestKnownTablesCoverFrontend 做双向漂移检测。
 func KnownTables() []string {
-	return []string{TableProfile, TableMedication, TableSchedule, TableIntake, TableSetting}
+	return []string{TableProfile, TableMedication, TableSchedule, TableIntake, TableSetting, TableFamily}
 }
 
 // IsKnownTable 判断表名是否在白名单内。

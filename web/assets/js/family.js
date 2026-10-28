@@ -379,10 +379,20 @@
           class: 'muted',
           text: '请到「家庭关联」页输入对方给的 8 位关联码，即可查看其药物清单、用药历史与依从性。'
         }),
-        el('button', {
-          class: 'btn btn-primary', type: 'button', text: '去关联',
-          onClick: function () { S.tab = 'link'; S.view = 'list'; paint(); }
-        })
+        el('div', { class: 'row', style: { gap: '10px', marginTop: '12px' } }, [
+          el('button', {
+            class: 'btn btn-primary', type: 'button', text: '去关联',
+            onClick: function () { S.tab = 'link'; S.view = 'list'; paint(); }
+          }),
+          el('button', {
+            class: 'btn btn-ghost', type: 'button', text: '删除此档案',
+            style: { color: 'var(--danger)' },
+            onClick: async function () {
+              if (await deleteMember(member)) { S.view = 'list'; S.memberId = null; }
+              paint();
+            }
+          })
+        ])
       ]));
       return;
     }
@@ -432,6 +442,62 @@
         : '数据来自对方主动分享的离线快照，非实时。需要最新数据请让对方重新生成关联码。',
       style: { fontSize: '12px', margin: '4px 0 0' }
     }));
+
+    // 详情页也要能删：看完数据想清掉这个档案是很自然的动作，
+    // 否则用户必须退回列表再找一次。
+    host.appendChild(el('div', { class: 'row', style: { marginTop: '16px' } }, [
+      el('button', {
+        class: 'btn btn-ghost', type: 'button', text: '删除此档案',
+        style: { color: 'var(--danger)' },
+        onClick: async function () {
+          if (await deleteMember(member)) { S.view = 'list'; S.memberId = null; }
+          paint();
+        }
+      })
+    ]));
+  }
+
+  /* ============================ 5.9 删除档案 ============================ */
+
+  // 删除档案：只动**本账号**的三样东西，绝不触碰关联人的任何数据。
+  //
+  // 允许操作的范围（全部属于本账号）：
+  //   1. family 表里的这一条档案（软删，进本地同步队列）
+  //   2. 本地快照 blobs（family:<id>，仅本机，不入同步）
+  //   3. 内存里缓存的对方 DEK（forgetDek）
+  //
+  // 明确不做的事：
+  //   - 不删除、不修改任何 medication / schedule / intake 记录
+  //     （对方的数据在你这里只是内存里的视图，从未写入本地表）
+  //   - 不调用撤销接口：DELETE /family/grants/:id 按 owner_id 限权，
+  //     只有数据所有方能撤销；查看方删掉本地档案后服务端那条授权仍 active，
+  //     但不影响对方数据，也不该由查看方替对方做决定。
+  //
+  // 回归保护：test-family-flow.js 里有断言，若这里被加上对
+  // MD.data.meds / MD.data.schedules / MD.data.intakes 的写操作，测试会红。
+  async function deleteMember(member) {
+    if (!member) return false;
+    var ok = await MD.ui.confirm({
+      title: '删除档案',
+      message: '确定删除「' + (member.name || '未命名') + '」？'
+        + '只会删除本账号里的这个档案条目；对方的账号、药物清单与授权都不受影响。',
+      confirmText: '删除',
+      danger: true
+    });
+    if (!ok) return false;
+
+    try {
+      if (member.grantId && MD.familyLink && typeof MD.familyLink.forgetDek === 'function') {
+        MD.familyLink.forgetDek(member.grantId);
+      }
+      await dropSnapshot(member.id);
+      await MD.data.family.remove(member.id);
+      toast('已删除');
+      return true;
+    } catch (e) {
+      S.err = '删除失败：' + (e && e.message ? e.message : '未知错误');
+      return false;
+    }
   }
 
   /* ============================ 6. 视图：家庭档案列表 ============================ */
@@ -504,6 +570,14 @@
             el('button', {
               class: 'btn btn-ghost', type: 'button', text: '编辑',
               onClick: function () { S.view = 'edit'; S.memberId = m.id; paint(); }
+            }),
+            el('button', {
+              class: 'btn btn-ghost', type: 'button', text: '删除',
+              style: { color: 'var(--danger)' },
+              onClick: async function () {
+                if (await deleteMember(m)) { S.view = 'list'; S.memberId = null; }
+                paint();
+              }
             })
           ])
         ])

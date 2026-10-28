@@ -197,6 +197,17 @@
     delete dekCache[grantId];
   }
 
+  /**
+   * 忘掉某条授权的 DEK（仅本地内存）。
+   *
+   * 用于「删除家庭档案」：档案没了就不该继续持有对方的密钥。
+   * 注意与 revoke 的区别：revoke 是数据所有方撤销对外的授权（改服务端状态），
+   * 查看方没有这个权限；查看方删掉本地档案只需抹掉自己内存里的副本。
+   */
+  function forgetDek(grantId) {
+    if (grantId) delete dekCache[grantId];
+  }
+
   /** 仅测试用：清空内存缓存 */
   function clearCache() { dekCache = Object.create(null); }
 
@@ -213,6 +224,7 @@
     fetchRecords: fetchRecords,
     listGrants: listGrants,
     revoke: revoke,
+    forgetDek: forgetDek,
     clearCache: clearCache
   };
 })(typeof window !== 'undefined' ? window : this);
