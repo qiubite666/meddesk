@@ -100,6 +100,10 @@
   }
 
   function registerRoutes() {
+    // 家庭健康：与「用药提醒」同级（同为 group '健康'，order 2 紧随其后）。
+    // 它必须出现在底部标签栏前 4 位里，因此 order 不能排到后面去。
+    if (MD.family && typeof MD.family.register === 'function') MD.family.register();
+
     MD.router.register({
       id: 'settings',
       title: '设置',
@@ -112,7 +116,7 @@
     });
 
     [
-      { id: 'health', title: '健康记录', subtitle: '体征与健康趋势', icon: 'heart', order: 100 },
+      // 「健康记录」已由「家庭健康」取代（家庭健康是真实功能，不再是占位）
       { id: 'todo', title: '日程待办', subtitle: '家庭日程与任务', icon: 'calendar', order: 110 },
       { id: 'ledger', title: '家庭账本', subtitle: '共同收支记录', icon: 'wallet', order: 120 }
     ].forEach(function (route) {

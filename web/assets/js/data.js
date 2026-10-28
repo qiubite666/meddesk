@@ -2,7 +2,7 @@
   'use strict';
 
   var MD = window.MD = window.MD || {};
-  var TABLES = ['profile', 'medication', 'schedule', 'intake'];
+  var TABLES = ['profile', 'medication', 'schedule', 'intake', 'family'];
 
   function publicRecord(record) {
     if (!record) return record;
@@ -163,6 +163,10 @@
     meds: collection('medication'),
     schedules: collection('schedule'),
     intakes: collection('intake'),
+    // 家庭档案：与账号相互独立的成员条目，可编辑姓名/关系/备注。
+    // 关联来的他账号数据不落在这里（体积不可控且会撑大同步负载），只存指纹，
+    // 明文快照放在 blobs，键名 family:<id>。
+    family: collection('family'),
     blobs: {
       save: function (key, value) { return MD.db.blobSave(key, value); },
       get: function (key) { return MD.db.blobGet(key); },

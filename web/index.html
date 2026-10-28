@@ -74,6 +74,8 @@
   <script src="/assets/js/db.js" defer></script>
   <script src="/assets/js/api.js" defer></script>
   <script src="/assets/js/data.js" defer></script>
+  <!-- 关联一致性：订阅 data:changed，保证药物改归属/删除后排程与历史跟随。必须紧跟 data.js -->
+  <script src="/assets/js/consistency.js" defer></script>
   <script src="/assets/js/sync.js" defer></script>
   <script src="/assets/js/schedule.js" defer></script>
   <script src="/assets/js/remind.js" defer></script>
@@ -97,6 +99,8 @@
   <script src="/assets/js/tool-health-ideal-weight.js" defer></script>
   <script src="/assets/js/tool-health-fitness-age.js" defer></script>
   <script src="/assets/js/webdav.js" defer></script>
+  <!-- 家庭健康：依赖 data / sched / crypto / core，必须早于 app.js（路由在 app 里注册） -->
+  <script src="/assets/js/family.js" defer></script>
   <script src="/assets/js/app.js" defer></script>
 </body>
 </html>
