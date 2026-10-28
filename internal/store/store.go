@@ -101,6 +101,9 @@ func (s *Store) Sync() SyncRepo { return &syncRepo{s: s} }
 // Attachments 返回附件仓储。
 func (s *Store) Attachments() AttachmentRepo { return &attachmentRepo{s: s} }
 
+// Family 返回家庭关联授权仓储。
+func (s *Store) Family() FamilyRepo { return &familyRepo{s: s} }
+
 // ------------------------------------------------------------------ 仓储接口定义
 
 // UserRepo 是 users 表的仓储接口。

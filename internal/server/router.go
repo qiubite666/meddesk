@@ -23,6 +23,7 @@ import (
 	"github.com/qiubite666/meddesk/internal/cache"
 	"github.com/qiubite666/meddesk/internal/config"
 	"github.com/qiubite666/meddesk/internal/export"
+	"github.com/qiubite666/meddesk/internal/family"
 	"github.com/qiubite666/meddesk/internal/middleware"
 	"github.com/qiubite666/meddesk/internal/model"
 	"github.com/qiubite666/meddesk/internal/store"
@@ -123,6 +124,19 @@ func New(d Deps) (*gin.Engine, error) {
 	syncsvc.Mount(v1, syncsvc.NewService(d.Store.Sync(), cfg.Sync), requireAuth)
 	attachments.Mount(v1, attachments.NewService(d.Store.Attachments(), cfg.Upload), requireAuth)
 	export.Mount(v1, export.NewService(cfg.PDF), requireAuth)
+
+	// 家庭关联：短码兑换 + 跨账号只读。
+	// pepper 由 JWT 密钥派生并加固定标签，不额外引入环境变量；
+	// 注意：轮换 JWT 密钥会让「尚未兑换」的短码失效，已建立的授权不受影响。
+	// 用可选接口断言而不是往 Repos 接口里加方法：
+	// 生产用的 *store.Store 实现了 Family()，测试用的内存替身没实现就跳过挂载，
+	// 避免为了一个可选模块去改所有替身实现。
+	if fs, ok := d.Store.(interface {
+		Family() store.FamilyRepo
+	}); ok {
+		familyPepper := cfg.Auth.JWTSecret + "|meddesk-family-pepper-v1"
+		family.Mount(v1, family.NewService(fs.Family(), familyPepper), requireAuth)
+	}
 
 	// WebDAV 代理：目标服务不返回 CORS 头，浏览器无法直连，故由本站转发。
 	// 凭据随请求传入，后端不持久化、不记日志；访问范围由 webdav 包做路径与 SSRF 校验。
