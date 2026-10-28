@@ -1,43 +1,51 @@
 /* ==========================================================================
- * tool-health-bmi.js —— 工具箱「BMI 计算器」（Contract Health #2）
+ * tool-health-bmi.js —— 工具箱「BMI 计算器」
  *
  * 依赖（只读调用，不修改其文件）：
  *   core.js ：MD.ui / MD.icon / MD.util
  *   tools.js：MD.tools.register / mount / field / select / resultCard
  *             MD.tools.parseNum / fmtNum
  *
- * 分层约定：
- *   输入层（field） → 计算层 evaluate()（纯函数，不碰 DOM） → 渲染层 paint()
+ * 分层约定：输入层 → 计算层 evaluate()（纯函数，不碰 DOM） → 渲染层 paint()
+ * 零外部依赖、零网络请求；界面文字一律走 textContent，不用 innerHTML 拼输入。
  *
- * 零外部依赖：无网络请求，全部计算在浏览器本地完成，不上传任何数据。
- * 安全约定：界面文字一律走 textContent，不使用 innerHTML 拼接用户输入。
+ * 【分级标准 · 有意不同于国际口径】
+ * 采用《中国成人超重和肥胖症预防控制指南》/ WS/T 428-2013：
+ *   偏瘦 <18.5 ｜ 正常 18.5~23.9 ｜ 超重 24~27.9 ｜ 肥胖 ≥28
+ * 不采用 WHO 的 18.5~24.9 / 25~29.9 / ≥30：中国人群在更低 BMI 上就已出现
+ * 代谢风险，用 WHO 口径会把一部分中国超重人群判成「正常」。
+ * 对 18 岁以下会显式提示「成人标准不适用」，不静默给结论。
  * ========================================================================== */
 (function (window) {
   'use strict';
 
   var MD = window.MD = window.MD || {};
 
-  /* ============================ 1. 常量 ============================ */
+  var DASH = '—';
 
-  var DASH = '—';   // 无法计算时的占位符：绝不输出 NaN / Infinity / undefined
+  // 英制输入在入口处折成公制，计算层只认 cm / kg，避免两套公式并存
+  var INCH_CM = 2.54;
+  var LB_KG = 0.45359237;
 
-  // 分级阈值采用《中国成人超重和肥胖症预防控制指南》/ WS/T 428-2013：
-  // 中国人群在较低 BMI 上即出现代谢风险，正常上限是 23.9 而非 WHO 的 24.9，
-  // 超重从 24 起、肥胖从 28 起。这里不提供标准切换，避免同一数据两种口径打架。
   var NORMAL_LOW = 18.5;
   var NORMAL_HIGH = 23.9;
   var OVERWEIGHT = 24;
   var OBESE = 28;
-
-  // 参考中心值取 22（亚洲人群常用），用于给出「还差多少到参考体重」
   var REFERENCE_BMI = 22;
 
-  // 结果超出该区间时提示核对输入，但仍照常出结果——不替用户判定"不可能"
   var SANITY = { min: 12, max: 60 };
 
-  /* ============================ 2. 数值工具 ============================ */
+  /**
+   * 中国成人分级。用显式区间而不是「上界数组 + 小于比较」，
+   * 是因为边界值（正好 24.0、正好 28.0）在浮点加法下极易判错。
+   */
+  function classify(bmi) {
+    if (bmi < NORMAL_LOW) return { label: '偏瘦', risk: '营养不良风险', tone: 'warn' };
+    if (bmi < OVERWEIGHT) return { label: '正常', risk: '健康体重范围', tone: 'ok' };
+    if (bmi < OBESE) return { label: '超重', risk: '轻度肥胖风险', tone: 'warn' };
+    return { label: '肥胖', risk: '中重度健康风险', tone: 'danger' };
+  }
 
-  // 任意输入 → number | null（空、全空格、非数字一律 null，不抛错）
   function toNumber(value) {
     if (typeof value === 'number') return isFinite(value) ? value : null;
     if (MD.tools && typeof MD.tools.parseNum === 'function') {
@@ -59,80 +67,54 @@
     return value.toFixed(digits);
   }
 
-  /* ============================ 3. 计算层（纯函数） ============================ */
-
-  function classify(bmi) {
-    if (bmi < NORMAL_LOW) return { label: '偏瘦', tone: 'warn' };
-    if (bmi <= NORMAL_HIGH) return { label: '正常', tone: 'ok' };
-    if (bmi < OBESE) return { label: '超重', tone: 'warn' };
-    return { label: '肥胖', tone: 'danger' };
-  }
-
-  /**
-   * BMI 求值。任何不合法输入都返回 bmi = null 并给出可读原因。
-   * @param {{height:number|null, weight:number|null}} state  身高(cm)、体重(kg)
-   * @returns {{bmi:number|null, category:string, tone:string,
-   *            low:number|null, high:number|null, delta:number|null,
-   *            error:string, note:string}}
-   */
-  function evaluate(state) {
-    var out = {
-      bmi: null, category: '', tone: '',
-      low: null, high: null, delta: null,
-      error: '', note: ''
-    };
-
-    // 未填全：空值、全空格、非数字字符都落在这里，显示「—」而不是报错
-    if (state.height == null || state.weight == null) {
-      out.note = '填写身高与体重后自动计算';
-      return out;
-    }
-    if (state.height <= 0) {
-      out.error = '身高需大于 0';
-      return out;
-    }
-    if (state.weight <= 0) {
-      out.error = '体重需大于 0';
-      return out;
-    }
-
-    var meters = state.height / 100;
-    var bmi = state.weight / (meters * meters);
-    if (!isFinite(bmi) || bmi <= 0) {
-      out.error = '无法计算，请检查输入';
-      return out;
-    }
-
-    var level = classify(bmi);
-    out.bmi = bmi;
-    out.category = level.label;
-    out.tone = level.tone;
-    // 健康体重区间由正常 BMI 区间反推：体重 = BMI × 身高(m)²
-    out.low = NORMAL_LOW * meters * meters;
-    out.high = NORMAL_HIGH * meters * meters;
-    // delta > 0 表示高于参考体重，< 0 表示低于
-    out.delta = state.weight - REFERENCE_BMI * meters * meters;
-
-    if (bmi < SANITY.min || bmi > SANITY.max) {
-      out.note = '结果超出常见范围，请核对身高单位是否为厘米';
-    }
-    return out;
-  }
-
-  /* ============================ 4. 渲染层 ============================ */
-
   function deltaText(delta) {
     if (typeof delta !== 'number' || !isFinite(delta)) return DASH;
     var sign = delta > 0 ? '+' : (delta < 0 ? '-' : '');
     return sign + fmt(Math.abs(delta), 1);
   }
 
+  /**
+   * @param {{age:number|null, height:number|null, weight:number|null}} state
+   *        height / weight 一律为公制（cm / kg），英制已在上层折算。
+   */
+  function evaluate(state) {
+    var out = {
+      bmi: null, category: '', risk: '', tone: '', low: null, high: null,
+      delta: null, error: '', note: ''
+    };
+    var h = state.height, w = state.weight;
+
+    if (h == null || w == null) { out.error = '填写身高与体重后自动计算'; return out; }
+    if (h <= 0) { out.error = '身高需大于 0'; return out; }
+    if (w <= 0) { out.error = '体重需大于 0'; return out; }
+
+    var m = h / 100;
+    var bmi = w / (m * m);
+
+    out.bmi = bmi;
+    var lv = classify(bmi);
+    out.category = lv.label;
+    out.risk = lv.risk;
+    out.tone = lv.tone;
+    out.low = NORMAL_LOW * m * m;
+    out.high = NORMAL_HIGH * m * m;
+    out.delta = w - REFERENCE_BMI * m * m;
+
+    if (bmi < SANITY.min || bmi > SANITY.max) {
+      out.note = '结果超出常见范围，请核对身高单位是否为厘米';
+    }
+    if (state.age != null && state.age > 0 && state.age < 18) {
+      out.note = (out.note ? out.note + '；' : '') + '18 岁以下请用儿童青少年 BMI 百分位标准，本结果不适用';
+    }
+    return out;
+  }
+
   function paint(host, result) {
     MD.ui.clear(host);
-
     var items = [
       { label: 'BMI', value: fmt(result.bmi, 1), strong: true },
       { label: '分级', value: result.category || DASH, strong: true },
+      { label: '风险提示', value: result.risk || DASH },
       {
         label: '健康体重区间',
         value: result.low == null ? DASH : (fmt(result.low, 1) + ' ~ ' + fmt(result.high, 1)),
@@ -150,47 +132,93 @@
     }));
   }
 
-  /* ============================ 5. 页面装配 ============================ */
-
   function render(view) {
     var content = (MD.tools && typeof MD.tools.mount === 'function' ? MD.tools.mount(view, 'health-bmi') : null) || view;
-    var state = { height: null, weight: null };
+    var state = { system: 'metric', age: null, height: null, weight: null };
     var host = MD.ui.el('div');
+    var inputsHost = MD.ui.el('div', { class: 'stack', style: { gap: '12px' } });
 
-    function refresh() {
-      paint(host, evaluate(state));
+    function refresh() { paint(host, evaluate(state)); }
+
+    function buildInputs() {
+      MD.ui.clear(inputsHost);
+      var metric = state.system === 'metric';
+
+      inputsHost.appendChild(MD.tools.field({
+        label: '年龄', unit: '岁', placeholder: '例如 30', step: '1', min: '1',
+        onInput: function (v) { state.age = toNumber(v); refresh(); }
+      }).row);
+
+      inputsHost.appendChild(MD.tools.field({
+        label: '身高',
+        unit: metric ? 'cm' : 'in',
+        placeholder: metric ? '例如 170' : '例如 67',
+        step: '0.1', min: '0',
+        onInput: function (v) {
+          var n = toNumber(v);
+          state.height = n == null ? null : (metric ? n : n * INCH_CM);
+          refresh();
+        }
+      }).row);
+
+      inputsHost.appendChild(MD.tools.field({
+        label: '体重',
+        unit: metric ? 'kg' : 'lb',
+        placeholder: metric ? '例如 65' : '例如 143',
+        step: '0.1', min: '0',
+        onInput: function (v) {
+          var n = toNumber(v);
+          state.weight = n == null ? null : (metric ? n : n * LB_KG);
+          refresh();
+        }
+      }).row);
     }
-
-    var heightField = MD.tools.field({
-      label: '身高', unit: 'cm', placeholder: '例如 170', step: '0.1', min: '0',
-      onInput: function (value) { state.height = toNumber(value); refresh(); }
-    });
-
-    var weightField = MD.tools.field({
-      label: '体重', unit: 'kg', placeholder: '例如 65', step: '0.1', min: '0',
-      onInput: function (value) { state.weight = toNumber(value); refresh(); }
-    });
 
     content.appendChild(MD.ui.el('p', {
       class: 'muted',
-      text: 'BMI = 体重(kg) ÷ 身高(m)²。分级采用中国成人标准（正常 18.5~23.9，超重 24~27.9，肥胖 ≥28）。',
+      text: 'BMI = 体重(kg) ÷ 身高(m)²。分级采用中国成人标准（WS/T 428-2013）：偏瘦 <18.5，正常 18.5~23.9，超重 24~27.9，肥胖 ≥28。',
       style: { margin: '0 0 12px', fontSize: '13px' }
     }));
-    content.appendChild(MD.ui.el('div', { class: 'stack', style: { gap: '12px' } }, [
-      heightField.row,
-      weightField.row
-    ]));
+
+    content.appendChild(MD.tools.select({
+      label: '单位制', value: 'metric',
+      options: [
+        { value: 'metric', label: '公制（厘米 / 千克）' },
+        { value: 'imperial', label: '英制（英寸 / 磅）' }
+      ],
+      onChange: function (v) {
+        if (v === state.system) return;
+        state.system = v;
+        // 切单位制必须清空数值：否则 170 会被当 170 英寸，得出荒谬结论
+        state.height = null;
+        state.weight = null;
+        buildInputs();
+        refresh();
+      }
+    }).row);
+
+    content.appendChild(inputsHost);
     content.appendChild(host);
 
+    // 注意事项：与分级标准配套，避免把 BMI 当唯一指标
+    content.appendChild(MD.ui.el('div', {
+      style: { marginTop: '16px', fontSize: '13px', lineHeight: '1.7', color: 'var(--muted, #666)' }
+    }, [
+      MD.ui.el('div', { text: '注意事项', style: { fontWeight: '700', marginBottom: '6px' } }),
+      MD.ui.el('div', { text: '· BMI 只反映体重与身高的比例，不能区分肌肉与脂肪' }),
+      MD.ui.el('div', { text: '· 运动员、孕妇、水肿人群可能偏高或偏低，需单独判断' }),
+      MD.ui.el('div', { text: '· 18 岁以下请使用儿童青少年百分位标准，不适用本页结论' }),
+      MD.ui.el('div', { text: '· 建议结合腰围、体脂率一起看，单看 BMI 容易误判' })
+    ]));
+
+    buildInputs();
     refresh();
   }
-
-  /* ============================ 6. 注册 ============================ */
 
   MD.tools.register({
     id: 'health-bmi',
     title: 'BMI 计算器',
-    subtitle: '身高体重指数与分级',
+    subtitle: '身高体重指数与分级（中国标准）',
     icon: 'heart',
     category: '健康工具',
     order: 50,
