@@ -228,6 +228,13 @@ func (s *Service) ChangePassword(ctx context.Context, userID string, req model.C
 	if err := s.users.UpdateCredentials(ctx, userID, passwordHash, kdfSalt, wrappedDEK, dekIV); err != nil {
 		return apierr.Wrap(apierr.CodeInternal, err, "修改口令失败，请稍后重试")
 	}
+
+	// 口令变更属于凭据失效事件：必须吊销包括本次发起端在内的全部会话。
+	// 理由：DEK 虽然不变（本地已缓存的 DEK 仍可用），但旧刷新令牌在剩余 TTL 内
+	// 依然能续出访问令牌；设备丢失场景下「改了口令，旧设备还能用满 30 天」，
+	// 防护形同虚设。此处撤销全部令牌，让所有设备必须重新用新口令认证。
+	// 副作用（有意为之）：发起改密的那台设备也会被登出，需要重新登录一次。
+	s.revokeAllSessions(ctx, userID)
 	return nil
 }
 

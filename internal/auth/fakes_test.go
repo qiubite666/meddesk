@@ -101,8 +101,17 @@ func (f *fakeRefresh) Revoke(_ context.Context, id string) error {
 	}
 	return nil
 }
-func (f *fakeRefresh) RevokeAllForUser(_ context.Context, _ string) error {
+// RevokeAllForUser 忠实复刻真实仓储语义：吊销该用户全部未吊销令牌，
+// 使后续 Refresh 走到 ReplacedBy/RevokedAt 分支。仅计数会让上层行为的
+// 断言失真（改密后旧令牌看似仍能续期），故此处必须真实改写状态。
+func (f *fakeRefresh) RevokeAllForUser(_ context.Context, userID string) error {
 	f.revokeAll++
+	now := time.Now()
+	for _, t := range f.byID {
+		if t.UserID == userID && t.RevokedAt == nil {
+			t.RevokedAt = &now
+		}
+	}
 	return nil
 }
 func (f *fakeRefresh) DeleteExpired(_ context.Context, _ time.Time) (int64, error) {

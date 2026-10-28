@@ -110,3 +110,35 @@ func TestRefreshRotationAndReplay(t *testing.T) {
 		t.Fatalf("重放应撤销全部刷新令牌: revokeAll=%d", fr.revokeAll)
 	}
 }
+
+// TestChangePasswordRevokesAllSessions 覆盖：口令变更必须吊销全部会话，
+// 否则设备丢失场景下旧刷新令牌在剩余 TTL（30 天）内仍能续出访问令牌。
+func TestChangePasswordRevokesAllSessions(t *testing.T) {
+	ctx := context.Background()
+	svc, fr, _ := newTestService()
+	resp, err := svc.Register(ctx, registerReq(), RequestMeta{})
+	if err != nil {
+		t.Fatalf("注册失败: %v", err)
+	}
+	if fr.revokeAll != 0 {
+		t.Fatalf("注册不应触发撤销: revokeAll=%d", fr.revokeAll)
+	}
+
+	req := model.ChangePasswordRequest{
+		OldPasswordHash: registerReq().PasswordHash,
+		NewPasswordHash: registerReq().PasswordHash,
+		KDFSalt:         registerReq().KDFSalt,
+		WrappedDEK:      registerReq().WrappedDEK,
+		DEKIV:           registerReq().DEKIV,
+	}
+	if err := svc.ChangePassword(ctx, resp.UserID, req); err != nil {
+		t.Fatalf("改密失败: %v", err)
+	}
+	if fr.revokeAll != 1 {
+		t.Fatalf("改密应撤销全部刷新令牌（含发起端）: revokeAll=%d", fr.revokeAll)
+	}
+	// 旧刷新令牌必须立即失效。
+	if _, err := svc.Refresh(ctx, resp.RefreshToken, RequestMeta{}); !apierr.Is(err, apierr.CodeUnauthorized) {
+		t.Fatalf("改密后旧刷新令牌应失效: %v", err)
+	}
+}
