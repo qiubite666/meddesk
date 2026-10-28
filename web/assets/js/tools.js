@@ -250,8 +250,19 @@
   /* ============================ 5. 导航条 ============================ */
 
   // 工具子页用的分类导航：按分类分组列出全部工具，当前工具高亮
-  function toolNav(activeShortId) {
+  // 工具页顶部的「同类工具」切换条。
+  //
+  // 【为什么必须按分类过滤】此前全仓只有一个「计算工具」分类，不过滤也看不出问题；
+  // 加入「健康工具」后，这个函数会把 4 个计算器的 chip 一并画到 BMI 页面上，
+  // 用户看到的就是「点了 BMI 却出现单价/贷款/油耗/换算」——即跨分类串味。
+  // 面包屑（工具箱 / 分类 / 工具名）已负责跨分类跳转，这里只应展示同一分类的兄弟工具。
+  function toolNav(activeShortId, categoryName) {
     var groups = groupTools(subRoutes());
+    if (categoryName) {
+      var only = groups.filter(function (group) { return group.name === categoryName; });
+      // 分类名对不上（数据异常）时退回全部，避免整条导航消失
+      if (only.length) groups = only;
+    }
     if (!groups.length) return null;
 
     var wrap = el('div', { class: 'stack', style: { gap: '14px' } });
@@ -373,7 +384,7 @@
     ]));
 
     // 分类导航条
-    var nav = toolNav(shortId);
+    var nav = toolNav(shortId, category);
     if (nav) {
       nav.style.marginBottom = '22px';
       view.appendChild(nav);
