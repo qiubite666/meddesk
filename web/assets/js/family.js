@@ -107,11 +107,142 @@
 
   /* ============================ 1. 数据层 ============================ */
 
+  // 关联信息表（family）的读取：以 profileId 指向档案。
+  // 旧结构（迁移前）用档案 id 直接当记录 id，这里一并兼容，避免迁移未跑完时丢数据。
+  async function listLinks() {
+    var rows = [];
+    try { rows = await MD.data.family.list(); } catch (e) { return {}; }
+    var map = {};
+    (rows || []).forEach(function (r) {
+      if (!r || r.deleted === true) return;
+      var pid = r.profileId || r.id;
+      if (pid) map[pid] = r;
+    });
+    return map;
+  }
+
+  // 档案列表 = profile（人） + family（对这个人的授权信息）。
+  //
+  // 【为什么改成读 profile】
+  // 用药提醒和家庭健康原本各有一张档案表（profile / family），同一个"母亲"
+  // 要在两处各建一遍，改名字要改两遍，数据还会分裂。现在档案主数据只有一份，
+  // 家庭健康只是"在档案上多挂了一层关联信息"，两个模块看到的是同一批人。
   async function listMembers() {
-    var list = [];
-    try { list = await MD.data.family.list(); } catch (e) { return []; }
-    return (list || []).filter(function (m) { return m && m.deleted !== true; })
-      .sort(function (a, b) { return (a.createdAt || 0) - (b.createdAt || 0); });
+    var profiles = [], links = {};
+    try { profiles = await MD.data.profiles.list(); } catch (e) { return []; }
+    links = await listLinks();
+
+    return (profiles || []).filter(function (p) {
+      return p && p.deleted !== true && !p.archived;
+    }).map(function (p) {
+      var link = links[p.id] || {};
+      return {
+        id: p.id,
+        name: p.name || '未命名',
+        relation: p.relation || '',
+        note: p.note || '',
+        color: p.color || '',
+        birthDate: p.birthDate || '',
+        createdAt: p.createdAt || 0,
+        updatedAt: p.updatedAt || 0,
+        // 关联信息挂在同一个对象上，UI 层不需要知道它存在另一张表
+        grantId: link.grantId || '',
+        ownerId: link.ownerId || '',
+        dekIv: link.dekIv,
+        dekCt: link.dekCt,
+        linkedAt: Number(link.linkedAt) || 0,
+        snapshotAt: Number(link.snapshotAt) || Number(link.linkedAt) || 0
+      };
+    }).sort(function (a, b) { return (a.createdAt || 0) - (b.createdAt || 0); });
+  }
+
+  /* ---------- 关联信息的读写 ---------- */
+
+  async function getLink(profileId) {
+    var map = await listLinks();
+    return map[profileId] || null;
+  }
+
+  async function saveLink(profileId, patch) {
+    var existing = await getLink(profileId);
+    var rec = Object.assign({ id: uid(), profileId: profileId }, existing || {}, patch || {});
+    rec.id = existing ? existing.id : rec.id;
+    rec.profileId = profileId;
+    rec.updatedAt = nowMs();
+    if (!rec.linkedAt) rec.linkedAt = nowMs();
+    if (!rec.createdAt) rec.createdAt = rec.linkedAt;
+    await MD.data.family.save(rec);
+    return rec;
+  }
+
+  async function dropLink(profileId) {
+    var existing = await getLink(profileId);
+    if (existing && existing.id) {
+      try { await MD.data.family.remove(existing.id); } catch (e) { /* 忽略 */ }
+    }
+  }
+
+  // 表单只提交姓名/关系/备注。出生日期、主题色这些属于用药提醒侧的字段
+  // 必须从原记录原样带回 —— 否则在家庭健康点一次保存就会把它们清空。
+  async function saveProfileFromForm(rec) {
+    var base = null;
+    try { base = await MD.data.profiles.get(rec.id); } catch (e) { base = null; }
+    var merged = Object.assign({}, base || {}, {
+      id: rec.id,
+      name: rec.name,
+      relation: rec.relation,
+      note: rec.note,
+      archived: base ? Boolean(base.archived) : false,
+      createdAt: (base && base.createdAt) ? base.createdAt : rec.createdAt,
+      updatedAt: rec.updatedAt
+    });
+    if (!merged.color) merged.color = '#4f8cff';
+    return MD.data.profiles.save(merged);
+  }
+
+  // 旧数据迁移：迁移前的 family 记录自带 name/relation（它本身就是档案）。
+  // 现在档案归 profile，family 只留关联信息，所以把带 name 的记录提升为 profile，
+  // 再补一条只含关联信息的记录，最后软删旧记录。
+  // 幂等：profile 复用旧档案 id，重复执行只是覆盖同一条；link 已存在则跳过。
+  async function migrateLegacyMembers() {
+    var rows = [];
+    try { rows = await MD.data.family.list(); } catch (e) { return 0; }
+    var legacy = (rows || []).filter(function (r) {
+      return r && r.deleted !== true && (r.name || r.relation);
+    });
+    if (!legacy.length) return 0;
+
+    var changed = 0;
+    for (var i = 0; i < legacy.length; i++) {
+      var old = legacy[i];
+      try {
+        await MD.data.profiles.save({
+          id: old.id,
+          name: old.name || '未命名',
+          relation: old.relation || '其他',
+          note: old.note || '',
+          color: '#4f8cff',
+          archived: false,
+          createdAt: old.createdAt || nowMs(),
+          updatedAt: nowMs()
+        });
+        if (old.grantId && !(await getLink(old.id))) {
+          await saveLink(old.id, {
+            grantId: old.grantId,
+            ownerId: old.ownerId || '',
+            dekIv: old.dekIv,
+            dekCt: old.dekCt,
+            linkedAt: old.linkedAt || nowMs(),
+            snapshotAt: old.snapshotAt || 0
+          });
+        }
+        await MD.data.family.remove(old.id);
+        changed++;
+      } catch (e) {
+        // 单条失败不阻断其余档案，下次进入页面会重试
+      }
+    }
+    return changed;
   }
 
   async function getMember(id) {
@@ -268,11 +399,19 @@
     });
     nameInput.value = draft.name;
 
+    // 旧档案的关系值可能是已废弃的「父母」（枚举改成父亲/母亲之前写入的）。
+    // 若不把它显式列出来，下拉没有任何 selected → 浏览器默认选第一项「本人」，
+    // 用户一打开编辑再保存，真实关系就被静默改坏了。这里补一个标注为旧值的选项。
+    var relationOptions = RELATIONS.slice();
+    var isLegacyRelation = Boolean(draft.relation) && RELATIONS.indexOf(draft.relation) < 0;
+    if (isLegacyRelation) relationOptions.push(draft.relation);
+
     var relationSelect = el('select', {
       class: 'select',
       onChange: function (e) { draft.relation = e.target.value; }
-    }, RELATIONS.map(function (r) {
-      var opt = el('option', { value: r, text: r });
+    }, relationOptions.map(function (r) {
+      var label = (isLegacyRelation && r === draft.relation) ? r + '（旧值）' : r;
+      var opt = el('option', { value: r, text: label });
       if (r === draft.relation) opt.selected = true;
       return opt;
     }));
@@ -408,11 +547,8 @@
       kvRow('连续达标', (adh.streakDays == null ? DASH : adh.streakDays) + ' 天')
     ]));
 
-    // 2. 药物清单
-    var medRows = (data.meds || []).map(function (m) {
-      return kvRow(m.name, m.dosage || DASH);
-    });
-    host.appendChild(sectionCard('药物清单（' + (data.meds || []).length + '）', medRows));
+    // 2. 药物清单：关联档案可直接编辑，改动写回数据所有方的账号
+    host.appendChild(sharedMedsCard(member, data));
 
     // 3. 用药历史
     var hist = (data.history || []).slice(0, 60);
@@ -491,12 +627,180 @@
         MD.familyLink.forgetDek(member.grantId);
       }
       await dropSnapshot(member.id);
-      await MD.data.family.remove(member.id);
+      await dropLink(member.id);
+      // 删的是本账号的档案主体（profile），用药提醒里也会一起消失 ——
+      // 这正是「两处是同一份档案」的应有语义。
+      await MD.data.profiles.remove(member.id);
       toast('已删除');
       return true;
     } catch (e) {
       S.err = '删除失败：' + (e && e.message ? e.message : '未知错误');
       return false;
+    }
+  }
+
+  /* ==================== 5.7 药物清单：跨账号共同维护 ==================== */
+
+  // 药物清单卡片。canEdit 的条件是「这个档案挂着有效授权」——
+  // 只有关联来的档案才有对方账号可写；本地自建、未关联的档案没有可写对象。
+  function sharedMedsCard(member, data) {
+    var canEdit = Boolean(member && member.grantId && MD.familyLink
+      && typeof MD.familyLink.pushRecords === 'function');
+    var rows = [];
+
+    (data.meds || []).forEach(function (m) {
+      rows.push(el('div', {
+        class: 'row',
+        style: { justifyContent: 'space-between', alignItems: 'center', gap: '10px' }
+      }, [
+        el('div', { style: { display: 'flex', flexDirection: 'column', gap: '2px', minWidth: '0' } }, [
+          el('div', { text: m.name, style: { fontSize: '13px' } }),
+          el('span', { class: 'muted', text: m.dosage || DASH, style: { fontSize: '12px' } })
+        ]),
+        canEdit ? el('div', { class: 'row', style: { gap: '6px', flex: '0 0 auto' } }, [
+          el('button', {
+            class: 'btn btn-ghost', type: 'button', text: '改',
+            onClick: function () { openMedForm(member, data, m); }
+          }),
+          el('button', {
+            class: 'btn btn-ghost', type: 'button', text: '删',
+            style: { color: 'var(--danger)' },
+            onClick: function () { removeSharedMed(member, data, m); }
+          })
+        ]) : null
+      ]));
+    });
+
+    if (!rows.length) {
+      rows.push(el('p', {
+        class: 'muted', text: '对方还没有录入药物',
+        style: { fontSize: '13px', margin: '0' }
+      }));
+    }
+
+    if (canEdit) {
+      rows.push(el('button', {
+        class: 'btn btn-ghost', type: 'button', text: '+ 添加药物',
+        style: { marginTop: '6px' },
+        onClick: function () { openMedForm(member, data, null); }
+      }));
+    }
+
+    return sectionCard('药物清单（' + (data.meds || []).length + '）', rows);
+  }
+
+  function openMedForm(member, data, med) {
+    if (!MD.ui || typeof MD.ui.sheet !== 'function') {
+      toast('当前环境不支持编辑', 'error');
+      return;
+    }
+
+    var nameIn = el('input', {
+      class: 'input', type: 'text', value: med ? med.name : '',
+      placeholder: '例如：二甲双胍'
+    });
+    var doseIn = el('input', {
+      class: 'input', type: 'text', value: med ? med.dosage : '',
+      placeholder: '例如：0.5 g / 1 片'
+    });
+
+    MD.ui.sheet({
+      title: med ? '编辑药物' : '添加药物',
+      body: function (host) {
+        host.appendChild(el('div', { class: 'stack', style: { gap: '10px' } }, [
+          el('div', { class: 'field' }, [el('span', { class: 'label', text: '药物名称' }), nameIn]),
+          el('div', { class: 'field' }, [el('span', { class: 'label', text: '剂量' }), doseIn])
+        ]));
+        host.appendChild(el('p', {
+          class: 'muted',
+          text: '改动会写进对方的账号，对方下次同步即可看到；双方同时修改同一条时会提示以最新值为准。',
+          style: { fontSize: '12px', margin: '10px 0 0' }
+        }));
+      },
+      actions: [
+        { label: '取消', kind: 'ghost', onClick: function () { MD.ui.closeSheet(); } },
+        {
+          label: '保存', kind: 'primary',
+          onClick: function () {
+            var name = String(nameIn.value || '').trim();
+            if (!name) { toast('请填写药物名称', 'error'); return false; }
+            submitSharedMed(member, data, med, {
+              name: name,
+              dosage: String(doseIn.value || '').trim()
+            });
+            return true;
+          }
+        }
+      ]
+    });
+  }
+
+  // 归属成员（profileId）：优先沿用被编辑那条的原值；新建时沿用该档案下
+  // 已有药物的 profileId。都取不到就留空 —— 由数据所有方在自己的账号里
+  // 调整归属，比在这里瞎猜一个 id 安全（猜错会把药挂到别人名下）。
+  function pickProfileId(med, data) {
+    if (med && med.profileId) return med.profileId;
+    var list = (data && data.meds) || [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].profileId) return list[i].profileId;
+    }
+    return '';
+  }
+
+  async function submitSharedMed(member, data, med, values) {
+    try {
+      var id = med ? med.id : uid();
+      var res = await MD.familyLink.pushRecords(member.grantId, [{
+        id: id,
+        ver: med ? (Number(med.ver) || 0) + 1 : 1,
+        deleted: false,
+        payload: {
+          id: id,
+          profileId: pickProfileId(med, data),
+          name: values.name,
+          dosage: values.dosage,
+          updatedAt: nowMs()
+        }
+      }]);
+
+      var conflicts = (res && res.conflicts) || [];
+      if (conflicts.length) {
+        // 冲突时服务端保留的是更高版本，客户端重新拉取就能看到胜出值
+        toast('对方刚改过同一条，已显示最新值', 'warn');
+      } else {
+        toast('已保存');
+      }
+      S.err = '';
+      paint();
+    } catch (e) {
+      S.err = '保存失败：' + (e && e.message ? e.message : '未知错误');
+      paint();
+    }
+  }
+
+  async function removeSharedMed(member, data, med) {
+    var ok = await MD.ui.confirm({
+      title: '删除药物',
+      message: '确定从「' + (member.name || '未命名') + '」的药物清单删除「' + med.name + '」？'
+        + '这条药物会从对方账号里一并删除，双方都生效。',
+      confirmText: '删除',
+      danger: true
+    });
+    if (!ok) return;
+
+    try {
+      await MD.familyLink.pushRecords(member.grantId, [{
+        id: med.id,
+        ver: (Number(med.ver) || 0) + 1,
+        deleted: true,
+        payload: { id: med.id, deleted: true, updatedAt: nowMs() }
+      }]);
+      toast('已删除');
+      S.err = '';
+      paint();
+    } catch (e) {
+      S.err = '删除失败：' + (e && e.message ? e.message : '未知错误');
+      paint();
     }
   }
 
@@ -513,7 +817,7 @@
       memberForm(host, editing, async function (rec) {
         if (!rec) { S.view = 'list'; S.memberId = null; paint(); return; }
         try {
-          await MD.data.family.save(rec);
+          await saveProfileFromForm(rec);
           S.view = 'list'; S.memberId = null;
           toast('已保存');
         } catch (e) {
@@ -549,7 +853,7 @@
       host.appendChild(el('div', { class: 'card empty' }, [
         MD.icon('home-heart'),
         el('strong', { text: '还没有家庭档案' }),
-        el('p', { class: 'muted', text: '家庭档案与账号相互独立，可自由添加家人姓名与关系，再通过关联码查看其用药情况。' })
+        el('p', { class: 'muted', text: '档案与「用药提醒」共用同一份名单，在这里或那里添加都可以。关联对方账号后即可共同维护药物清单。' })
       ]));
       return;
     }
@@ -596,14 +900,14 @@
   // 页面一刷新就没法再用它解包 —— 若没有替代的解锁材料，查看方刷新一次
   // 就永久失去访问权。所以换一把长期可用的锁：我自己账号的 DEK
   // （服务端拿不到，且随账号加密同步）。对方的 DEK 仍然只有密文过服务端。
-  async function sealOwnerDek(member, ownerDek) {
+  // 返回加密后的密钥材料，由调用方交给 saveLink 落库。
+  // 不在这里写库：档案与关联信息现在是两张表，混在一起写会把
+  // 姓名/关系这些档案字段又抄一份进关联表。
+  async function sealOwnerDek(profileId, ownerDek) {
     var myDek = MD.api && MD.api.getDEK ? MD.api.getDEK() : null;
     if (!myDek) throw new Error('账号未解锁，请重新登录');
     var body = await MD.crypto.encrypt(myDek, JSON.stringify(Array.prototype.slice.call(ownerDek)));
-    member.dekIv = body.ivB64;
-    member.dekCt = body.ctB64;
-    member.updatedAt = nowMs();
-    await MD.data.family.save(member);
+    return { dekIv: body.ivB64, dekCt: body.ctB64 };
   }
 
   async function openOwnerDek(member) {
@@ -630,13 +934,25 @@
     var meds = [], intakes = [], medMap = {};
     (records || []).forEach(function (r) {
       if (!r || r.deleted || !r.data) return;
-      if (r.table === 'medication') { medMap[r.id] = r.data; meds.push(r.data); }
-      else if (r.table === 'intake') { intakes.push(r.data); }
+      if (r.table === 'medication') {
+        medMap[r.id] = r.data;
+        // 必须把记录外层的 id/ver 一起带出来：没有它们就无法构造一次合法的
+        // 写回（id 决定改哪一条，ver 决定冲突裁决），结果只能是只读展示。
+        meds.push({ id: r.id, ver: Number(r.ver) || 0, data: r.data });
+      } else if (r.table === 'intake') {
+        intakes.push(r.data);
+      }
     });
 
-    var medList = meds.filter(function (m) { return m && m.deleted !== true; })
-      .map(function (m) {
-        return { name: m.name || '未命名药物', dosage: m.dosage || m.doseText || m.dose || '' };
+    var medList = meds.filter(function (x) { return x.data && x.data.deleted !== true; })
+      .map(function (x) {
+        return {
+          id: x.id,
+          ver: x.ver,
+          profileId: x.data.profileId || '',
+          name: x.data.name || '未命名药物',
+          dosage: x.data.dosage || x.data.doseText || x.data.dose || ''
+        };
       });
 
     // 先按时间窗筛一次，history 与 adherence 共用。
@@ -833,18 +1149,21 @@
               if (!ownerDek) throw new Error('密钥恢复失败，请让对方重新生成关联码');
 
               // 短码已作废，所以必须立刻用自己账号的 DEK 把对方 DEK 落盘，
-              // 这是之后唯一的解锁途径。
-              member.grantId = res.grantId;
-              member.ownerId = res.ownerId || '';
-              member.linkedAt = nowMs();
-              await sealOwnerDek(member, ownerDek);
+              // 这是之后唯一的解锁途径。档案本身（姓名/关系）不动，
+              // 只把关联信息写到 family 表。
+              var sealed = await sealOwnerDek(member.id, ownerDek);
+              await saveLink(member.id, {
+                grantId: res.grantId,
+                ownerId: res.ownerId || '',
+                dekIv: sealed.dekIv,
+                dekCt: sealed.dekCt,
+                linkedAt: nowMs()
+              });
 
               var recs = await pullAll(res.grantId);
               var snap = recordsToSnapshot(recs, 90);
               await putSnapshot(member.id, snap);   // 离线兜底
-              member.snapshotAt = nowMs();
-              member.updatedAt = nowMs();
-              await MD.data.family.save(member);
+              await saveLink(member.id, { snapshotAt: nowMs() });
 
               toast('关联成功');
               S.tab = 'archive'; S.view = 'detail'; S.memberId = memberId;
@@ -1033,7 +1352,7 @@
       el('div', { style: { fontSize: '19px', fontWeight: '800' } }, [el('span', { text: '家庭健康' })]),
       el('p', {
         class: 'muted',
-        text: '家庭档案与账号相互独立；关联后可按快照查看家人的药物清单、用药历史与依从性。',
+        text: '档案与「用药提醒」共用同一份成员名单，两处增删改都会同步；关联对方账号后，双方都能维护同一份药物清单。',
         style: { fontSize: '13px', margin: '5px 0 0' }
       })
     ]));
@@ -1064,7 +1383,9 @@
 
   function render(view) {
     pageRoot = view;
-    paint();
+    // 迁移放在渲染前：用户打开页面就会自动完成，不需要单独的操作入口。
+    // 幂等，多设备各自跑也不会重复建档案（profile 复用旧档案 id）。
+    migrateLegacyMembers().then(function () { paint(); }).catch(function () { paint(); });
   }
 
   MD.family = {

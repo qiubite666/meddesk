@@ -185,6 +185,48 @@
     return { records: records, nextSeq: (resp && resp.nextSeq) || 0, hasMore: Boolean(resp && resp.hasMore) };
   }
 
+  /**
+   * 把药物变更写进数据所有方的账号空间。
+   *
+   * @param {string} grantId
+   * @param {Array<{id:string, ver:number, deleted?:boolean, payload:Object}>} items
+   * @returns {Promise<{applied:string[], conflicts:Array, cursor:number}>}
+   *
+   * 【为什么用 owner 的 DEK 加密】
+   * 查看方兑换短码时已经拿到了 owner 的 DEK，能解密就能加密。用它对业务对象
+   * 加密后上传，服务端仍然只搬运密文；owner 拿自己的 DEK 解开就是可读数据，
+   * 因此不需要再协商一把新密钥。
+   *
+   * 【为什么只写 medication】
+   * 授权语义是「共同维护药物清单」。服务端也会硬拦其它表，这里前端同样不构造，
+   * 两侧都守住边界，避免将来有人顺手扩表。
+   */
+  async function pushRecords(grantId, items) {
+    var ownerDek = dekCache[grantId];
+    if (!ownerDek) throw new Error('授权未解锁，请重新进入本页');
+    if (!items || !items.length) return { applied: [], conflicts: [], cursor: 0 };
+
+    var changes = [];
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      var enc = await MD.crypto.encrypt(ownerDek, JSON.stringify(it.payload || {}));
+      changes.push({
+        table: 'medication',
+        id: it.id,
+        ver: Number(it.ver) || 1,
+        updatedAt: Date.now(),
+        deleted: Boolean(it.deleted),
+        iv: enc.ivB64,
+        ct: enc.ctB64
+      });
+    }
+
+    return MD.api.request('/family/records', {
+      method: 'POST',
+      body: JSON.stringify({ grantId: grantId, changes: changes })
+    });
+  }
+
   /** 我作为所有者的授权列表（不含密钥材料） */
   async function listGrants() {
     var resp = await MD.api.request('/family/grants', { method: 'GET' });
@@ -222,6 +264,7 @@
     getDek: getDek,
     adoptDek: adoptDek,
     fetchRecords: fetchRecords,
+    pushRecords: pushRecords,
     listGrants: listGrants,
     revoke: revoke,
     forgetDek: forgetDek,

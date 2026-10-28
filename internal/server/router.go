@@ -143,7 +143,7 @@ func New(d Deps) (*gin.Engine, error) {
 		Family() store.FamilyRepo
 	}); ok {
 		familyPepper := cfg.Auth.JWTSecret + "|meddesk-family-pepper-v1"
-		family.Mount(v1, family.NewService(fs.Family(), familyPepper), requireAuth)
+		family.Mount(v1, family.NewService(fs.Family(), d.Store.Sync(), familyPepper), requireAuth)
 	}
 
 	// WebDAV 代理：目标服务不返回 CORS 头，浏览器无法直连，故由本站转发。

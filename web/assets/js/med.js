@@ -30,7 +30,9 @@
   var STATUS_TEXT = { taken: '已服用', skipped: '已跳过', snoozed: '已推迟', pending: '待服用', missed: '漏服' };
   var STATUS_TONE = { taken: 'ok', skipped: 'warn', snoozed: 'warn', pending: '', missed: 'danger' };
 
-  var RELATIONS = ['本人', '配偶', '子女', '父母', '其他'];
+  // 必须与 family.js 的 RELATIONS 逐字一致：两个模块的档案最终共用同一份数据，
+  // 枚举一旦分叉，同一份档案在两边打开会看到不同的可选关系。
+  var RELATIONS = ['本人', '配偶', '父亲', '母亲', '子女', '祖父母', '其他'];
   var UNITS = ['片', '粒', 'ml', '滴', '袋', '支', 'g', 'mg', 'IU'];
   var FORMS = ['片剂', '胶囊', '颗粒', '口服液', '注射剂', '外用', '滴剂', '其他'];
   var FOODS = ['无特殊', '空腹', '餐前', '随餐', '餐后'];
@@ -284,7 +286,7 @@
 
     var profiles = [
       { id: selfId, name: '本人', relation: '本人', birthDate: '1990-05-12', color: '#4f8cff', note: '示例档案', sample: true, ver: 1 },
-      { id: elderId, name: '李爷爷', relation: '父母', birthDate: '1948-03-02', color: '#f2994a', note: '示例档案 · 需提醒', sample: true, ver: 1 }
+      { id: elderId, name: '李爷爷', relation: '祖父母', birthDate: '1948-03-02', color: '#f2994a', note: '示例档案 · 需提醒', sample: true, ver: 1 }
     ];
 
     var m1 = uid(), m2 = uid(), m3 = uid(), m4 = uid();
@@ -1046,10 +1048,23 @@
     return '<input class="input" id="' + id + '" type="' + (type || 'text') + '" value="' + esc(value == null ? '' : value) + '" placeholder="' + esc(ph || '') + '">';
   }
   function selectBox(id, options, value) {
+    // 旧档案的 relation 可能已不在当前枚举内（如历史上的「父母」已拆成父亲/母亲）。
+    // 若直接丢弃，浏览器会回落到第一个 option，用户只是打开编辑再保存，
+    // 原值就被静默改成「本人」——这是数据损坏，不是显示问题。
+    // 因此把未知值原样补一个 option 并选中，保证「不改就能原样存回」。
+    var legacy = '';
+    if (value != null && String(value) !== '') {
+      var known = options.some(function (o) {
+        return String(typeof o === 'string' ? o : o.id) === String(value);
+      });
+      if (!known) {
+        legacy = '<option value="' + esc(value) + '" selected>' + esc(String(value) + '（旧值）') + '</option>';
+      }
+    }
     return '<select class="select" id="' + id + '">' + options.map(function (o) {
       var v = typeof o === 'string' ? o : o.id, t = typeof o === 'string' ? o : o.label;
       return '<option value="' + esc(v) + '"' + (String(v) === String(value) ? ' selected' : '') + '>' + esc(t) + '</option>';
-    }).join('') + '</select>';
+    }).join('') + legacy + '</select>';
   }
 
   /* ---- 档案表单 ---- */

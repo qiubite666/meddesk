@@ -1,7 +1,9 @@
 // Package family 实现「家庭关联」的短码授权接口。
 //
-// 威胁模型（实现时必须守住的四条）：
-//  1. 越权读：records 接口的 owner 一律从 grant 行取，**绝不接受客户端传 ownerId**；
+// 威胁模型（实现时必须守住的五条）：
+//  1. 越权读写：owner 一律从 grant 行取，**绝不接受客户端传 ownerId**；
+//     写入口（POST /records）额外限死「只允许 medication 表」——查看方的授权
+//     是「共同维护药物清单」，不是「能改对方的排程、服药历史或档案」；
 //  2. 短码爆破：8 位 40bit 熵，必须限流，否则可离线/在线穷举；
 //  3. 短码泄露：库里只存 HMAC(pepper, code)，服务端不保存明文码；
 //  4. 密钥泄露：wrapped_dek 只有短码能解，服务端即使被拖库也拿不到 owner 的 DEK。
@@ -27,6 +29,7 @@ import (
 
 	"github.com/qiubite666/meddesk/internal/apierr"
 	"github.com/qiubite666/meddesk/internal/auth"
+	"github.com/qiubite666/meddesk/internal/model"
 	"github.com/qiubite666/meddesk/internal/store"
 )
 
@@ -48,15 +51,21 @@ const digits = "0123456789"
 
 // Service 聚合依赖。
 type Service struct {
-	repo   store.FamilyRepo
-	pepper []byte
+	repo    store.FamilyRepo
+	sync    store.SyncRepo
+	pepper  []byte
 	limiter *redeemLimiter
 }
 
 // NewService 构造服务。pepper 由调用方从进程密钥派生，绝不落库。
-func NewService(repo store.FamilyRepo, pepper string) *Service {
+//
+// syncRepo 用于「共享写入」：查看方提交的药物变更必须落进数据所有方的账号空间，
+// 复用同步内核的事务性冲突裁决（SyncRepo.Apply），不另造一套写入路径。
+// 允许为 nil —— 那样只保留只读能力，写接口会明确报未实现而不是静默丢弃。
+func NewService(repo store.FamilyRepo, syncRepo store.SyncRepo, pepper string) *Service {
 	return &Service{
 		repo:    repo,
+		sync:    syncRepo,
 		pepper:  []byte(pepper),
 		limiter: newRedeemLimiter(5, time.Minute, 20, time.Hour),
 	}
@@ -272,6 +281,80 @@ func (s *Service) Records(ctx context.Context, viewerID, grantID string, sinceSe
 	return out, nextSeq, hasMore, nil
 }
 
+// AppendRecords 让查看方把药物变更写进数据所有方的账号空间。
+//
+// 【安全边界】
+//   - owner 只从 grant 行取，与只读接口同一套三元校验（未绑定/非本人/非 active
+//     一律 404，不区分原因，避免 grantId 变成探测入口）；
+//   - 表白名单只放行 medication。放开其它表等于让查看方能改对方的排程、
+//     服药历史甚至档案，远超「共同维护药物清单」这个授权语义；
+//   - 服务端仍然只搬运密文：查看方早已持有 owner 的 DEK（兑换短码时拿到），
+//     能解密就能加密，服务端不需要也不应该接触明文。
+//
+// 【为什么写 owner 的 user_id 就够了】
+// 记录落在 owner 的账号空间，owner 自己的 /sync/pull 下次就会拉到这些变更，
+// 不需要为 owner 另建一条推送通道 —— 双向同步靠的是同一条同步链路。
+func (s *Service) AppendRecords(ctx context.Context, viewerID, grantID string, changes []model.SyncItem) (*model.SyncPushResponse, error) {
+	if viewerID == "" {
+		return nil, apierr.New(apierr.CodeUnauthorized, "登录已失效")
+	}
+	if grantID == "" {
+		return nil, apierr.New(apierr.CodeBadRequest, "缺少 grantId")
+	}
+	if len(changes) == 0 {
+		return nil, apierr.New(apierr.CodeBadRequest, "没有要提交的变更")
+	}
+
+	g, err := s.repo.GetByID(ctx, grantID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return nil, apierr.New(apierr.CodeNotFound, "授权不存在")
+		}
+		return nil, wrapErr(err, "读取授权失败")
+	}
+	if g.ViewerID == nil || *g.ViewerID != viewerID || g.Status != store.FamilyGrantActive {
+		return nil, apierr.New(apierr.CodeNotFound, "授权不存在")
+	}
+	if g.ExpiresAt != nil && time.Now().After(*g.ExpiresAt) {
+		return nil, apierr.New(apierr.CodeNotFound, "授权已过期")
+	}
+
+	// 表白名单：写入面越窄越安全。这里宁可硬拒绝，也不做「过滤掉非法表后照写」，
+	// 因为静默过滤会让客户端以为整批都成功了。
+	for _, it := range changes {
+		if it.Table != model.TableMedication {
+			return nil, apierr.Newf(apierr.CodeForbidden,
+				"只能修改药物清单，不接受表 %s", it.Table)
+		}
+		if it.ID == "" {
+			return nil, apierr.New(apierr.CodeBadRequest, "变更缺少记录 id")
+		}
+	}
+
+	if s.sync == nil {
+		return nil, apierr.New(apierr.CodeNotImplemented, "共享写入未启用")
+	}
+
+	applied, conflicts, cursor, err := s.sync.Apply(ctx, g.OwnerID, changes)
+	if err != nil {
+		return nil, wrapErr(err, "写入共享药物失败")
+	}
+
+	keys := make([]string, 0, len(applied))
+	for _, it := range applied {
+		keys = append(keys, it.Table+":"+it.ID)
+	}
+	if conflicts == nil {
+		conflicts = []model.SyncItem{}
+	}
+	return &model.SyncPushResponse{
+		Applied:   keys,
+		Conflicts: conflicts,
+		Cursor:    cursor,
+		SyncedAt:  time.Now().UnixMilli(),
+	}, nil
+}
+
 // ListGrants 返回我作为所有者的授权列表（不含任何密钥材料）。
 func (s *Service) ListGrants(ctx context.Context, ownerID string) ([]grantDTO, error) {
 	if ownerID == "" {
@@ -408,6 +491,30 @@ func Mount(rg *gin.RouterGroup, svc *Service, requireAuth gin.HandlerFunc) {
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"items": items, "nextSeq": nextSeq, "hasMore": hasMore})
+	})
+
+	// 共享写入：查看方修改药物清单，落到数据所有方的账号空间。
+	// 与只读接口同样挂 requireAuth，viewer 身份来自 JWT 而非请求体。
+	g.POST("/records", func(c *gin.Context) {
+		uid, ok := auth.UserID(c)
+		if !ok {
+			writeErr(c, apierr.New(apierr.CodeUnauthorized, "登录已失效"))
+			return
+		}
+		var req struct {
+			GrantID string           `json:"grantId" binding:"required"`
+			Changes []model.SyncItem `json:"changes" binding:"required"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			writeErr(c, apierr.New(apierr.CodeBadRequest, "请求体格式错误"))
+			return
+		}
+		resp, err := svc.AppendRecords(c.Request.Context(), uid, req.GrantID, req.Changes)
+		if err != nil {
+			writeErr(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, resp)
 	})
 }
 
