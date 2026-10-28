@@ -91,6 +91,14 @@
     if (MD.toast && typeof MD.toast.show === 'function') MD.toast.show(text, kind || 'success');
   }
 
+  // crypto.js 的 toBase64Url / fromBase64Url 只处理字节，不处理字符串，
+  // 所以中文内容（药名、备注）必须先做 UTF-8 编解码，否则会被当成 base64 解析。
+  var utf8Encoder = new TextEncoder();
+  var utf8Decoder = new TextDecoder();
+
+  function utf8Encode(str) { return utf8Encoder.encode(String(str)); }
+  function utf8Decode(bytes) { return utf8Decoder.decode(bytes); }
+
   /* ============================ 1. 数据层 ============================ */
 
   async function listMembers() {
@@ -201,15 +209,20 @@
       iv: body.ivB64,
       ct: body.ctB64
     };
-    return MD.crypto.toBase64Url(JSON.stringify(envelope));
+    // 注意：toBase64Url 要的是「字节」，不是字符串。
+    // 直接传 JSON 字符串会被 toBytes 判定为 base64 而走 atob，报
+    // "The string to be decoded is not correctly encoded"。必须先 UTF-8 编码。
+    return MD.crypto.toBase64Url(utf8Encode(JSON.stringify(envelope)));
   }
 
   async function readCode(code, pass) {
     if (!code) throw new Error('请粘贴关联码');
     if (!pass || String(pass).length < 6) throw new Error('口令至少 6 位');
 
-    var json = MD.crypto.fromBase64Url(String(code).trim());
-    var envelope = JSON.parse(json);
+    // 粘贴时常带换行/空格，先剔掉再解码
+    var cleaned = String(code).replace(/[\s\r\n]+/g, '');
+    var bytes = MD.crypto.fromBase64Url(cleaned);
+    var envelope = JSON.parse(utf8Decode(bytes));
     if (!envelope || envelope.v !== 1) throw new Error('关联码格式不支持');
 
     var salt = MD.crypto.b64ToBytes(envelope.salt);
