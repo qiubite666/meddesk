@@ -50,7 +50,7 @@
   };
 
   // 页面内状态：单一路由，内部切换视图，避免为每个子页注册路由
-  var S = { tab: 'archive', view: 'list', memberId: null, msg: '', err: '', busy: false };
+  var S = { tab: 'archive', view: 'list', memberId: null, msg: '', err: '', busy: false, lastCode: '' };
 
   function nowMs() {
     return (MD.util && typeof MD.util.nowMs === 'function') ? MD.util.nowMs() : Date.now();
@@ -501,6 +501,9 @@
       rows: '4',
       style: { width: '100%', fontSize: '12px', fontFamily: 'monospace', resize: 'vertical' }
     });
+    // 关键：生成后页面会整页重绘，textarea 是新建节点，
+    // 必须从状态回填，否则「提示已生成但框里是空的」。
+    codeBox.value = S.lastCode || '';
 
     var passOut = el('input', {
       class: 'input', type: 'text', placeholder: '设置一个至少 6 位的口令',
@@ -532,7 +535,7 @@
               S.err = ''; S.msg = ''; paintBusy(host, true);
               try {
                 var code = await makeCode(passOut.value, daysIn.value);
-                codeBox.value = code;
+                S.lastCode = code;   // 先落状态，再重绘，才能回显
                 S.msg = '已生成，请把关联码和口令分别发给家人（建议不要在同一聊天里一起发）';
                 toast('关联码已生成');
               } catch (e) {
@@ -544,13 +547,14 @@
           el('button', {
             class: 'btn btn-ghost', type: 'button', text: '复制关联码',
             onClick: function () {
-              if (!codeBox.value) { toast('还没有生成关联码', 'error'); return; }
+              var payload = codeBox.value || S.lastCode;
+              if (!payload) { toast('还没有生成关联码', 'error'); return; }
               try {
                 if (navigator.clipboard && navigator.clipboard.writeText) {
-                  navigator.clipboard.writeText(codeBox.value);
+                  navigator.clipboard.writeText(payload);
                   toast('已复制');
                 } else {
-                  codeBox.select();
+                  codeBox.value = payload; codeBox.select();
                   toast('请长按手动复制');
                 }
               } catch (e) { toast('请长按手动复制'); }

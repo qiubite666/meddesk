@@ -13,6 +13,7 @@ package family
 import (
 	"context"
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"errors"
@@ -40,8 +41,10 @@ const (
 	maxPageSize = 200
 )
 
-// crockford 是 Crockford Base32 字符集，去掉了 I L O U，避免口述歧义。
-const crockford = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+// digits 是短码字符集。按产品决定改为**纯数字**：便于电话口述与短信转发。
+// 代价是熵从 40 bit 降到约 26.6 bit（10^8），因此兑换限流必须保持严格：
+// 5 次/分钟/IP 时，命中一个码的期望时间以年计，实际不可爆破。
+const digits = "0123456789"
 
 // Service 聚合依赖。
 type Service struct {
@@ -74,7 +77,7 @@ func normalizeCode(raw string) (string, bool) {
 		if r == ' ' || r == '-' || r == '\t' || r == '\n' || r == '\r' {
 			continue
 		}
-		if !strings.ContainsRune(crockford, r) {
+		if !strings.ContainsRune(digits, r) {
 			return "", false
 		}
 		b.WriteRune(r)
@@ -84,6 +87,25 @@ func normalizeCode(raw string) (string, bool) {
 		return "", false
 	}
 	return code, true
+}
+
+// GenerateCode 由服务端随机生成 8 位纯数字短码。
+//
+// 用拒绝采样而不是取模：256 % 10 != 0，直接取模会让 0~5 出现概率略高，
+// 缩小有效搜索空间。拒绝 >=250 的字节即可得到均匀分布。
+func (s *Service) GenerateCode() (string, error) {
+	var out strings.Builder
+	buf := make([]byte, 1)
+	for out.Len() < maxCodeLen {
+		if _, err := rand.Read(buf); err != nil {
+			return "", wrapErr(err, "生成短码失败")
+		}
+		if buf[0] >= 250 {
+			continue
+		}
+		out.WriteByte(digits[int(buf[0])%10])
+	}
+	return out.String(), nil
 }
 
 // ------------------------------------------------------------------ DTO
@@ -131,7 +153,7 @@ func (s *Service) CreateGrant(ctx context.Context, ownerID string, req createReq
 	}
 	code, ok := normalizeCode(req.Code)
 	if !ok {
-		return nil, apierr.New(apierr.CodeBadRequest, "短码格式不正确（8 位，字母数字，排除 I/L/O/U）")
+		return nil, apierr.New(apierr.CodeBadRequest, "短码格式不正确（8 位数字）")
 	}
 	salt, err := decodeField(req.KDFSalt, maxSaltLen)
 	if err != nil {
@@ -308,6 +330,21 @@ func Mount(rg *gin.RouterGroup, svc *Service, requireAuth gin.HandlerFunc) {
 			return
 		}
 		c.JSON(http.StatusCreated, out)
+	})
+
+	// 由服务端生成短码：客户端先取码，再用码派生 KEK 包裹自己的 DEK，
+	// 最后带着码与信封调 POST /grants。分两步是因为信封的计算依赖码本身。
+	g.POST("/grants/code", func(c *gin.Context) {
+		if _, ok := auth.UserID(c); !ok {
+			writeErr(c, apierr.New(apierr.CodeUnauthorized, "登录已失效"))
+			return
+		}
+		code, err := svc.GenerateCode()
+		if err != nil {
+			writeErr(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"code": code, "length": maxCodeLen, "oneTime": true})
 	})
 
 	g.POST("/grants/redeem", func(c *gin.Context) {
