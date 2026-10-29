@@ -245,7 +245,10 @@
           passwordHash: derived.hashB64,
           kdfSalt: saltB64,
           wrappedDek: wrapped.wrappedB64,
-          dekIv: wrapped.ivB64
+          dekIv: wrapped.ivB64,
+          // 注册必须先过图形验证码；两个字段由调用方（MD.captcha.value()）提供。
+          captchaId: credentials.captchaId || '',
+          captchaCode: credentials.captchaCode || ''
         })
       });
       var session = setSession(normalizeSession(payload, {

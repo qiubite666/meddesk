@@ -1059,6 +1059,12 @@
                 if (!MD.familyLink) throw new Error('短码模块未加载，请刷新页面');
                 var res = await MD.familyLink.createGrant();
                 S.lastCode = res.code;   // 先落状态，再整页重绘，才能回显
+                // 服务端只存 HMAC，不回显明文，所以本机留一份才能事后查看
+                if (MD.familyLink.rememberGrant) {
+                  MD.familyLink.rememberGrant({
+                    grantId: res.grantId, code: res.code, createdAt: nowMs()
+                  });
+                }
                 S.msg = '已生成。请在 24 小时内让对方输入，逾期自动失效。';
                 toast('关联码已生成');
               } catch (e) {
@@ -1087,13 +1093,23 @@
             try {
               if (!MD.familyLink) throw new Error('短码模块未加载，请刷新页面');
               var list = await MD.familyLink.listGrants();
+              var locals = MD.familyLink.localGrants ? MD.familyLink.localGrants() : [];
+              var codeMap = {};
+              (locals || []).forEach(function (x) {
+                if (x && x.grantId) codeMap[x.grantId] = x.code;
+              });
+
               if (!list || !list.length) {
-                S.msg = '还没有发出过授权';
+                S.msg = '本账号还没有发出过授权';
               } else {
                 S.msg = list.map(function (g, i) {
-                  var state = g.status === 'active' ? '已激活'
-                    : (g.status === 'pending' ? '待兑换' : '已失效');
-                  return (i + 1) + '. ' + state + ' · ' + fmtDateTime(g.createdAt || 0);
+                  var gid = g.grantId || g.grantID || g.id || '';
+                  var state = g.status === 'active' ? '已激活（对方已兑换）'
+                    : (g.status === 'pending' ? '待兑换（24 小时后失效）' : '已失效');
+                  // 服务端不保存明文码，只有生成方本机留了档才显示得出来
+                  var codeText = codeMap[gid] ? ('  ' + codeMap[gid])
+                    : '  （本机未记录，换设备后不可见）';
+                  return (i + 1) + '.' + codeText + '\n     ' + state + ' · ' + fmtDateTime(g.createdAt || 0);
                 }).join('\n');
               }
             } catch (e) {
@@ -1169,7 +1185,15 @@
               S.tab = 'archive'; S.view = 'detail'; S.memberId = memberId;
               paint();
             } catch (e) {
-              S.err = '关联失败：' + (e && e.message ? e.message : '未知错误');
+              var reason = (e && e.message) ? e.message : '未知错误';
+              if (reason.indexOf('短码无效') >= 0) {
+                // 统一文案是为了不泄露「这个码是否存在」。但只给一句「无效」会让
+                // 用户不知道下一步该做什么，这里补充可能原因与可执行动作。
+                reason += '\n可能原因：① 已超过 24 小时未兑换；② 已被兑换过；'
+                  + '③ 你与该账号此前已建立关联（同一对账号只允许一条有效授权）。'
+                  + '\n下一步：让对方重新生成一张；若此前已关联，直接到「家庭档案」查看即可。';
+              }
+              S.err = '关联失败：' + reason;
               paint();
             }
           }

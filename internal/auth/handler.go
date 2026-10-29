@@ -14,10 +14,15 @@ import (
 // Handler 承载 /api/v1/auth/* 的 HTTP 处理函数。
 type Handler struct {
 	svc *Service
+	// captcha 复用 Service 已持有的缓存实例，避免再给 Mount 增加一个依赖参数，
+	// 也让验证码在 Redis 可用时天然多实例共享。
+	captcha *captchaStore
 }
 
 // NewHandler 构造认证 HTTP 处理器。
-func NewHandler(svc *Service) *Handler { return &Handler{svc: svc} }
+func NewHandler(svc *Service) *Handler {
+	return &Handler{svc: svc, captcha: newCaptchaStore(svc.cache)}
+}
 
 // Mount 在传入的路由组（即 /api/v1）下挂载 /auth/* 子路由。
 // 需要鉴权的路由在内部自行用 RequireAuth 包装。
@@ -25,6 +30,7 @@ func Mount(rg *gin.RouterGroup, svc *Service) {
 	h := NewHandler(svc)
 	auth := rg.Group("/auth")
 	{
+		auth.GET("/captcha", h.captchaImage)
 		auth.POST("/register", h.register)
 		auth.POST("/login", h.login)
 		auth.POST("/salt", h.salt)
@@ -36,11 +42,30 @@ func Mount(rg *gin.RouterGroup, svc *Service) {
 	}
 }
 
+// captchaImage 下发一张新图形验证码。
+func (h *Handler) captchaImage(c *gin.Context) {
+	id, svg, err := h.captcha.issue(c.Request.Context())
+	if err != nil {
+		writeError(c, apierr.Wrap(apierr.CodeInternal, err, "验证码生成失败，请稍后重试"))
+		return
+	}
+	// 验证码是瞬时凭证，任何中间层缓存都会让用户看到已失效的图。
+	c.Header("Cache-Control", "no-store")
+	c.JSON(http.StatusOK, CaptchaResponse{CaptchaID: id, SVG: svg, ExpiresIn: int(captchaTTL.Seconds())})
+}
+
 // register 处理用户注册。
 func (h *Handler) register(c *gin.Context) {
 	var req model.RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, apierr.Wrap(apierr.CodeBadRequest, err, "请求参数有误"))
+		return
+	}
+	// 验证码在业务逻辑之前校验：注册的任何失败路径（邮箱已存在、未开放注册、
+	// 内部错误）都会让这张码失效。取舍是「用户需重新取图」换「一码只许试一次」，
+	// 否则攻击者可以用一张图反复探测邮箱是否已注册。
+	if !h.captcha.verify(c.Request.Context(), req.CaptchaID, req.CaptchaCode) {
+		writeError(c, apierr.New(apierr.CodeBadRequest, msgCaptchaInvalid))
 		return
 	}
 	resp, err := h.svc.Register(c.Request.Context(), req, metaFromRequest(c, req.Device))

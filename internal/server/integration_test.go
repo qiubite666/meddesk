@@ -21,10 +21,12 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/qiubite666/meddesk/internal/apierr"
+	"github.com/qiubite666/meddesk/internal/auth"
 	"github.com/qiubite666/meddesk/internal/cache"
 	"github.com/qiubite666/meddesk/internal/config"
 	"github.com/qiubite666/meddesk/internal/fake"
@@ -49,6 +51,10 @@ type env struct {
 	repos  *fake.Repos
 	cfg    *config.Config
 	cache  cache.Cache
+	// captchaAnswers 暂存签发出来的验证码明文（captchaId -> code）。
+	// 明文只存在于服务端，HTTP 层本来自证不了；用测试钩子接出来，
+	// 否则注册用例只能断言「一定 400」，后续所有依赖登录态的用例都会连锁失效。
+	captchaAnswers sync.Map
 }
 
 // newEnv 起一个真实的 gin 引擎（中间件链完整），只把数据层换成内存实现。
@@ -108,7 +114,9 @@ func newEnv(t *testing.T) *env {
 		srv.Close()
 		_ = c.Close()
 	})
-	return &env{t: t, srv: srv, client: srv.Client(), repos: repos, cfg: cfg, cache: c}
+	e := &env{t: t, srv: srv, client: srv.Client(), repos: repos, cfg: cfg, cache: c}
+	auth.SetCaptchaAnswerObserver(func(id, code string) { e.captchaAnswers.Store(id, code) })
+	return e
 }
 
 // do 发起一次 JSON 请求（body 为 nil 时不带请求体），返回响应与响应体。
@@ -240,6 +248,29 @@ func registerBody() model.RegisterRequest {
 	}
 }
 
+// registerBodyWithCaptcha 先向服务端要一张验证码，再把 id 与明文答案
+// 填进注册体。明文通过测试钩子拿到，生产路径下该钩子恒为 nil。
+func (e *env) registerBodyWithCaptcha() model.RegisterRequest {
+	e.t.Helper()
+	resp, raw := e.do(http.MethodGet, "/api/v1/auth/captcha", nil, "")
+	e.wantStatus(resp, "取验证码", http.StatusOK)
+
+	var cr auth.CaptchaResponse
+	e.decode(raw, "取验证码", &cr)
+	if cr.CaptchaID == "" || cr.SVG == "" {
+		e.t.Fatalf("取验证码：返回空字段，响应=%s", string(raw))
+	}
+	answer, ok := e.captchaAnswers.Load(cr.CaptchaID)
+	if !ok {
+		e.t.Fatalf("测试钩子没拿到验证码明文，id=%s", cr.CaptchaID)
+	}
+
+	req := registerBody()
+	req.CaptchaID = cr.CaptchaID
+	req.CaptchaCode = answer.(string)
+	return req
+}
+
 // TestIntegrationSmoke 按顺序跑完全链路冒烟用例。
 func TestIntegrationSmoke(t *testing.T) {
 	e := newEnv(t)
@@ -264,7 +295,7 @@ func TestIntegrationSmoke(t *testing.T) {
 	// ---------------------------------------------------------------- 2~3. 注册
 	var sess model.TokenResponse
 	t.Run("注册并重复注册", func(t *testing.T) {
-		resp, body := e.do(http.MethodPost, "/api/v1/auth/register", registerBody(), "")
+		resp, body := e.do(http.MethodPost, "/api/v1/auth/register", e.registerBodyWithCaptcha(), "")
 		e.wantStatus(resp, "注册", http.StatusOK)
 		e.decode(body, "注册", &sess)
 		if sess.AccessToken == "" || sess.RefreshToken == "" {
@@ -274,7 +305,7 @@ func TestIntegrationSmoke(t *testing.T) {
 			t.Fatalf("注册：userId/kdfSalt/wrappedDek/dekIv 存在空值，响应=%s", string(body))
 		}
 
-		resp2, body2 := e.do(http.MethodPost, "/api/v1/auth/register", registerBody(), "")
+		resp2, body2 := e.do(http.MethodPost, "/api/v1/auth/register", e.registerBodyWithCaptcha(), "")
 		e.wantStatus(resp2, "重复注册", http.StatusConflict)
 		e.wantCode(body2, "重复注册", apierr.CodeConflict)
 	})
@@ -656,7 +687,7 @@ func min(a, b int) int {
 // 用下发的盐派生的口令哈希可以完成登录（新设备链路闭环）。
 func TestAuthSaltHandshake(t *testing.T) {
 	e := newEnv(t)
-	body := registerBody()
+	body := e.registerBodyWithCaptcha()
 
 	// 先注册一个账户
 	resp, _ := e.do(http.MethodPost, "/api/v1/auth/register", body, "")

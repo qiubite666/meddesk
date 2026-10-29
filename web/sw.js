@@ -15,7 +15,7 @@ const V = BUILD_ID === DEV_SENTINEL ? '' : '?v=' + BUILD_ID;
 // 或未重新构建二进制就直接替换 web/ 的场景下，sw.js 里仍是占位符 →
 // CACHE_NAME 恒定不变 → 老用户的 Service Worker 认为脚本没变，永远不重新预缓存，
 // 新清单形同虚设。递增此号可确保 activate 一定换新缓存、install 一定重跑。
-const SHELL_REV = '2';
+const SHELL_REV = '3';
 const CACHE_NAME = 'meddesk-shell-' + (BUILD_ID || 'dev') + '-r' + SHELL_REV;
 
 // 预缓存列表：静态资源统一带 ?v= 指纹参数，与服务端注入到 index.html 的引用一致，
@@ -28,6 +28,7 @@ const SHELL_ASSETS = [
   '/manifest.webmanifest',
   '/assets/css/app.css',
   '/assets/js/core.js',
+  '/assets/js/captcha.js',
   '/assets/js/crypto.js',
   '/assets/js/db.js',
   '/assets/js/api.js',

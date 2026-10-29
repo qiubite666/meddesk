@@ -37,11 +37,15 @@
     return digits.length === CODE_LEN ? digits : null;
   }
 
-  /** 展示用：1234 5678，便于口述与核对 */
+  /** 展示用：原样返回 8 位数字。
+   *
+   * 曾经做过 1234 5678 的分组，但用户复制时会把空格一起带走、粘贴到输入框里
+   * 又得靠归一化去剔，反而容易出错。现在统一「显示什么就能直接用什么」。
+   */
   function formatCode(raw) {
     var code = normalizeCode(raw);
     if (!code) return String(raw == null ? '' : raw);
-    return code.slice(0, 4) + ' ' + code.slice(4);
+    return code;
   }
 
   function requireAuth() {
@@ -227,6 +231,44 @@
     });
   }
 
+  /* ---------------- 本机留档：生成过的码 ---------------- */
+
+  // 服务端刻意不保存明文短码（只有 HMAC 查找键），所以"查看我发出的授权"
+  // 想显示那 8 位数字，只能由生成方在本机留一份。
+  // 键里带 userId：同一浏览器切换账号时不会互相覆盖。
+  function localKey() {
+    var uid = '';
+    try {
+      var s = MD.api && MD.api.session ? MD.api.session() : null;
+      uid = (s && (s.userId || s.userID)) || '';
+    } catch (e) { uid = ''; }
+    return 'meddesk.grantCodes.' + (uid || 'anon');
+  }
+
+  function rememberGrant(rec) {
+    if (!rec || !rec.grantId || !rec.code) return;
+    try {
+      var all = localGrants().filter(function (x) { return x.grantId !== rec.grantId; });
+      all.unshift({
+        grantId: rec.grantId,
+        code: normalizeCode(rec.code) || rec.code,
+        createdAt: Number(rec.createdAt) || Date.now()
+      });
+      // 只留最近 50 条，避免长期使用把 localStorage 撑满。
+  // 直接用 localStorage 而不是 MD.api 的封装：后者是会话字段专用的私有函数，
+  // 没有对外导出；这里的数据与登录态无关，不需要跟着会话一起清理。
+      window.localStorage.setItem(localKey(), JSON.stringify(all.slice(0, 50)));
+    } catch (e) { /* 隐私模式禁用存储时忽略：只是看不到历史码，不影响兑换 */ }
+  }
+
+  function localGrants() {
+    try {
+      var raw = window.localStorage.getItem(localKey());
+      var arr = raw ? JSON.parse(raw) : [];
+      return Array.isArray(arr) ? arr : [];
+    } catch (e) { return []; }
+  }
+
   /** 我作为所有者的授权列表（不含密钥材料） */
   async function listGrants() {
     var resp = await MD.api.request('/family/grants', { method: 'GET' });
@@ -266,6 +308,8 @@
     fetchRecords: fetchRecords,
     pushRecords: pushRecords,
     listGrants: listGrants,
+    rememberGrant: rememberGrant,
+    localGrants: localGrants,
     revoke: revoke,
     forgetDek: forgetDek,
     clearCache: clearCache

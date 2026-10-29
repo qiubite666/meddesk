@@ -431,8 +431,15 @@
       MD.ui.el('div', { class: 'field' }, [MD.ui.el('label', { class: 'label', text: '口令' }), password])
     ];
     if (mode === 'register') fields.push(MD.ui.el('div', { class: 'field' }, [MD.ui.el('label', { class: 'label', text: '确认口令' }), confirmPassword]));
+    // 图形验证码只出现在注册：登录已有失败次数限流，再加一层会明显拉长登录路径。
+    var captchaField = null;
+    if (mode === 'register') {
+      captchaField = MD.ui.el('div', { class: 'field' }, [MD.ui.el('label', { class: 'label', text: '图形验证码' })]);
+      fields.push(captchaField);
+    }
     fields.push(errorText, submit);
     var form = MD.ui.el('form', { class: 'stack' }, fields);
+    if (captchaField) MD.captcha.render(captchaField);
     form.addEventListener('submit', async function (event) {
       event.preventDefault();
       errorText.textContent = '';
@@ -440,10 +447,20 @@
         errorText.textContent = '两次输入的口令不一致';
         return;
       }
+      var payload = { email: email.value, password: password.value };
+      if (mode === 'register') {
+        var captcha = MD.captcha.value();
+        if (!captcha.captchaCode) {
+          errorText.textContent = '请输入图片中的验证码';
+          return;
+        }
+        payload.captchaId = captcha.captchaId;
+        payload.captchaCode = captcha.captchaCode;
+      }
       submit.disabled = true;
       submit.textContent = mode === 'register' ? '正在创建…' : '正在登录…';
       try {
-        if (mode === 'register') await MD.api.register({ email: email.value, password: password.value });
+        if (mode === 'register') await MD.api.register(payload);
         else await MD.api.login({ email: email.value, password: password.value });
         hideAuth();
         await afterAuthenticated();
@@ -451,6 +468,9 @@
         MD.toast.show(mode === 'register' ? '账户创建成功' : '登录成功', 'success');
       } catch (error) {
         errorText.textContent = error.message || (mode === 'register' ? '注册失败' : '登录失败');
+        // 服务端无论注册成功与否都会消耗掉这张验证码，重试前必须换新图，
+        // 否则用户填什么都只会得到「验证码错误或已过期」。
+        if (mode === 'register') MD.captcha.refresh().catch(function () {});
         MD.haptic.warn();
       } finally {
         submit.disabled = false;

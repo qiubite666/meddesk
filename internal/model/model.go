@@ -99,6 +99,11 @@ type RegisterRequest struct {
 	KDFSalt     string `json:"kdfSalt" binding:"required"`     // base64，客户端 PBKDF2 salt
 	WrappedDEK  string `json:"wrappedDek" binding:"required"`  // base64，被 KEK 包裹的数据密钥
 	DEKIV       string `json:"dekIv" binding:"required"`       // base64，包裹 DEK 所用的 IV
+	// CaptchaID / CaptchaCode 是图形验证码（服务端一次性凭证，5 分钟过期）。
+	// 不加 required：缺字段也走统一的「验证码错误或已过期」提示，
+	// 避免前端暴露「哪个字段没填」的差异信息。
+	CaptchaID   string     `json:"captchaId" binding:"max=64"`
+	CaptchaCode string     `json:"captchaCode" binding:"max=16"`
 	Device      DeviceInfo `json:"device,omitempty"`
 }
 
