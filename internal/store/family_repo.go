@@ -53,11 +53,17 @@ type FamilyRepo interface {
 }
 
 // OwnerRecord 是 owner 的一条密文同步记录。
+//
+// 字段类型必须与 sync_records 的实际列类型一致：
+//   - updated_at 是 bigint（客户端 Unix 毫秒），**不是** timestamptz。
+//     早先这里写成 time.Time，导致 rows.Scan 直接失败、接口回「读取记录失败」。
+//     这段代码此前只有桩测试覆盖，真实调用一次就炸。
+//   - ver / seq 是 bigint，用 int64 接，避免驱动做窄化转换时报错。
 type OwnerRecord struct {
 	Table     string
 	RecordID  string
-	Ver       int
-	UpdatedAt time.Time
+	Ver       int64
+	UpdatedAt int64 // Unix 毫秒
 	Deleted   bool
 	IV        []byte
 	CT        []byte

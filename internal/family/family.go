@@ -273,8 +273,8 @@ func (s *Service) Records(ctx context.Context, viewerID, grantID string, sinceSe
 	out := make([]recordDTO, 0, len(items))
 	for _, it := range items {
 		out = append(out, recordDTO{
-			Table: it.Table, RecordID: it.RecordID, Ver: it.Ver,
-			UpdatedAt: it.UpdatedAt.UnixMilli(), Deleted: it.Deleted,
+			Table: it.Table, RecordID: it.RecordID, Ver: int(it.Ver),
+			UpdatedAt: it.UpdatedAt, Deleted: it.Deleted,
 			IV: encodeField(it.IV), CT: encodeField(it.CT), Seq: it.Seq,
 		})
 	}
