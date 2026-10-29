@@ -1128,15 +1128,36 @@
     });
     var targetSelect = el('select', { class: 'select' });
 
+    // 「新增档案」内联表单：只有下拉选中 __new__ 时才显示。
+    // 关联本身要求"先有档案才能挂数据"，强迫用户先跑去档案页建一个再回来
+    // 是很别扭的路径；既然他人已经在手边（手里有码），就该一步做完。
+    var newNameIn = el('input', {
+      class: 'input', type: 'text', placeholder: '例如：老妈', autocomplete: 'off'
+    });
+    var newRelSel = el('select', { class: 'select' }, RELATIONS.map(function (r) {
+      var opt = el('option', { value: r, text: r });
+      if (r === '母亲') opt.selected = true;
+      return opt;
+    }));
+    var newBox = el('div', { class: 'stack', style: { gap: '10px', display: 'none' } }, [
+      el('div', { class: 'field' }, [el('span', { class: 'label', text: '姓名' }), newNameIn]),
+      el('div', { class: 'field' }, [el('span', { class: 'label', text: '关系' }), newRelSel])
+    ]);
+
+    function syncNewBox() {
+      newBox.style.display = targetSelect.value === '__new__' ? '' : 'none';
+    }
+    targetSelect.addEventListener('change', syncNewBox);
+
     listMembers().then(function (members) {
       clear(targetSelect);
-      if (!members.length) {
-        targetSelect.appendChild(el('option', { value: '', text: '（先新增一个家庭档案）' }));
-        return;
-      }
       members.forEach(function (m) {
         targetSelect.appendChild(el('option', { value: m.id, text: m.name + '（' + (m.relation || '') + '）' }));
       });
+      targetSelect.appendChild(el('option', { value: '__new__', text: '＋ 新增档案…' }));
+      // 没有档案时直接落到「新增」，少一次无意义的点击
+      targetSelect.value = members.length ? members[0].id : '__new__';
+      syncNewBox();
     });
 
     host.appendChild(el('div', { class: 'card', style: { marginBottom: '14px' } }, [
@@ -1149,6 +1170,7 @@
       el('div', { class: 'stack', style: { gap: '10px' } }, [
         el('div', { class: 'field' }, [el('span', { class: 'label', text: '8 位关联码' }), codeIn]),
         el('div', { class: 'field' }, [el('span', { class: 'label', text: '保存到哪个档案' }), targetSelect]),
+        newBox,
         el('button', {
           class: 'btn btn-primary', type: 'button', text: '关联并查看',
           onClick: async function () {
@@ -1156,9 +1178,29 @@
             try {
               if (!MD.familyLink) throw new Error('短码模块未加载，请刷新页面');
               var memberId = targetSelect.value;
-              if (!memberId) throw new Error('请先新增一个家庭档案，再选择保存位置');
-              var member = await getMember(memberId);
-              if (!member) throw new Error('目标档案不存在');
+              var member;
+
+              if (memberId === '__new__') {
+                var nm = String(newNameIn.value || '').trim();
+                if (!nm) throw new Error('请填写新档案的姓名');
+                var rec = {
+                  id: uid(),
+                  name: nm,
+                  relation: newRelSel.value || '其他',
+                  note: '',
+                  color: '#4f8cff',
+                  archived: false,
+                  createdAt: nowMs(),
+                  updatedAt: nowMs()
+                };
+                await saveProfileFromForm(rec);   // 档案与用药提醒共用同一张表
+                memberId = rec.id;
+                member = rec;
+              } else {
+                if (!memberId) throw new Error('请选择保存到哪个档案');
+                member = await getMember(memberId);
+                if (!member) throw new Error('目标档案不存在');
+              }
 
               var res = await MD.familyLink.redeem(codeIn.value);
               var ownerDek = MD.familyLink.getDek(res.grantId);

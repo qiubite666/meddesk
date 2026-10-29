@@ -113,6 +113,34 @@ func (r *familyRepo) GetByLookup(ctx context.Context, lookup []byte) (*FamilyGra
 		`SELECT `+familyColumns+` FROM family_grants WHERE code_lookup = $1`, lookup))
 }
 
+// revokeActivePair 撤销同一对 owner+viewer 之间的 active 授权。
+//
+// 只用于「重新兑换」场景：短码已校验通过，说明调用方确实拿到了对方新生成的码，
+// 此时让新授权顶替旧的，而不是把用户挡在门外。只动 status='active' 的行，
+// 其它 pending 的悬挂码不受影响。
+func (r *familyRepo) revokeActivePair(ctx context.Context, ownerID, viewerID string) error {
+	if r == nil || r.s == nil || r.s.pool == nil {
+		return wrap("撤销旧授权失败", errNoPool)
+	}
+	owner, err := uuidParam(ownerID)
+	if err != nil {
+		return wrap("撤销旧授权失败", err)
+	}
+	viewer, err := uuidParam(viewerID)
+	if err != nil {
+		return wrap("撤销旧授权失败", err)
+	}
+	_, err = r.s.pool.Exec(ctx, `
+UPDATE family_grants
+   SET status = $3, revoked_at = now()
+ WHERE owner_id = $1 AND viewer_id = $2 AND status = $4`,
+		owner, viewer, FamilyGrantRevoked, FamilyGrantActive)
+	if err != nil {
+		return wrap("撤销旧授权失败", err)
+	}
+	return nil
+}
+
 // Redeem 原子地把 pending 绑定到 viewer。
 // 单条 UPDATE ... WHERE status='pending' 保证并发兑换只有一个能成功。
 // 兑换成功后 expires_at 置 NULL —— 按产品决定，授权建立后永久有效。
@@ -132,10 +160,35 @@ RETURNING `+familyColumns, lookup, FamilyGrantActive, viewerID, FamilyGrantPendi
 		return g, nil
 	}
 	// 同一对账号只允许存在一条 active 授权（family_grants_pair_uidx）。
-	// 若该查看方此前已关联过这个 owner 的另一条短码，这条 UPDATE 会撞唯一索引。
-	// 这是业务上的「已建立关联」，不是服务端故障 —— 必须回 409 而不是 500。
+	// 若该查看方此前已关联过这个 owner，再兑换对方新生成的码就会撞这个索引。
+	//
+	// 【为什么是替换而不是拒绝】
+	// 旧授权和新码指向同一份数据，用户重新兑换的意图就是「以这张新码为准」。
+	// 直接回 409 会让用户永久卡在「短码无效」，而且他并没有做错什么 ——
+	// 对方重新生成码是再正常不过的操作。所以这里先撤销旧的，再让新码生效。
 	if isUniqueViolation(err) {
-		return nil, newConflict("你与该账号已建立关联")
+		cur, getErr := r.GetByLookup(ctx, lookup)
+		if getErr != nil {
+			return nil, getErr
+		}
+		if revErr := r.revokeActivePair(ctx, cur.OwnerID, viewerID); revErr != nil {
+			return nil, revErr
+		}
+		// 旧记录已让位，重试同一条 UPDATE 即可成功
+		g, err = scanFamilyGrant(r.s.pool.QueryRow(ctx, `
+UPDATE family_grants
+   SET status = $2, viewer_id = $3, redeemed_at = now(), expires_at = NULL
+ WHERE code_lookup = $1
+   AND status = $4
+   AND (expires_at IS NULL OR expires_at > now())
+RETURNING `+familyColumns, lookup, FamilyGrantActive, viewerID, FamilyGrantPending))
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return nil, ErrNotFound
+			}
+			return nil, wrap("兑换授权失败", err)
+		}
+		return g, nil
 	}
 	if !errors.Is(err, ErrNotFound) {
 		return nil, err
