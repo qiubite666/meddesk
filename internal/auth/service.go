@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -33,7 +34,21 @@ type Service struct {
 	// adminEmails 是后台白名单（小写）。仅用于前端决定是否显示「网站后台」入口；
 	// 真正的权限校验在 /api/v1/admin/* 的 RequireAdmin 中间件里，二者互不影响。
 	adminEmails map[string]bool
+	// fakeSaltKey 是派生「假盐」用的子密钥，构造时算一次后常驻。
+	// 【为什么要预计算】/auth/salt 是公开且高频的未认证接口，每个请求都重算 HMAC
+	// 没有意义；且它只依赖配置，构造期算完即可，不引入运行时初始化顺序问题。
+	fakeSaltKey []byte
 }
+
+// 假盐（账户不存在时下发）的域分隔标签。
+//
+// 【为什么需要】JWTSecret 同时承担签名用途，直接拿它当 HMAC key 会让同一份
+// 密钥材料跨用途复用（一处泄露即两边失效，也容易被长度扩展类构造牵连）。
+// 先对标签做一次 HMAC 派生出专属子密钥，再做消息派生，实现「一钥一用」。
+const (
+	fakeSaltKeyDomain = "meddesk-fake-salt-key"
+	fakeSaltMsgPrefix = "meddesk-fake-salt-v1:"
+)
 
 // SetAdminEmails 注入后台白名单，供 /auth/me 返回 isAdmin 标记。
 //
@@ -67,7 +82,20 @@ func NewService(users store.UserRepo, refresh store.RefreshRepo, c cache.Cache, 
 		slog.Warn("托管恢复密钥不可用，已禁用该能力", "error", err)
 		recovery = nil
 	}
-	return &Service{users: users, refresh: refresh, cache: c, cfg: normalized, recovery: recovery}
+	return &Service{
+		users: users, refresh: refresh, cache: c, cfg: normalized, recovery: recovery,
+		fakeSaltKey: deriveFakeSaltKey(normalized.JWTSecret),
+	}
+}
+
+// deriveFakeSaltKey 由 JWTSecret 派生假盐专用子密钥（HMAC-SHA256，带域分隔）。
+//
+// 【为什么不用随机数】子密钥必须跨进程重启稳定：假盐一旦失稳，
+// 「同一邮箱多次返回一致」这个不可区分性就破了。
+func deriveFakeSaltKey(secret string) []byte {
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(fakeSaltKeyDomain))
+	return mac.Sum(nil)
 }
 
 // RecoveryEnabled 报告本部署是否启用了托管恢复。
@@ -360,7 +388,10 @@ func (s *Service) ChangePassword(ctx context.Context, userID string, req model.C
 
 // AccountSalt 返回账户的客户端 KDF 盐（新设备首次登录握手）。
 // 客户端用该盐派生口令哈希后调 /auth/login；换设备时本地无缓存盐，由此接口下发。
-// 防枚举：账户不存在时返回随机盐并照常 200——攻击者无法据此区分账户是否存在。
+// 防枚举：账户不存在时返回「确定性假盐」并照常 200——同一邮箱多次调用结果完全相同，
+// 与真盐一样稳定，调用方无法借助「两次结果是否相同」判断账户是否存在。
+// 假盐由服务端秘密对邮箱做 HMAC-SHA256 派生，因此不同邮箱得到不同值，
+// 形态（32 字节 + 标准 base64）与真盐一致，长度/编码也无法区分。
 // 盐本身不保密（PBKDF2 盐的作用是防彩虹表/预计算），真正的口令强度由
 // 客户端 PBKDF2 + 服务端 argon2id 两层派生保障。
 func (s *Service) AccountSalt(ctx context.Context, email string) (string, error) {
@@ -368,11 +399,11 @@ func (s *Service) AccountSalt(ctx context.Context, email string) (string, error)
 	u, err := s.users.GetByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
-			buf := make([]byte, 32)
-			if _, err := rand.Read(buf); err != nil {
-				return "", apierr.Wrap(apierr.CodeInternal, err, msgInternal)
-			}
-			return base64.StdEncoding.EncodeToString(buf), nil
+			// 不能用随机盐：随机值每次不同、真盐恒定，连查两次即可判定账号存在。
+			// 用邮箱确定性派生，等价于让「不存在的账号」看起来也有一个稳定盐。
+			mac := hmac.New(sha256.New, s.fakeSaltKey)
+			mac.Write([]byte(fakeSaltMsgPrefix + email))
+			return base64.StdEncoding.EncodeToString(mac.Sum(nil)), nil
 		}
 		return "", apierr.Wrap(apierr.CodeInternal, err, msgInternal)
 	}

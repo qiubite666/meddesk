@@ -397,14 +397,24 @@ func (r ledgerRepo) DeleteRecord(ctx context.Context, userID, id string) error {
 	return nil
 }
 
-// ledgerWhere 构造筛选条件。user_id 永远是第一个参数。
+// ledgerWhereFrom 构造筛选条件。user_id 永远是调用方的第一个参数。
+//
+// startIdx 是"调用方 SQL 里已被占用的最大占位符编号"，本函数生成的占位符从
+// startIdx+1 起顺延：
+//   - ListRecords / SumRecords / CategoryBreakdown 只占用 $1=user_id，传 1，条件从 $2 起；
+//   - DailyTrend 的 $1=user_id、$2/$3=generate_series 的起止日期，必须传 3，条件从 $4 起。
+//
+// 【占位符起点这个坑】曾经无条件从 $2 起编，导致 DailyTrend 带任何筛选
+// （type/reimbStatus/categoryIDs/ids/keyword）时条件撞上 $2（起始日期），
+// PostgreSQL 报参数类型不匹配（42883），接口直接 500。所以起点必须由调用方声明，
+// 不能默认假设只有 user_id 一个参数。
 //
 // 【为什么全参数化】关键词、分类 id 都来自用户输入，拼接进 SQL 就是注入入口；
 // 这里只把占位符下标拼进去，值一律走 args。
-func ledgerWhere(f model.LedgerFilter, from, to string) (string, []any) {
+func ledgerWhereFrom(f model.LedgerFilter, from, to string, startIdx int) (string, []any) {
 	var sb strings.Builder
 	args := []any{}
-	idx := 1 // $1 留给 user_id
+	idx := startIdx
 	next := func(v any) string {
 		args = append(args, v)
 		idx++
@@ -441,7 +451,7 @@ func (r ledgerRepo) ListRecords(ctx context.Context, userID string, f model.Ledg
 	if err != nil {
 		return nil, 0, err
 	}
-	cond, args := ledgerWhere(f, f.From, f.To)
+	cond, args := ledgerWhereFrom(f, f.From, f.To, 1) // $1=user_id，条件从 $2 起
 
 	size := f.Size
 	if size <= 0 || size > 200 {
@@ -497,7 +507,7 @@ func (r ledgerRepo) SumRecords(ctx context.Context, userID string, f model.Ledge
   COALESCE((SUM(amount) FILTER (WHERE type = 'income')  * 100)::bigint, 0),
   COALESCE((SUM(amount) FILTER (WHERE type = 'expense') * 100)::bigint, 0)
 FROM ledger_records r WHERE r.user_id = $1`
-	cond, args := ledgerWhere(f, from, to)
+	cond, args := ledgerWhereFrom(f, from, to, 1) // $1=user_id，条件从 $2 起
 	qArgs := append([]any{uid}, args...)
 	var income, expense int64
 	if err := r.s.pool.QueryRow(ctx, q+cond, qArgs...).Scan(&income, &expense); err != nil {
@@ -506,16 +516,16 @@ FROM ledger_records r WHERE r.user_id = $1`
 	return income, expense, nil
 }
 
-func (r ledgerRepo) DailyTrend(ctx context.Context, userID string, f model.LedgerFilter, from, to string) ([]model.LedgerTrendPoint, error) {
-	uid, err := uuidParam(userID)
-	if err != nil {
-		return nil, err
-	}
-	// 注意：这里**不能**把 from/to 再交给 ledgerWhere——占位符 $2/$3 已经被
-	// generate_series 占用，重复使用会让日期条件与序列参数互相错位（真实 PG 上直接报错）。
-	// 区间由 generate_series 本身表达，因此传空串。
-	cond, args := ledgerWhere(f, "", "")
-	// generate_series 保证"没有数据的日子补 0"，前端不必自己补齐。
+// dailyTrendSQL 组装趋势查询。$1=user_id、$2/$3=generate_series 的起止日期，
+// 因此筛选条件必须从 $4 起编（见 ledgerWhereFrom 的起点说明）。
+//
+// 注意：这里**不能**把 from/to 再交给 ledgerWhereFrom——区间已由 generate_series 表达，
+// 再传一次会让日期条件与序列参数互相错位；传空串即可。
+// generate_series 保证"没有数据的日子补 0"，前端不必自己补齐。
+func dailyTrendSQL(f model.LedgerFilter, uid any, from, to string) (string, []any) {
+	// 起始下标必须是 3（不是 1）：否则 type/keyword 等条件会生成 $2 并撞上起始日期，
+	// PostgreSQL 报 42883，趋势接口 500。
+	cond, args := ledgerWhereFrom(f, "", "", 3)
 	q := `SELECT d::date::text,
        COALESCE((SUM(r.amount) FILTER (WHERE r.type = 'income')  * 100)::bigint, 0),
        COALESCE((SUM(r.amount) FILTER (WHERE r.type = 'expense') * 100)::bigint, 0)
@@ -523,7 +533,15 @@ FROM generate_series($2::date, $3::date, '1 day') AS d
 LEFT JOIN ledger_records r
   ON r.user_id = $1 AND r.occurred_on = d::date` + cond + `
 GROUP BY d ORDER BY d`
-	qArgs := append([]any{uid, from, to}, args...)
+	return q, append([]any{uid, from, to}, args...)
+}
+
+func (r ledgerRepo) DailyTrend(ctx context.Context, userID string, f model.LedgerFilter, from, to string) ([]model.LedgerTrendPoint, error) {
+	uid, err := uuidParam(userID)
+	if err != nil {
+		return nil, err
+	}
+	q, qArgs := dailyTrendSQL(f, uid, from, to)
 	rows, err := r.s.pool.Query(ctx, q, qArgs...)
 	if err != nil {
 		return nil, wrap("统计趋势失败", err)
@@ -551,7 +569,7 @@ func (r ledgerRepo) CategoryBreakdown(ctx context.Context, userID string, f mode
 	if err != nil {
 		return nil, nil, err
 	}
-	cond, args := ledgerWhere(f, from, to)
+	cond, args := ledgerWhereFrom(f, from, to, 1) // $1=user_id，条件从 $2 起
 	// 收入与支出分组统计：按 type 分组，两个结果集合并成一个查询再由 Go 拆分，
 	// 保证口径一致（同一 WHERE、同一聚合方式），绝不会把收入算进支出。
 	q := `SELECT r.type,

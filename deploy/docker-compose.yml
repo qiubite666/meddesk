@@ -1,7 +1,7 @@
 # ==============================================================================
 # MedDesk —— Docker Compose 一键方案（开发 / 自用快速起环境）
 # 用法：
-#   cp deploy/env.example .env && vim .env        # 必须替换所有占位符口令与 JWT 密钥
+#   cp deploy/env.example .env && vim .env        # 必须在 .env 里设置 POSTGRES_PASSWORD / REDIS_PASSWORD / JWT 密钥
 #   docker compose -f deploy/docker-compose.yml config        # 先做一次语法/插值校验
 #   docker compose -f deploy/docker-compose.yml up -d --build
 #   docker compose -f deploy/docker-compose.yml logs -f app
@@ -14,7 +14,9 @@
 # 【安全提醒】
 #   1. postgres / redis / app 的端口**全部只映射在 127.0.0.1**，容器网络不出宿主机，
 #      对外 HTTPS 必须由 Nginx 反代提供（见 deploy/nginx/meddesk.conf）。
-#   2. 下面所有口令都是**占位符**，上线前必须替换，禁止使用默认 meddesk/meddesk。
+#   2. 口令单一来源：postgres 的 POSTGRES_PASSWORD 与 app 的 MEDDESK_DB_URL 引用同一个
+#      .env 变量（Redis 同理用 REDIS_PASSWORD）。变量缺省时 compose 直接报错，不会带病启动。
+#      口令将拼进连接串，请只用 URL 安全字符（推荐 openssl rand -hex 24）。
 #   3. compose 文件路径在 deploy/ 下，故 volumes 中的相对路径均相对 deploy/ 解析。
 # ==============================================================================
 
@@ -30,9 +32,14 @@ services:
     ports:
       - "127.0.0.1:5432:5432"
     environment:
-      # ====== 占位符！上线前必须替换：openssl rand -base64 24 ======
       POSTGRES_USER: meddesk
-      POSTGRES_PASSWORD: "<PG_PASSWORD_请替换为随机串>"
+      # 【为什么】口令只从 .env 的 POSTGRES_PASSWORD 取值，且用 :? 断言必填：
+      #   ① 原先这里写死占位符，与 app 的 MEDDESK_DB_URL 里的占位符是**两个**独立字符串，
+      #      永远不可能对上 → app 必然认证失败；
+      #   ② :? 让 .env 漏配时 compose 直接报错退出（fail-fast），胜过容器起来后反复重连失败；
+      #   ③ 变量名与 docker-compose.middleware.yml 保持一致，同一份 .env 两个编排都能用。
+      # 注意：app 的连接串由本变量拼装，故口令必须是 URL 安全字符（推荐 openssl rand -hex 24）。
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}
       POSTGRES_DB: meddesk
       # 该变量仅在数据目录为空（首次初始化）时生效，之后修改不会重建库
       POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
@@ -90,8 +97,9 @@ services:
     ports:
       - "127.0.0.1:6379:6379"
     environment:
-      # 供容器健康检查里的 redis-cli 使用（注意：这里仍是一串占位符）
-      REDISCLI_AUTH: "<REDIS_PASSWORD_请替换为随机串>"
+      # 【为什么】健康检查里的 redis-cli 需要口令，且必须与 --requirepass 同源；
+      # 原先写死占位符，既改不动也与命令行的口令不一致。现统一取 .env 的 REDIS_PASSWORD。
+      REDISCLI_AUTH: ${REDIS_PASSWORD:?请在 .env 中设置 REDIS_PASSWORD}
     # 纯缓存语义：关闭 RDB/AOF。Redis 挂掉最坏情况是退化为进程内 Noop 实现
     # （限流与吊销名单在单实例内仍可用），数据本体始终在 PG 里。
     command: >
@@ -101,7 +109,7 @@ services:
       --save ""
       --maxmemory 256mb
       --maxmemory-policy allkeys-lru
-      --requirepass "<REDIS_PASSWORD_请替换为随机串>"
+      --requirepass "${REDIS_PASSWORD:?请在 .env 中设置 REDIS_PASSWORD}"
     volumes:
       - redisdata:/data
     mem_limit: 384m
@@ -137,7 +145,9 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8089:8089"
-    # 仓库根目录的 .env（内容同 deploy/env.example）。注意：里面的 <...> 占位符必须先替换。
+    # 仓库根目录的 .env（口令、JWT 密钥等全部从这里来）。
+    # 【为什么保留 env_file】它负责其余几十项非口令配置；但注意 compose 优先级是
+    #   environment > env_file，所以下面 environment 里**只放必须覆盖的项**。
     env_file:
       - ../.env
     environment:
@@ -145,9 +155,15 @@ services:
       MEDDESK_ENV: prod
       MEDDESK_HTTP_ADDR: ":8089"
       MEDDESK_TRUST_PROXY: "true"
-      MEDDESK_DB_URL: "postgres://meddesk:<PG_PASSWORD_请替换为随机串>@postgres:5432/meddesk?sslmode=disable"
+      # 【P0 修复】连接串改为**由 POSTGRES_PASSWORD 现场拼装**，不再写死占位符：
+      #   - 原写法 environment 里的 MEDDESK_DB_URL 会盖掉 env_file 里 install.sh 写入的
+      #     真实连接串，容器拿字面量 "<PG_PASSWORD_请替换为随机串>" 连库，必然失败；
+      #   - 现在 postgres 的 POSTGRES_PASSWORD 与本连接串引用同一个变量，
+      #     从根上消除"两处占位符对不上"，改一次口令两处同时生效；
+      #   - ${...:?} 是必填断言：.env 漏配时 compose config 阶段即报错，不会静默起来再挂。
+      MEDDESK_DB_URL: "postgres://meddesk:${POSTGRES_PASSWORD:?请在 .env 中设置 POSTGRES_PASSWORD}@postgres:5432/meddesk?sslmode=disable"
       MEDDESK_REDIS_ENABLED: "true"
-      MEDDESK_REDIS_URL: "redis://:<REDIS_PASSWORD_请替换为随机串>@redis:6379/0"
+      MEDDESK_REDIS_URL: "redis://:${REDIS_PASSWORD:?请在 .env 中设置 REDIS_PASSWORD}@redis:6379/0"
       MEDDESK_UPLOAD_DIR: /var/lib/meddesk/data
       # Dockerfile 已把中文字体放到该路径；若构建时未取到字体，PDF 导出会返回 503
       MEDDESK_PDF_FONT_PATH: /opt/meddesk/fonts/NotoSansSC-Regular.ttf

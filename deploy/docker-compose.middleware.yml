@@ -63,15 +63,19 @@ services:
       - allkeys-lru
       - --bind
       - 0.0.0.0
+    # 【P2 修复】REDIS_PASSWORD 必须提到**服务级**：
+    #   compose spec 的 healthcheck 只认 test/interval/timeout/retries/start_period/disable，
+    #   原先写在 healthcheck 内部的 environment 会被静默忽略 → 容器内 $REDIS_PASSWORD 为空
+    #   → `redis-cli -a ""` 对设了 requirepass 的实例认证失败 → 健康检查永远 unhealthy。
     environment:
       TZ: ${TZ:-Asia/Shanghai}
+      # 供下方 healthcheck 的 redis-cli 读取口令，避免明文写进 test 命令
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?请在 .env 中设置 REDIS_PASSWORD}
     ports:
       - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
-      # 通过环境变量把口令传给 redis-cli，避免写在镜像层
+      # 只保留合法键；口令经服务级环境变量注入（$$ 转义，交给容器内 shell 展开）
       test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
-      environment:
-        REDIS_PASSWORD: ${REDIS_PASSWORD:?请在 .env 中设置 REDIS_PASSWORD}
       interval: 10s
       timeout: 5s
       retries: 10

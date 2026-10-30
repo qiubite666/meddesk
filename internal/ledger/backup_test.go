@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -696,4 +697,223 @@ func keysOf(m map[string][]byte) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ------------------------------------------------------------------ 并发 / 容错（P1-5、P1-12）
+
+// bkGateDav 在 Upload 处阻塞：每个进入上传阶段的调用先报到（entered），
+// 再等内容被放行（release）。用于验证"不同账号能同时进入上传阶段"——
+// 如果仍是一把全局锁，第二个账号根本走不到这里。
+type bkGateDav struct {
+	inner    RemoteStore
+	entered  chan string
+	release  chan struct{}
+	releaseO sync.Once
+}
+
+func (g *bkGateDav) open() { g.releaseO.Do(func() { close(g.release) }) }
+
+func (g *bkGateDav) Ping(ctx context.Context, creds webdav.Credentials) error {
+	return g.inner.Ping(ctx, creds)
+}
+
+func (g *bkGateDav) Mkdir(ctx context.Context, creds webdav.Credentials, rel string) error {
+	return g.inner.Mkdir(ctx, creds, rel)
+}
+
+func (g *bkGateDav) Upload(ctx context.Context, creds webdav.Credentials, relPath string, body io.Reader, size int64) error {
+	g.entered <- relPath
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return g.inner.Upload(ctx, creds, relPath, body, size)
+}
+
+func (g *bkGateDav) Exists(ctx context.Context, creds webdav.Credentials, relPath string) (bool, error) {
+	return g.inner.Exists(ctx, creds, relPath)
+}
+
+// bkConcurrencyDav 统计 Upload 阶段的并发进入数（当前值与历史峰值）。
+type bkConcurrencyDav struct {
+	inner RemoteStore
+	hold  time.Duration
+	cur   atomic.Int32
+	max   atomic.Int32
+}
+
+func (d *bkConcurrencyDav) Ping(ctx context.Context, creds webdav.Credentials) error {
+	return d.inner.Ping(ctx, creds)
+}
+
+func (d *bkConcurrencyDav) Mkdir(ctx context.Context, creds webdav.Credentials, rel string) error {
+	return d.inner.Mkdir(ctx, creds, rel)
+}
+
+func (d *bkConcurrencyDav) Upload(ctx context.Context, creds webdav.Credentials, relPath string, body io.Reader, size int64) error {
+	n := d.cur.Add(1)
+	for {
+		m := d.max.Load()
+		if n <= m || d.max.CompareAndSwap(m, n) {
+			break
+		}
+	}
+	defer d.cur.Add(-1)
+	time.Sleep(d.hold)
+	return d.inner.Upload(ctx, creds, relPath, body, size)
+}
+
+func (d *bkConcurrencyDav) Exists(ctx context.Context, creds webdav.Credentials, relPath string) (bool, error) {
+	return d.inner.Exists(ctx, creds, relPath)
+}
+
+// bkPanicDav 在 Upload 处 panic：模拟打包/上传路径中的未预期崩溃。
+type bkPanicDav struct{ inner RemoteStore }
+
+func (p bkPanicDav) Ping(ctx context.Context, creds webdav.Credentials) error {
+	return p.inner.Ping(ctx, creds)
+}
+
+func (p bkPanicDav) Mkdir(ctx context.Context, creds webdav.Credentials, rel string) error {
+	return p.inner.Mkdir(ctx, creds, rel)
+}
+
+func (p bkPanicDav) Upload(ctx context.Context, creds webdav.Credentials, relPath string, body io.Reader, size int64) error {
+	panic("模拟远端驱动 panic")
+}
+
+func (p bkPanicDav) Exists(ctx context.Context, creds webdav.Credentials, relPath string) (bool, error) {
+	return p.inner.Exists(ctx, creds, relPath)
+}
+
+// bkSaveOther 为第二个账号保存一份独立凭据（复用同一台假 WebDAV）。
+func bkSaveOther(t *testing.T, e *bkEnv) {
+	t.Helper()
+	if err := e.svc.SaveCredentials(context.Background(), bkOtherID, CredentialsInput{
+		BaseURL: e.base, Username: bkDavUser, Password: bkDavPass, PathPrefix: "meddesk/ledger",
+	}); err != nil {
+		t.Fatalf("保存第二个账号凭据失败: %v", err)
+	}
+}
+
+// TestBackupRunForUserParallelAcrossUsers 覆盖 P1-5：不同账号的备份必须能并行。
+//
+// 做法：两个账号各自并发 RunForUser，远端在 Upload 处"报到后等放行"。
+// 若锁仍是进程级全局锁，第二个账号会卡在锁上，报到的只会有一个人 → 超时失败。
+func TestBackupRunForUserParallelAcrossUsers(t *testing.T) {
+	e := newBkEnv(t, []model.LedgerRecord{bkRecord("r1")}, nil)
+	if err := bkSave(t, e, bkDavPass); err != nil {
+		t.Fatalf("保存凭据失败: %v", err)
+	}
+	bkSaveOther(t, e)
+
+	gate := &bkGateDav{inner: e.svc.remote, entered: make(chan string, 2), release: make(chan struct{})}
+	e.svc.remote = gate
+	defer gate.open() // 失败路径也放行，避免 goroutine 泄漏
+
+	started := time.Now()
+	done := make(chan error, 2)
+	for _, id := range []string{bkUserID, bkOtherID} {
+		userID := id
+		go func() {
+			_, err := e.svc.RunForUser(context.Background(), userID)
+			done <- err
+		}()
+	}
+
+	deadline := time.After(10 * time.Second)
+	for i := 0; i < 2; i++ {
+		select {
+		case <-gate.entered:
+		case <-deadline:
+			t.Fatalf("只有 %d 个账号进入上传阶段：不同账号仍被串行化（锁仍是全局锁）", i)
+		}
+	}
+	elapsed := time.Since(started)
+	gate.open()
+
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("并行备份失败: %v", err)
+		}
+	}
+	// 两者都在对方被放行前就进入了上传，总耗时必然远小于"串行两次上传"。
+	if elapsed > 5*time.Second {
+		t.Fatalf("两个账号进入上传耗时 %v，疑似串行", elapsed)
+	}
+}
+
+// TestBackupRunForUserSerialPerUser 覆盖 P1-5 的另一半：同一账号必须严格互斥。
+//
+// 计数器记录 Upload 阶段的最大并发数：同一 userID 并发两次，峰值必须为 1。
+func TestBackupRunForUserSerialPerUser(t *testing.T) {
+	e := newBkEnv(t, []model.LedgerRecord{bkRecord("r1")}, nil)
+	if err := bkSave(t, e, bkDavPass); err != nil {
+		t.Fatalf("保存凭据失败: %v", err)
+	}
+	cnt := &bkConcurrencyDav{inner: e.svc.remote, hold: 120 * time.Millisecond}
+	e.svc.remote = cnt
+
+	begin := make(chan struct{})
+	done := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-begin
+			_, err := e.svc.RunForUser(context.Background(), bkUserID)
+			done <- err
+		}()
+	}
+	close(begin) // 尽量让两次调用同时起跑
+
+	for i := 0; i < 2; i++ {
+		if err := <-done; err != nil {
+			t.Fatalf("同账号备份失败: %v", err)
+		}
+	}
+	if got := cnt.max.Load(); got != 1 {
+		t.Fatalf("同一账号上传阶段并发峰值应为 1，实际 %d（分片锁未生效）", got)
+	}
+	// 两次都成功且都真的上传了（串行不代表被吞掉一次）。
+	runs, err := e.repo.ListRuns(context.Background(), bkUserID, 10)
+	if err != nil || len(runs) != 1 || runs[0].Status != store.BackupRunSuccess {
+		t.Fatalf("运行记录不符: %+v（err=%v）", runs, err)
+	}
+}
+
+// TestSchedulerRecoversFromPanic 覆盖 P1-12：备份 panic 不能杀掉进程，且下一轮仍可执行。
+func TestSchedulerRecoversFromPanic(t *testing.T) {
+	t.Run("单次备份 panic 后调度继续", func(t *testing.T) {
+		e := newBkEnv(t, []model.LedgerRecord{bkRecord("r1")}, nil)
+		if err := bkSave(t, e, bkDavPass); err != nil {
+			t.Fatalf("保存凭据失败: %v", err)
+		}
+		working := e.svc.remote
+		s := NewScheduler(e.svc, e.svc.log)
+
+		// 注入会 panic 的远端：runAllSafe 必须兜住，测试进程不能崩。
+		e.svc.remote = bkPanicDav{inner: working}
+		s.runAllSafe(context.Background())
+
+		// 关键：panic 之后同一账号的锁必须已被释放，下一轮备份仍能正常跑完。
+		e.svc.remote = working
+		s.runAllSafe(context.Background())
+
+		runs, err := e.repo.ListRuns(context.Background(), bkUserID, 10)
+		if err != nil {
+			t.Fatalf("读取运行记录失败: %v", err)
+		}
+		if len(runs) != 1 || runs[0].Status != store.BackupRunSuccess {
+			t.Fatalf("panic 后下一轮备份未成功执行: %+v", runs)
+		}
+	})
+
+	t.Run("调度协程入口 panic 被兜住", func(t *testing.T) {
+		e := newBkEnv(t, nil, nil)
+		s := NewScheduler(e.svc, e.svc.log)
+		// 让 loop 的第一步（NextRun）就 panic：loc 为 nil 时 time.In 会 panic。
+		// safeLoop 未做 recover 的话，这里会直接终止整个测试进程。
+		e.svc.cfg.loc = nil
+		s.safeLoop(context.Background())
+	})
 }

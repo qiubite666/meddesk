@@ -16,7 +16,7 @@
 #   ProtectSystem=strict   : 全文件系统只读，仅 ReadWritePaths 列出的路径可写，
 #                            可防止应用被 RCE 后改写系统文件。
 #   ProtectHome=read-only  : /home 整体只读（防止被 RCE 后篡改二进制/配置），
-#                            uploads 的写权限由 ReadWritePaths 单独放行。
+#                            data（附件目录 MEDDESK_UPLOAD_DIR）的写权限由 ReadWritePaths 单独放行。
 #   NoNewPrivileges=yes    : 禁止 suid 提权。
 #   PrivateTmp=yes / PrivateDevices=yes / ProtectKernel* / RestrictSUIDSGID : 收紧内核面。
 #   SystemCallFilter       : 白名单式系统调用过滤；若内核/glibc 组合报 SIGSYS，
@@ -51,7 +51,11 @@ Group=ops
 # ---------------------------------------------------------------- 进程与文件
 WorkingDirectory=/home/ops/service/meddesk
 ExecStart=/home/ops/service/meddesk/meddesk
-ExecReload=/bin/kill -HUP $MAINPID
+# 【刻意没有 ExecReload】应用 main.go 只 signal.NotifyContext(os.Interrupt, SIGTERM)，没有捕获 SIGHUP。
+# SIGHUP 的默认动作是终止进程，若这里写 `ExecReload=/bin/kill -HUP $MAINPID`，
+# `systemctl reload meddesk` 实际等于停服重启（数秒中断），连续 reload 还会累计
+# StartLimitBurst 触发 start-limit-hit，服务不再被拉起。
+# 应用侧尚未实现配置热重载，改配置后请用：sudo systemctl daemon-reload && sudo systemctl restart meddesk
 
 # 环境变量集中在这一个文件里（MEDDESK_* 系列，见 meddesk.env.example）
 EnvironmentFile=/home/ops/service/meddesk/.meddesk.env
@@ -86,7 +90,7 @@ ProtectControlGroups=yes
 ProtectKernelModules=yes
 ProtectKernelTunables=yes
 ProtectKernelLogs=yes
-# /home 整体只读；uploads 的写权限由下面的 ReadWritePaths 单独放行
+# /home 整体只读；data（MEDDESK_UPLOAD_DIR 附件目录）的写权限由下面的 ReadWritePaths 单独放行
 ProtectHome=read-only
 ProtectSystem=strict
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX

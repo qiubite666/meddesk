@@ -15,7 +15,7 @@ const V = BUILD_ID === DEV_SENTINEL ? '' : '?v=' + BUILD_ID;
 // 或未重新构建二进制就直接替换 web/ 的场景下，sw.js 里仍是占位符 →
 // CACHE_NAME 恒定不变 → 老用户的 Service Worker 认为脚本没变，永远不重新预缓存，
 // 新清单形同虚设。递增此号可确保 activate 一定换新缓存、install 一定重跑。
-const SHELL_REV = '35';
+const SHELL_REV = '36';
 const CACHE_NAME = 'meddesk-shell-' + (BUILD_ID || 'dev') + '-r' + SHELL_REV;
 
 // 预缓存列表：静态资源统一带 ?v= 指纹参数，与服务端注入到 index.html 的引用一致，
@@ -100,13 +100,30 @@ self.addEventListener('fetch', function (event) {
     return;
   }
 
+  // 后台（/admin、/admin/、/admin/app.js）完全不经过 SW：
+  // router.go 的 serveFile 已对它们设了 no-store，浏览器自身的 HTTP 缓存策略
+  // 才是唯一权威。若在此拦截，cache-first 会把 admin.html 里那个**固定不变**的
+  // 版本号 URL（/admin/app.js?v=N）永久钉在 SW 缓存里 —— 页面 DOM 是新的、
+  // 脚本是旧的，后台直接失灵，且安全补丁永远下发不出去。
+  if (url.pathname === '/admin' || url.pathname.startsWith('/admin/')) {
+    return;
+  }
+
   // 页面导航（HTML）走 network-first：每次打开优先拿最新 index.html
   // （含服务端注入的版本号与 ?v= 指纹引用），失败才回退缓存 —— 保证发版后
   // 打开即加载新外壳，杜绝「新 JS + 旧 HTML」的混合缓存导致的版本显示错误。
   // 带 ?v= 指纹的静态资源 URL 永不变化地对应同一内容，cache-first 依然安全。
   if (request.mode === 'navigate' || url.pathname === '/' || url.pathname === '/index.html') {
+    // 只有主应用 shell 的导航结果才允许写进 '/index.html' 这个固定键。
+    // 早期版本无条件写该键：访问过一次 /admin 之后，shell 缓存就被后台登录页
+    // 覆盖，此后任何导航失败（离线、5xx）都会把一个后台登录页当成主应用外壳
+    // 返回 —— 用户天天用的健康档案/记账本离线打不开，却弹出后台登录框。
+    // 其他导航既不写 '/index.html'，也不按自身 URL 缓存（未知路由服务端会
+    // 回退成 shell，存下来只是把同一份 HTML 重复塞进缓存），失败时统一回退
+    // 真正的主应用外壳。
+    const isShell = url.pathname === '/' || url.pathname === '/index.html';
     event.respondWith(fetch(request).then(function (response) {
-      if (response && response.ok) {
+      if (isShell && response && response.ok) {
         const copy = response.clone();
         caches.open(CACHE_NAME).then(function (cache) { cache.put('/index.html', copy); });
       }

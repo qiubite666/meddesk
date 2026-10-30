@@ -260,6 +260,11 @@
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
+<!-- 注意：版本号是手写的，每次修改 web/admin-app.js 必须同步递增此处的 v=N（如 17 → 18）。
+     原因：本页由 internal/server/router.go 的 serveFile 直出，不走 mountSPA 的
+     buildID 注入（那里只重写 index.html 与 /assets/ 引用），无法自动带指纹。
+     现有防线是服务端 no-store + 此版本号双保险；sw.js 也已排除 /admin* 不再缓存本脚本。
+     漏递增的后果：浏览器或中间层继续命中旧脚本，与新 DOM 结构错位，后台直接失灵。 -->
 <script src="/admin/app.js?v=17"></script>
 </body>
 </html>

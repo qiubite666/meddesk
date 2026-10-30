@@ -11,13 +11,14 @@ package ledger
 // 因此不能声称已解决。后续若要严格"每天只跑一次"，应在 RunAll 之前
 // 取一把跨进程锁（推荐 pg_advisory_xact_lock，与 migrate.go 的做法一致）。
 //
-// 单实例内的并发由两道防线挡住：BackupService.runMu（内存互斥） +
+// 单实例内的并发由两道防线挡住：BackupService.runLocks（按账号分片的内存互斥） +
 // ledger_backup_runs 的 UNIQUE(user_id, run_date)（数据库幂等）。
 
 import (
 	"context"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -141,7 +142,22 @@ func (s *Scheduler) Start(ctx context.Context) {
 		s.log.Info("记账本自动备份已关闭", "env", envBackupEnabled)
 		return
 	}
-	go s.loop(ctx)
+	go s.safeLoop(ctx)
+}
+
+// safeLoop 是调度协程的入口：兜住 loop 里任何未预期的 panic。
+//
+// 为什么必须有：loop 会跑 ZIP 打包、JSON 序列化、文件 IO，
+// 一旦 panic，Go 运行时会终止**整个进程**——单实例部署下等于全站 502，
+// 而备份在凌晨无人值守时执行，故障要等到早上才被发现。
+// 这里只记录堆栈，进程继续存活（后续排程由 runAllSafe 那一层保证不中断）。
+func (s *Scheduler) safeLoop(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("备份调度协程 panic，已恢复", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	s.loop(ctx)
 }
 
 // loop 计算下一次触发时刻并等待；触发后为所有已配置凭据的账号各跑一次。
@@ -158,9 +174,24 @@ func (s *Scheduler) loop(ctx context.Context) {
 			s.log.Info("记账本自动备份调度已停止")
 			return
 		case <-timer.C:
-			s.runAll(ctx)
+			s.runAllSafe(ctx)
 		}
 	}
+}
+
+// runAllSafe 包一层 recover 执行单次全量备份。
+//
+// 与 safeLoop 的区别：这里的一次 panic 只影响"这一轮"，recover 后
+// loop 继续进入下一轮排程；否则一次打包/上传崩溃会让此后所有日期的
+// 备份再也不执行（而进程看起来还活着，更难发现）。签名与 runAll 一致，
+// 不改动 RunAll 自身。
+func (s *Scheduler) runAllSafe(ctx context.Context) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("记账本自动备份 panic，已恢复", "panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	s.runAll(ctx)
 }
 
 // runAll 执行一次全量备份并记录结果（失败只告警，不影响下一次排程）。

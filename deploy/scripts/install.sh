@@ -41,7 +41,12 @@ DOMAIN="med.example.com"
 BINARY=""                 # 已构建好的二进制路径
 APP_USER="ops"
 SERVICE_DIR="/home/ops/service/meddesk"
-UPLOAD_DIR="$SERVICE_DIR/uploads"
+# 附件目录固定为 <SERVICE_DIR>/data（与现网、systemd 单元、backup.sh 三处一致）：
+# systemd 单元开了 ProtectSystem=strict + ProtectHome=read-only，只有
+# ReadWritePaths=/home/ops/service/meddesk/data 可写；deploy/scripts/backup.sh 也默认备份 data。
+# 若这里换成别的目录名，全新安装后上传会必然 EACCES，且备份出来的 data/ 是空目录（备份成功但不含附件）。
+# 变量名保留 UPLOAD_DIR（语义是「上传落盘目录」），只改它的值。
+UPLOAD_DIR="$SERVICE_DIR/data"
 FONT_DIR="$SERVICE_DIR/fonts"
 ENV_FILE="$SERVICE_DIR/.meddesk.env"
 BIN_PATH="$SERVICE_DIR/meddesk"
@@ -61,6 +66,20 @@ log()  { echo "$(date '+%Y-%m-%d %H:%M:%S') $LOG_TAG $*"; }
 warn() { echo "$(date '+%Y-%m-%d %H:%M:%S') $LOG_TAG [警告] $*" >&2; }
 die()  { echo "$(date '+%Y-%m-%d %H:%M:%S') $LOG_TAG [错误] $*" >&2; exit 1; }
 trap 'rc=$?; printf "%s [错误] 命令异常退出（退出码 %s）。安装未完成，请修复后重跑。\n" "$(date "+%Y-%m-%d %H:%M:%S") ${LOG_TAG}" "$rc" >&2; exit "$rc"' ERR
+
+# 临时文件兜底清理。脚本是 set -Eeuo pipefail，任何命令失败都会立刻退出，
+# 后面「rm -f」那行根本执行不到；而 PostgreSQL 段写进临时文件的是**明文口令**的 SQL，
+# 一旦失败残留在 /tmp 就是长期的口令泄漏面。所以在建任何临时文件**之前**就注册 EXIT trap。
+# 注意：EXIT trap 与上面已有的 ERR trap 是两个独立的 trap 事件，不会互相覆盖；
+#       ERR trap 里的 exit 会继续触发 EXIT trap，两条路径都能清掉。
+TMPF=""           # PG 建库 SQL（含明文口令）
+TMPR=""           # Redis conf.d 片段
+cleanup_tmp() {
+  [[ -n "${TMPF:-}" ]] && rm -f -- "$TMPF"
+  [[ -n "${TMPR:-}" ]] && rm -f -- "$TMPR"
+  return 0
+}
+trap cleanup_tmp EXIT
 
 run() {
   # run <描述> <命令...>：dry-run 时只打印
@@ -176,9 +195,23 @@ fi
 # ---------------------------------------------------------------- 4 环境变量文件
 log "步骤 4/10  写入环境变量文件"
 COMPOSE_ENV="$REPO_ROOT/.env"
+# 生成「URL 安全」的随机口令。
+# openssl rand -base64 的字符集含 '/' '+' '='，这些字符直接拼进
+#   postgres://user:PASS@host:5432/db   或   redis://:PASS@host:6379/0
+# 会破坏 URL 解析：密码里的 '/' 会被当成 path 分隔符提前截断 authority
+# （postgres://u:a/b@h/d 被解析成 host=u、path=/b@h/d），导致连不上库。
+# 32 个 base64 字符里一个 '/' '+' 都不出现的概率只有约 36%，即约 2/3 的安装会中招。
+# 注意：只对「要拼进 URL」的 PG_PASS / REDIS_PASS 过滤；
+#       JWT_SECRET 不参与 URL 拼接，绝不能同样过滤（只会白白降低熵）。
+gen_urlsafe_pass() {
+  local n="${1:?gen_urlsafe_pass 需要长度参数}" raw
+  raw="$(openssl rand -base64 "$n" 2>/dev/null || head -c "$n" /dev/urandom | base64)"
+  # 去掉 '/' '+' '=' 与换行；24 字节 -> 32 字符，过滤后仍剩约 26~30 个字符，熵充足
+  printf '%s' "$raw" | tr -d '/+=\n'
+}
 JWT_SECRET="$(openssl rand -base64 48 2>/dev/null || head -c 48 /dev/urandom | base64)"
-PG_PASS="$(openssl rand -base64 24 2>/dev/null || head -c 24 /dev/urandom | base64)"
-REDIS_PASS="$(openssl rand -base64 24 2>/dev/null || head -c 24 /dev/urandom | base64)"
+PG_PASS="$(gen_urlsafe_pass 24)"
+REDIS_PASS="$(gen_urlsafe_pass 24)"
 PG_HOST="127.0.0.1"; [[ "$METHOD" == "compose" ]] && PG_HOST="postgres"
 REDIS_HOST="127.0.0.1"; [[ "$METHOD" == "compose" ]] && REDIS_HOST="redis"
 
@@ -201,6 +234,12 @@ MEDDESK_BASE_URL=https://$DOMAIN
 MEDDESK_TRUST_PROXY=true
 MEDDESK_WEB_DIR=
 MEDDESK_DB_URL=postgres://$PG_NAME:$PG_PASS@$PG_HOST:5432/$PG_NAME?sslmode=disable
+# ↓ 下面两项供 Docker Compose 路径使用：compose 用 POSTGRES_PASSWORD 现场拼 DSN，
+#   且 postgres 容器的 POSTGRES_PASSWORD 引用同一变量，从根上避免"两处口令对不上"。
+#   systemd 路径不读这两项（保留无害），这样同一份 .env 可同时服务两条部署路径。
+#   缺了它们，compose 的 ${POSTGRES_PASSWORD:?} 断言会在 config 阶段直接报错。
+POSTGRES_PASSWORD=$PG_PASS
+REDIS_PASSWORD=$REDIS_PASS
 MEDDESK_DB_MAX_CONNS=10
 MEDDESK_DB_MIN_CONNS=1
 MEDDESK_DB_MAX_CONN_LIFETIME=30m
@@ -270,10 +309,43 @@ fi
 if (( WITH_POSTGRES )); then
   log "步骤 5/10  PostgreSQL 建库建用户（最小权限）"
   need_root
-  SQL=$(cat <<EOF
--- 不要用 SUPERUSER；只给本库的权限
-CREATE USER $PG_NAME WITH PASSWORD '$PG_PASS';
-CREATE DATABASE $PG_NAME OWNER $PG_NAME ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;
+  # ---- 幂等写法说明 ----------------------------------------------------------
+  # 旧版直接 CREATE USER / CREATE DATABASE：脚本是 set -Eeuo pipefail 且 psql 带
+  # ON_ERROR_STOP=1，第二次执行必然因 42710（角色已存在）/ 42P04（库已存在）中断，
+  # 与文件头「全部可重复执行/幂等」的承诺不符。
+  # 现在：
+  #   - 角色用 DO 块（pg_roles 判存在）——结果是一句 SQL，交给同一个 psql 事务执行；
+  #   - 数据库不能用 DO 块（CREATE DATABASE 不允许在事务/函数块内），
+  #     所以先用 psql -tAc 探测 pg_database，再决定是否把建库语句写进 SQL 文件。
+  # 为什么不整段「先查后建」：角色用 DO 块可以一次成型、少一次 psql 往返，
+  # 也天然带 ALTER 分支（重跑时会重新生成随机口令，必须同步改库里的口令，
+  # 否则 .meddesk.env 里的新口令连不上库）。
+  SQL_ROLE=$(cat <<EOF
+DO \$\$
+BEGIN
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '$PG_NAME') THEN
+    CREATE ROLE $PG_NAME WITH LOGIN PASSWORD '$PG_PASS';
+  ELSE
+    -- 重跑：脚本本次重新生成了随机口令，这里同步更新，保证与 .meddesk.env 一致
+    ALTER ROLE $PG_NAME WITH LOGIN PASSWORD '$PG_PASS';
+  END IF;
+END
+\$\$;
+EOF
+)
+
+  # CREATE DATABASE 不能在 DO 块里，先探测 pg_database 再条件执行
+  SQL_CREATEDB=""
+  if (( DRY_RUN )); then
+    echo "  [dry-run] 探测 pg_database 是否存在 $PG_NAME（dry-run 不做实际查询，按“不存在”生成 SQL）"
+  elif [[ "$(su - postgres -c "psql -tAqc \"SELECT 1 FROM pg_database WHERE datname = '$PG_NAME'\"")" == "1" ]]; then
+    log "  数据库 $PG_NAME 已存在，跳过 CREATE DATABASE（幂等）"
+  else
+    SQL_CREATEDB="CREATE DATABASE $PG_NAME OWNER $PG_NAME ENCODING 'UTF8' LC_COLLATE 'C' LC_CTYPE 'C' TEMPLATE template0;"
+  fi
+
+  # 后面这些语句本身可重复执行（IF NOT EXISTS / GRANT / ALTER ... SET 都是幂等的）
+  SQL_TAIL=$(cat <<EOF
 \\c $PG_NAME
 CREATE EXTENSION IF NOT EXISTS citext;
 GRANT CONNECT, TEMPORARY ON DATABASE $PG_NAME TO $PG_NAME;
@@ -282,12 +354,19 @@ ALTER SCHEMA public OWNER TO $PG_NAME;
 ALTER DATABASE $PG_NAME SET search_path = public;
 EOF
 )
-  # 注意：临时文件里含数据库口令，必须用 600 权限并在用完立即删除
+
+  # 临时文件里含明文口令，必须 0600；删除由脚本开头的 trap ... EXIT 兜底，
+  # 保证 psql 失败（set -e 立即退出）时也不会残留在 /tmp。
   TMPF="$(mktemp /tmp/meddesk-initdb.XXXXXX.sql)"
   chmod 600 "$TMPF"
-  echo "$SQL" > "$TMPF"
-  run "执行建库 SQL" su - postgres -c "psql -v ON_ERROR_STOP=1 -f $TMPF"
-  rm -f "$TMPF"
+  {
+    echo "-- 由 install.sh 生成，含明文口令，执行后立即删除"
+    printf '%s\n' "$SQL_ROLE"
+    if [[ -n "$SQL_CREATEDB" ]]; then printf '%s\n' "$SQL_CREATEDB"; fi
+    printf '%s\n' "$SQL_TAIL"
+  } > "$TMPF"
+  run "执行建库 SQL（幂等）" su - postgres -c "psql -v ON_ERROR_STOP=1 -f $TMPF"
+  rm -f -- "$TMPF"; TMPF=""
   log "  ⚠ 注意：PostgreSQL 15+ 的 public schema 默认不再对 PUBLIC 开放写权限，"
   log "     上面的 GRANT/ALTER OWNER 是必要的；若你的实例被云厂商托管，请按其控制台操作。"
 else
@@ -298,23 +377,43 @@ fi
 if (( WITH_REDIS )); then
   log "步骤 6/10  Redis 加固配置"
   need_root
-  REDIS_CONF="/etc/redis/redis.conf"
-  if [[ -f "$REDIS_CONF" ]]; then
-    cp -a "$REDIS_CONF" "$REDIS_CONF.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
-    run "追加/修改 Redis 参数" bash -c "cat >> '$REDIS_CONF' <<'EOF'
-
-# ---- MedDesk 追加配置（install.sh）----
+  REDIS_MAIN_CONF="/etc/redis/redis.conf"
+  REDIS_FRAGMENT_DIR="/etc/redis/conf.d"
+  REDIS_FRAGMENT="$REDIS_FRAGMENT_DIR/meddesk.conf"
+  if [[ -f "$REDIS_MAIN_CONF" ]]; then
+    cp -a "$REDIS_MAIN_CONF" "$REDIS_MAIN_CONF.bak.$(date +%Y%m%d%H%M%S)" 2>/dev/null || true
+    # 旧版用 cat >> 追加到 redis.conf：重跑会写进第二份 requirepass / maxmemory，
+    # 后写的生效且文件无限膨胀，与「幂等」不符。
+    # 现在改为写独立的 conf.d 片段，并用 install -m 0640 **覆盖**，重跑结果完全一致。
+    TMPR="$(mktemp /tmp/meddesk-redis.XXXXXX.conf)"
+    cat > "$TMPR" <<EOF
+# ---- MedDesk 配置片段（由 install.sh 每次覆盖重写，请勿手工修改）----
 bind 127.0.0.1 -::1
 protected-mode yes
 requirepass $REDIS_PASS
 maxmemory $REDIS_MAXMEM
 maxmemory-policy allkeys-lru
-save \"\"
+save ""
 appendonly no
-EOF"
+EOF
+    run "创建 $REDIS_FRAGMENT_DIR" install -d -m 0755 "$REDIS_FRAGMENT_DIR"
+    # redis-server 在 Debian/Ubuntu 下以 redis 用户运行，片段必须 redis 可读：
+    # 0640 + redis:redis（若系统没有 redis 用户则退回 root 属主，仅用于非发行版包场景）
+    if id redis >/dev/null 2>&1; then
+      run "写入 Redis 片段配置（覆盖）" install -m 0640 -o redis -g redis "$TMPR" "$REDIS_FRAGMENT"
+    else
+      run "写入 Redis 片段配置（覆盖）" install -m 0640 "$TMPR" "$REDIS_FRAGMENT"
+    fi
+    rm -f -- "$TMPR"; TMPR=""
+    # 片段要被加载还需要主配置 include 它；只在缺失时补一次（grep 判存在），保证重跑不重复追加
+    if grep -qF "include $REDIS_FRAGMENT_DIR" "$REDIS_MAIN_CONF"; then
+      log "  $REDIS_MAIN_CONF 已 include $REDIS_FRAGMENT_DIR，无需修改"
+    else
+      run "让主配置 include conf.d" bash -c "printf '\n# MedDesk: 加载 conf.d 片段（install.sh 幂等追加，只会写一次）\ninclude $REDIS_FRAGMENT_DIR/*.conf\n' >> '$REDIS_MAIN_CONF'"
+    fi
     run "重启 redis" systemctl restart redis-server || systemctl restart redis
   else
-    warn "未找到 $REDIS_CONF，请手动配置 requirepass / maxmemory 后重启 redis"
+    warn "未找到 $REDIS_MAIN_CONF，请手动配置 requirepass / maxmemory 后重启 redis"
   fi
 else
   log "步骤 6/10  跳过 Redis（未指定 --with-redis）。提示：MEDDESK_REDIS_ENABLED=false 可完全不依赖 Redis"

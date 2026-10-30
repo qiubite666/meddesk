@@ -96,9 +96,58 @@ type BackupService struct {
 	log    *slog.Logger
 	cfg    backupConfig
 
-	// runMu 让单个进程内的备份串行执行（打包与上传都不适合并发堆叠）。
+	// runLocks 让**同一账号**的备份串行（打包与上传不适合并发堆叠、
+	// 也避免同一天同名文件被重复上传与运行状态竞争），不同账号之间并行。
 	// 注意：它**不能**防止多实例重复执行，见 Scheduler 的已知限制说明。
-	runMu sync.Mutex
+	runLocks *userMutexTable
+}
+
+// userMutexTable 是按 userID 分片的互斥锁表（带引用计数的懒创建）。
+//
+// 为什么不是一把全局锁：一次备份覆盖"读库 + 打包 + 上传 + 回写状态"全流程，
+// 墙钟上限 backupRunTimeout（10 分钟）。全局锁的后果是一个账号的 WebDAV 卡住，
+// 会把其他所有账号（含每日定时任务、含用户手动触发）一起拖住排队。
+//
+// 分片后语义不变：同一 userID 仍然严格串行（幂等与状态更新不被并发破坏），
+// 不同 userID 可以真正并行。条目按引用计数回收：最后一个持有者/等待者退出时
+// 删除 map 条目，避免长期运行后随账号数膨胀。
+type userMutexTable struct {
+	mu    sync.Mutex
+	locks map[string]*userMutexEntry
+}
+
+// userMutexEntry 是单个账号的锁条目。只经指针访问，绝不复制（copylocks）。
+type userMutexEntry struct {
+	mu   sync.Mutex // 该账号的互斥锁
+	refs int        // 持有者 + 等待者数量（在 userMutexTable.mu 下修改）
+}
+
+// lock 阻塞直到拿到 userID 对应的锁；返回的 unlock 必须调用且只调用一次。
+func (t *userMutexTable) lock(userID string) (unlock func()) {
+	t.mu.Lock()
+	if t.locks == nil {
+		t.locks = make(map[string]*userMutexEntry)
+	}
+	e := t.locks[userID]
+	if e == nil {
+		e = &userMutexEntry{}
+		t.locks[userID] = e
+	}
+	// 先计数再等锁：等待期间条目不能被回收，否则后来者会拿到另一把锁，
+	// 同一账号就可能并发了。
+	e.refs++
+	t.mu.Unlock()
+
+	e.mu.Lock()
+	return func() {
+		e.mu.Unlock()
+		t.mu.Lock()
+		e.refs--
+		if e.refs == 0 {
+			delete(t.locks, userID)
+		}
+		t.mu.Unlock()
+	}
 }
 
 // NewBackupService 构造备份服务；配置（时间/时区/开关）在构造时读取一次。
@@ -108,13 +157,14 @@ func NewBackupService(d BackupDeps) *BackupService {
 		log = slog.Default()
 	}
 	return &BackupService{
-		ledger: d.Ledger,
-		backup: d.Backup,
-		remote: d.Remote,
-		attach: d.Attach,
-		creds:  newCredentialStore(d.Backup),
-		log:    log,
-		cfg:    loadBackupConfig(),
+		ledger:   d.Ledger,
+		backup:   d.Backup,
+		remote:   d.Remote,
+		attach:   d.Attach,
+		creds:    newCredentialStore(d.Backup),
+		log:      log,
+		cfg:      loadBackupConfig(),
+		runLocks: &userMutexTable{},
 	}
 }
 
@@ -238,9 +288,10 @@ func (s *BackupService) RunForUser(ctx context.Context, userID string) (*store.L
 	if userID == "" {
 		return nil, apierr.New(apierr.CodeUnauthorized, "未登录或令牌已过期")
 	}
-	// 单实例串行；跨实例重复执行是已知限制（见 Scheduler 注释）。
-	s.runMu.Lock()
-	defer s.runMu.Unlock()
+	// 按账号分片互斥：同账号串行（防重复上传与状态竞争），不同账号并行。
+	// 跨实例重复执行是已知限制（见 Scheduler 注释）。
+	unlock := s.runLocks.lock(userID)
+	defer unlock()
 
 	runCtx, cancel := context.WithTimeout(ctx, backupRunTimeout)
 	defer cancel()
