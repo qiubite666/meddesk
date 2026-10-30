@@ -24,6 +24,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -190,6 +191,30 @@ func (s *BackupService) SaveCredentials(ctx context.Context, userID string, in C
 	// 先确认密钥可用：没有密钥就不该让用户以为"保存成功"。
 	if _, err := secretBoxKey(); err != nil {
 		return err
+	}
+	// 任一字段留空 = 沿用已保存的值。
+	// 前端表单在换设备/清缓存后是空的，而口令又永远不可能回显：
+	// 如果每次都要求三个字段全填，用户改一个备份目录都得把账号口令重敲一遍。
+	// 首次配置没有旧值可沿用，缺谁由 normalizeCredentials 报谁的错。
+	if in.BaseURL == "" || in.Username == "" || in.Password == "" {
+		old, err := s.creds.load(ctx, userID)
+		switch {
+		case err == nil:
+			if in.BaseURL == "" {
+				in.BaseURL = old.BaseURL
+			}
+			if in.Username == "" {
+				in.Username = old.Username
+			}
+			if in.Password == "" {
+				in.Password = old.Password
+			}
+		case errors.Is(err, store.ErrNotFound):
+			// 从未配置过：没有可续用的值，交给下面的校验给出具体缺项提示。
+		default:
+			// 密钥缺失/解密失败：明确报错，不要静默当成"首次配置"。
+			return err
+		}
 	}
 	creds, err := normalizeCredentials(in)
 	if err != nil {
@@ -651,13 +676,57 @@ type BackupRunView struct {
 	UpdatedAt   string `json:"updatedAt"`
 }
 
+// CredentialHint 是凭据的**脱敏回显**，用于让用户确认"配置还在"。
+//
+// 为什么不回传完整值：完整地址与用户名属于凭据内容，一旦进入响应体就可能被
+// 反代日志、错误上报或浏览器插件留存；测试里也有专门的守护断言。
+// 但完全不回显又会造成"每次打开表单都是空白 → 用户以为凭据丢了 → 反复重填"，
+// 而重填时口令栏通常为空，旧版后端直接 400，形成死循环。
+//
+// 折中：只给主机名（不含路径与账号）和掩码后的用户名，足够辨认是哪台网盘、
+// 哪个账号；口令永远不回传。完整值由前端在本机 localStorage 缓存（仅该设备可见）。
+type CredentialHint struct {
+	Host           string `json:"host"`           // 例：webdav.qiubite.fun（不含路径与账号）
+	UsernameMasked string `json:"usernameMasked"` // 例：qi***（保留前 2 字符）
+	PathPrefix     string `json:"pathPrefix"`     // 备份子目录，低敏感
+	HasPassword    bool   `json:"hasPassword"`
+}
+
+// maskUsername 保留前 2 字符，其余用 *** 代替；短用户名整体遮蔽。
+// 目的是"能认出是哪个账号"，而不是"能还原账号"。
+func maskUsername(name string) string {
+	r := []rune(strings.TrimSpace(name))
+	if len(r) == 0 {
+		return ""
+	}
+	if len(r) <= 2 {
+		return "***"
+	}
+	keep := 2
+	if len(r) < 4 {
+		keep = 1
+	}
+	return string(r[:keep]) + "***"
+}
+
+// hostOf 从地址里取出主机名（含端口）。解析失败返回空串——
+// 宁可不显示，也不要把原始串透出去（原始串可能带 userinfo 或路径）。
+func hostOf(rawURL string) string {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	return u.Host
+}
+
 // BackupStatus 是备份状态接口的响应。
 type BackupStatus struct {
-	Enabled      bool            `json:"enabled"`      // 备份功能是否启用（开关 + 密钥是否配置）
-	Configured   bool            `json:"configured"`   // 该账号是否已保存 WebDAV 凭据
-	Timezone     string          `json:"timezone"`     // 例：Asia/Shanghai
-	ScheduleTime string          `json:"scheduleTime"` // 例：02:00
-	NextRunAt    string          `json:"nextRunAt"`    // RFC3339；未启用时为空串
+	Enabled      bool            `json:"enabled"`              // 备份功能是否启用（开关 + 密钥是否配置）
+	Configured   bool            `json:"configured"`           // 该账号是否已保存 WebDAV 凭据
+	Credential   *CredentialHint `json:"credential,omitempty"` // 已配置时回显脱敏信息（不含完整地址/账号/口令）
+	Timezone     string          `json:"timezone"`             // 例：Asia/Shanghai
+	ScheduleTime string          `json:"scheduleTime"`         // 例：02:00
+	NextRunAt    string          `json:"nextRunAt"`            // RFC3339；未启用时为空串
 	Runs         []BackupRunView `json:"runs"`
 }
 
@@ -672,6 +741,20 @@ func (s *BackupService) Status(ctx context.Context, userID string, limit int) (*
 	configured, err := s.creds.configured(ctx, userID)
 	if err != nil {
 		return nil, err
+	}
+	// 已配置时回显可展示字段。解密失败（例如服务端换过 MEDDESK_SECRETBOX_KEY）
+	// 不阻断状态查询：Configured 仍为 true，前端据此提示"已保存但无法读取，请重新填写"，
+	// 而不是误报"未配置"、让用户以为数据又丢了。
+	var hint *CredentialHint
+	if configured {
+		if creds, loadErr := s.creds.load(ctx, userID); loadErr == nil {
+			hint = &CredentialHint{
+				Host:           hostOf(creds.BaseURL),
+				UsernameMasked: maskUsername(creds.Username),
+				PathPrefix:     creds.PathPrefix,
+				HasPassword:    creds.Password != "",
+			}
+		}
 	}
 	runs, err := s.backup.ListRuns(ctx, userID, limit)
 	if err != nil {
@@ -699,6 +782,7 @@ func (s *BackupService) Status(ctx context.Context, userID string, limit int) (*
 	return &BackupStatus{
 		Enabled:      enabled,
 		Configured:   configured,
+		Credential:   hint,
 		Timezone:     s.cfg.TZ,
 		ScheduleTime: s.cfg.scheduleText(),
 		NextRunAt:    next,

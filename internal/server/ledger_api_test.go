@@ -840,7 +840,7 @@ func TestLedgerAPIReimbursement(t *testing.T) {
 			apiExpenseBodyStatus(cat.ID, "20.00", "待报2", time.Now(), model.LedgerReimbPending))
 		r3 := apiNewRecord(t, e, token,
 			apiExpenseBodyStatus(cat.ID, "40.00", "已报", time.Now(), model.LedgerReimbPending))
-		apiNewRecord(t, e, token, apiExpenseBody(cat.ID, "80.00", "不报", time.Now()))
+		notReimb := apiNewRecord(t, e, token, apiExpenseBody(cat.ID, "80.00", "不报", time.Now()))
 		if n := apiMark(t, e, token, []string{r3.ID}, model.LedgerReimbDone); n != 1 {
 			t.Fatalf("标记已报销应更新 1 条，实际 %d", n)
 		}
@@ -855,8 +855,18 @@ func TestLedgerAPIReimbursement(t *testing.T) {
 		if page.Summary.Counts.None != 1 {
 			t.Fatalf("counts.none 应为 1，实际 %d", page.Summary.Counts.None)
 		}
-		if page.Total != 4 {
-			t.Fatalf("status=all 的 total 应为 4，实际 %d", page.Total)
+		// all 的语义是「所有参与报销的记录」= pending + done，不含 none。
+		// 「不涉及」的记录出现在报销页没有意义，还能被误标成已报销（用户已反馈）。
+		if page.Total != 3 {
+			t.Fatalf("status=all 的 total 应为 3（pending 2 + done 1），实际 %d", page.Total)
+		}
+		for _, it := range page.Items {
+			if it.ID == notReimb.ID {
+				t.Fatalf("status=all 不应包含「不涉及报销」的记录 %s", notReimb.ID)
+			}
+			if it.ReimbursementStatus == model.LedgerReimbNone {
+				t.Fatalf("status=all 返回了 none 状态的记录 %s", it.ID)
+			}
 		}
 		if page.Summary.PendingTotal.Cents != 3000 {
 			t.Fatalf("待报销合计应为 3000 分，实际 %d", page.Summary.PendingTotal.Cents)

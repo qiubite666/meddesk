@@ -267,6 +267,10 @@ func matchFilter(rec *model.LedgerRecord, f model.LedgerFilter, from, to string)
 	if f.ReimbStatus != "" && rec.ReimbursementStatus != f.ReimbStatus {
 		return false
 	}
+	// 与 SQL 版一致：ReimbStatus 为空时，ReimbExcludeNone 排除「不涉及」。
+	if f.ReimbStatus == "" && f.ReimbExcludeNone && rec.ReimbursementStatus == model.LedgerReimbNone {
+		return false
+	}
 	if from != "" && rec.OccurredOn < from {
 		return false
 	}

@@ -553,7 +553,7 @@
     reimb: {
       state: 'loading', items: [], total: 0, page: 1, size: 50,
       pendingTotal: 0, doneTotal: 0, counts: null, range: { from: '', to: '' },
-      selected: {}, error: ''
+      selected: {}, error: '', dirty: false
     },
     rbFilter: { status: 'all', range: 'd30', from: '', to: '' },
     exp: { preset: 'all', from: '', to: '' },
@@ -609,7 +609,8 @@
   /** 报销状态筛选值 → 接口 status 参数（all 表示不限）。 */
   function rbStatusParam() {
     var v = S.rbFilter.status;
-    return v === 'pending' || v === 'done' || v === 'none' ? v : 'all';
+    // 只认参与报销的两个状态；none 已不属于报销流程，传下去只会拿到空列表。
+    return v === 'pending' || v === 'done' ? v : 'all';
   }
 
   /* ============================ 6. 数据加载 ============================ */
@@ -1110,7 +1111,9 @@
   /* ---------- 报销管理 ---------- */
 
   // 状态筛选四档：全部 / 待报销 / 已报销 / 不涉及。默认 all，已报销记录才不会「凭空消失」。
-  var RB_STATUS_OPTIONS = [['all', '全部'], ['pending', '待报销'], ['done', '已报销'], ['none', '不涉及']];
+  // 「不涉及」不放进筛选项：不涉及报销的记录不属于报销流程，
+  // 后端同样已把 all 的语义收窄为 pending + done（ReimbExcludeNone）。
+  var RB_STATUS_OPTIONS = [['all', '全部'], ['pending', '待报销'], ['done', '已报销']];
   var RB_RANGE_OPTIONS = [['d30', '最近 30 天'], ['month', '本月'], ['last', '上月'], ['custom', '自定义']];
 
   function selectedIds() {
@@ -1165,8 +1168,10 @@
       if (!hit) return;
       selAmount += centsOf(hit);
       var st = hit.reimbursementStatus || 'none';
-      if (st !== 'done') canDone = true;
-      if (st !== 'pending') canPending = true;
+      // 只统计参与报销的状态：none 若出现在列表里（理论不会）也不该让
+      // "标记已报销"按钮变为可用。
+      if (st === 'pending') canDone = true;
+      if (st === 'done') canPending = true;
     });
     var allChecked = S.reimb.items.length > 0 && ids.length === S.reimb.items.length;
     var counts = S.reimb.counts || {};
@@ -1189,12 +1194,17 @@
 
   function reimbRow(rec) {
     var st = rec.reimbursementStatus || 'none';
+    // 只有 pending / done 属于报销流程；「不涉及」的记录正常不会出现在本页
+    // （后端 all 已排除），万一出现也不给勾选与标记入口 —— 否则可以把
+    // 一条与报销无关的记录标成"已报销"，这是用户明确反馈的问题。
+    var actionable = st === 'pending' || st === 'done';
     var next = st === 'done'
       ? { status: 'pending', label: '退回待报销' }
       : { status: 'done', label: '标记已报销' };
     return '<div class="ldg-rec" data-id="' + esc(rec.id) + '">' +
       '<label class="ldg-check" style="flex:0 0 auto"><input type="checkbox" data-act="rb-check" data-id="' + esc(rec.id) + '"' +
-      (S.reimb.selected[rec.id] ? ' checked' : '') + ' aria-label="选择"></label>' +
+      (actionable && S.reimb.selected[rec.id] ? ' checked' : '') + (actionable ? '' : ' disabled') +
+      ' aria-label="选择"></label>' +
       '<div class="ldg-rec__body">' +
       '<div class="ldg-rec__title">' + esc(rec.note || rec.categoryName || '支出') + '</div>' +
       '<div class="ldg-rec__meta"><span>' + esc(fmtOccurred(rec)) + '</span>' +
@@ -1202,8 +1212,10 @@
       reimbBadge(st) +
       '</div></div>' +
       '<div class="ldg-rec__amt ldg-amt--out">-' + money(centsOf(rec)) + '</div>' +
-      '<button class="btn btn-ghost" type="button" data-act="rb-one" data-id="' + esc(rec.id) +
-      '" data-status="' + next.status + '" style="min-height:36px;flex:0 0 auto">' + next.label + '</button>' +
+      (actionable
+        ? '<button class="btn btn-ghost" type="button" data-act="rb-one" data-id="' + esc(rec.id) +
+        '" data-status="' + next.status + '" style="min-height:36px;flex:0 0 auto">' + next.label + '</button>'
+        : '') +
       '</div>';
   }
 
@@ -1300,6 +1312,49 @@
     return { preset: preset };
   }
 
+  // 凭据表单的「本机缓存」。
+  // 后端只回传脱敏信息（主机名 + 掩码账号），完整地址和用户名无从回填，
+  // 用户每打开一次表单就要重敲一遍。缓存在本机 localStorage 后，同一台设备
+  // 打开即可自动带出上次保存的值；口令永不缓存、永不回显。
+  // 换设备或清过缓存时表单为空，但状态行仍显示"已配置 · q*** @ webdav.xxx"，
+  // 用户据此知道配置没丢，不必反复重填。
+  var DAV_CACHE = 'meddesk.ledger.dav';
+
+  function readDavCache() {
+    try {
+      var raw = global.localStorage.getItem(DAV_CACHE);
+      return raw ? (JSON.parse(raw) || {}) : {};
+    } catch (e) { return {}; }
+  }
+
+  function writeDavCache(value) {
+    try { global.localStorage.setItem(DAV_CACHE, JSON.stringify(value)); } catch (e) { /* 隐私模式忽略 */ }
+  }
+
+  function clearDavCache() {
+    try { global.localStorage.removeItem(DAV_CACHE); } catch (e) { /* 忽略 */ }
+  }
+
+  /** 备份时间：后端给 RFC3339(UTC)，转成本地 "YYYY-MM-DD HH:mm"。 */
+  function backupTimeText(run) {
+    var raw = String((run && (run.updatedAt || run.date)) || '');
+    if (!raw) return '—';
+    var d = new Date(raw);
+    if (isNaN(d.getTime())) return raw;
+    function pad(n) { return (n < 10 ? '0' : '') + n; }
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+      ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+
+  /** 备份结果码 → 中文（后端只有 success / failed / skipped 三种）。 */
+  function backupResultText(status) {
+    var s = String(status || '');
+    if (s === 'success') return '成功';
+    if (s === 'failed' || s === 'error') return '失败';
+    if (s === 'skipped') return '跳过';
+    return s || '—';
+  }
+
   function paintBackup() {
     var host = $('ldg-bk');
     if (!host) return;
@@ -1312,12 +1367,27 @@
     if (S.backup.state === 'error') { host.innerHTML = errorBox(S.backup.error, 'bk-refresh'); return; }
 
     var st = S.backup.status || {};
+    // 字段名必须对齐后端 BackupStatus：configured / runs / nextRunAt / credential。
+    // 这里历史上读的是 hasCredentials / lastRunAt / lastFileName —— 后端从来没有这些字段，
+    // 于是「凭据明明已配置、备份明明成功过，界面却永远显示未配置 / 从未备份」，
+    // 用户据此判断凭据丢了，然后反复重填。
+    var runs = Array.isArray(st.runs) ? st.runs : [];
+    var last = runs.length ? runs[0] : null;
+    var cred = st.credential || null;
+    var configured = st.configured === true;
+    var cached = readDavCache();
     var rows = [
-      ['最近备份时间', st.lastRunAt || st.lastAt || st.lastBackupAt || '从未备份'],
-      ['最近结果', st.lastResult || st.lastStatus || (st.ok === false ? '失败' : '正常')],
-      ['备份文件', st.lastFileName || st.lastFile || '—'],
-      ['WebDAV 凭据', st.hasCredentials === false ? '未配置' : (st.hasCredentials ? '已配置' : (st.webdavUrl ? '已配置' : '未配置'))],
-      ['下次计划', st.nextRunAt || st.nextAt || '待调度']
+      ['最近备份时间', last ? backupTimeText(last) : '从未备份'],
+      ['最近结果', last ? backupResultText(last.status) : '—'],
+      ['备份文件', last && last.remotePath ? last.remotePath : '—'],
+      ['WebDAV 凭据', !configured ? '未配置'
+        : (cred ? '已配置' : '已配置（无法读取，请重新填写）')],
+      // 只显示脱敏信息：主机名 + 掩码账号，足以辨认"是哪台网盘、哪个账号"，
+      // 又不把完整凭据放进响应体/页面 DOM。
+      ['WebDAV 地址', configured && cred
+        ? (cred.usernameMasked ? cred.usernameMasked + ' @ ' : '') + (cred.host || '')
+        : '—'],
+      ['下次计划', st.nextRunAt || '待调度']
     ];
     host.innerHTML =
       '<div>' + rows.map(function (r) {
@@ -1328,19 +1398,33 @@
       }).join('') + '</div>' +
       '<div class="divider"></div>' +
       '<form id="ldg-bk-form" class="stack">' +
+      // 回填已保存的地址 / 用户名 / 目录：口令是唯一不回传的字段。
+      // 不回填的后果是「每次打开都是空白 → 以为凭据丢了 → 重填时口令又留空 → 保存失败」。
+      (configured && !cred
+        ? '<p class="muted" style="font-size:12px;margin:0 0 8px">已保存的凭据无法解密（服务端加密密钥可能更换过），请重新填写完整信息。</p>'
+        : '') +
       '<div class="ldg-row2">' +
       '<div class="field"><span class="ldg-flabel">WebDAV 地址</span>' +
-      '<input class="input" name="url" type="url" placeholder="https://webdav.example.com/meddesk" autocomplete="off"></div>' +
+      '<input class="input" name="url" type="url" placeholder="' +
+      esc(configured && cred && cred.host
+        ? '当前已配置 ' + cred.host + '，留空沿用'
+        : 'https://webdav.example.com/meddesk') +
+      '" value="' + esc(cached.baseURL || '') + '" autocomplete="off"></div>' +
       '<div class="field"><span class="ldg-flabel">用户名</span>' +
-      '<input class="input" name="user" type="text" autocomplete="off"></div>' +
+      '<input class="input" name="user" type="text" placeholder="' +
+      esc(configured && cred && cred.usernameMasked ? '当前账号 ' + cred.usernameMasked + '，留空沿用' : '') +
+      '" value="' + esc(cached.username || '') + '" autocomplete="off"></div>' +
       '</div>' +
       '<div class="ldg-row2">' +
       '<div class="field"><span class="ldg-flabel">密码 / 应用口令</span>' +
-      '<input class="input" name="pass" type="password" autocomplete="new-password" placeholder="留空表示不修改"></div>' +
+      '<input class="input" name="pass" type="password" autocomplete="new-password" placeholder="' +
+      (configured && cred && cred.hasPassword ? '已保存，留空不修改' : '请填写密码') + '"></div>' +
       // 备份目录：地址只填到账号根，文件统一落到这个子目录，
       // 避免 ledger-backup-*.zip 与网盘里其它文件混在同一层。
       '<div class="field"><span class="ldg-flabel">备份目录</span>' +
-      '<input class="input" name="dir" type="text" value="backup" placeholder="backup" autocomplete="off"></div>' +
+      '<input class="input" name="dir" type="text" value="' +
+      esc(cached.pathPrefix || (cred && cred.pathPrefix) || 'backup') +
+      '" placeholder="backup" autocomplete="off"></div>' +
       '</div>' +
       '<div class="ldg-strip">' +
       '<button class="btn btn-primary" type="submit">保存凭据</button>' +
@@ -1364,6 +1448,15 @@
         S.tab = node.getAttribute('data-tab') || 'home';
         paintTabs();
         paintBody();
+        // 报销列表有自己的状态筛选与分页，不属于 reloadAll() 的刷新范围。
+        // 在别的页新增/编辑账单后它是过期的：这里按脏标记重拉，
+        // 否则用户切过来看到的是上次的快照，会以为"新增没生效"而去手动刷新页面。
+        if (S.tab === 'reimb' && S.reimb.dirty) {
+          S.reimb.dirty = false;
+          // state 仍是 loading 时，paintBody 内部已经会触发首次加载，不必再发一次；
+          // 只有"已有数据但已过期"才需要在这里补一次刷新。
+          if (S.reimb.state !== 'loading') loadReimbursements();
+        }
         return;
       case 'flt-type':
         S.filters.type = node.getAttribute('data-value') || '';
@@ -1497,6 +1590,8 @@
           if (!yes) return;
           runTask('删除凭据', function () {
             return ledgerApi('/ledger/backup/credentials', { method: 'DELETE' }).then(function () {
+              // 主动删除时本机缓存也一并清掉，否则下次打开还会带出已失效的旧值。
+              clearDavCache();
               return loadBackup().then(function () { return '凭据已删除'; });
             });
           });
@@ -1560,9 +1655,16 @@
     var pass = String((form.elements.pass && form.elements.pass.value) || '');
     // 目录留空时回落到 backup：备份文件不该散落在账号根目录。
     var dir = String((form.elements.dir && form.elements.dir.value) || '').trim() || 'backup';
-    if (!url) { toast('请填写 WebDAV 地址', 'warn'); return; }
-    if (!/^https?:\/\//i.test(url)) { toast('WebDAV 地址需以 http(s):// 开头', 'warn'); return; }
-    if (!user) { toast('请填写用户名', 'warn'); return; }
+    var st = S.backup.status || {};
+    var configured = st.configured === true;
+    // 已配置、可解密、且确实有口令 → 三个字段都允许留空沿用旧值（后端支持）。
+    // 场景：换设备后本机没有缓存，用户只想改口令或只调备份目录，
+    // 不该被迫把地址和账号重敲一遍。
+    var canReuse = configured && !!st.credential && st.credential.hasPassword === true;
+    if (!url && !canReuse) { toast('请填写 WebDAV 地址', 'warn'); return; }
+    if (url && !/^https?:\/\//i.test(url)) { toast('WebDAV 地址需以 http(s):// 开头', 'warn'); return; }
+    if (!user && !canReuse) { toast('请填写用户名', 'warn'); return; }
+    if (!pass && !canReuse) { toast('请填写 WebDAV 密码', 'warn'); return; }
     runTask('保存凭据', function () {
       return ledgerApi('/ledger/backup/credentials', {
         method: 'PUT',
@@ -1570,7 +1672,15 @@
         // 曾经这里写成 url，后端解析到空字符串，于是无论填什么都报「请填写 WebDAV 服务地址」。
         body: { baseURL: url, username: user, password: pass, pathPrefix: dir }
       }).then(function () {
-        form.reset();
+        // 记住本机填写过的完整值（口令不入缓存），下次打开表单自动回填。
+        // 留空沿用的字段不覆盖已有缓存，避免把上次记住的地址冲成空串。
+        var next = readDavCache();
+        if (url) next.baseURL = url;
+        if (user) next.username = user;
+        next.pathPrefix = dir;
+        writeDavCache(next);
+        // 不调 form.reset()：它只回退到渲染时的旧值。交给 loadBackup 重新拉状态并
+        // 重建表单，这样新地址/目录会立刻回填，用户能确认"确实保存进去了"。
         return loadBackup().then(function () { return '凭据已保存'; });
       });
     });
@@ -1643,7 +1753,9 @@
 
       '<div class="field"><span class="ldg-flabel">分类</span>' +
       '<div class="ldg-catpick" id="ldg-f-cats">' + catChips(cats, form.categoryId) + '</div>' +
-      (cats.length ? '' : '<p class="muted" style="font-size:12px;margin:0">分类接口暂不可用，可先按无分类保存。</p>') +
+      // 后端要求 categoryName 非空（缺了直接 400「请选择分类」），
+      // 所以这里不能说「可先按无分类保存」——那会把用户引到一个必然失败的提交上。
+      (cats.length ? '' : '<p class="muted" style="font-size:12px;margin:0">分类加载失败，请退出重进后再试。</p>') +
       '</div>' +
 
       '<div class="field"><span class="ldg-flabel">备注</span>' +
@@ -1738,6 +1850,26 @@
     return node ? String(node.value || '') : '';
   }
 
+  /**
+   * 校验失败后把视图定位到第一个出问题的字段。
+   * 提示看得到却找不到位置，体验和没提示一样——分类是多选 chip，不在首屏时尤其明显。
+   */
+  function focusProblemField(box, problems) {
+    var joined = (problems || []).join('；');
+    var selector = joined.indexOf('金额') >= 0 ? '#ldg-f-amount'
+      : joined.indexOf('分类') >= 0 ? '#ldg-f-cats'
+        : joined.indexOf('时间') >= 0 ? '#ldg-f-at' : '';
+    var target = selector ? box.querySelector(selector) : null;
+    if (!target) return;
+    if (typeof target.scrollIntoView === 'function') {
+      try { target.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { target.scrollIntoView(false); }
+    }
+    var input = target.tagName === 'INPUT' ? target : target.querySelector('input');
+    if (input && typeof input.focus === 'function') {
+      try { input.focus({ preventScroll: true }); } catch (e) { input.focus(); }
+    }
+  }
+
   function submitForm(form, editing) {
     var box = doc.querySelector('.sheet__body');
     if (!box) return Promise.reject(new Error('表单已关闭'));
@@ -1747,10 +1879,25 @@
     var sel = box.querySelector('#ldg-f-reimb');
     if (sel) form.reimb = sel.value || 'none';
 
+    // 一次性收集所有必填项问题，而不是「修一个再报下一个」。
+    // 分类此前完全没有前端校验，直接发空值给后端兜底 400「请选择分类」：
+    // 用户先补金额 → 再被后端退一次才能选分类，往返两轮，且两处提示级别不一致
+    // （前端 toast warn / 后端 error）。这里统一到提交前、同一级别提示。
+    var problems = [];
     var parsed = parseAmount(form.amount);
-    if (!parsed.ok) { toast(parsed.msg, 'warn'); return Promise.resolve(false); }
+    if (!parsed.ok) problems.push(parsed.msg);
+    // 分类接口不可用时（降级态）不强制要求，否则用户完全无法记账。
+    var hasCats = (S.categories[form.type] || []).length > 0;
+    if (hasCats && !form.categoryId) problems.push('请选择分类');
     var transactionAt = isoFromLocal(form.at);
-    if (!transactionAt) { toast('请选择发生时间', 'warn'); return Promise.resolve(false); }
+    if (!transactionAt) problems.push('请选择发生时间');
+
+    if (problems.length) {
+      toast(problems.join('；'), 'warn');
+      focusProblemField(box, problems);
+      // false = 保持表单打开：已填的金额、备注、时间全部保留，补选分类后可直接再提交。
+      return Promise.resolve(false);
+    }
 
     var payload = {
       type: form.type,
@@ -1772,7 +1919,14 @@
         return editing ? '已保存' : '已新增';
       }).then(function (msg) {
         reloadAll();
-        if (S.tab === 'reimb') loadReimbursements();
+        // 新增/编辑会改变报销页内容（新记录默认 pending）：在报销页就立刻重拉，
+        // 在别的页只置脏、切过去时再拉，避免每次记账都白打一次报销列表请求。
+        if (S.tab === 'reimb') {
+          S.reimb.dirty = false;
+          loadReimbursements();
+        } else {
+          S.reimb.dirty = true;
+        }
         return msg;
       });
     }).then(function () { return true; });

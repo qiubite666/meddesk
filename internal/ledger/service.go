@@ -495,7 +495,7 @@ func (s *Service) ListReimbursements(ctx context.Context, userID string, q Reimb
 	if userID == "" {
 		return nil, apierr.New(apierr.CodeUnauthorized, "未登录或令牌已过期")
 	}
-	status, err := reimbStatusFilter(q.Status)
+	status, excludeNone, err := reimbStatusFilter(q.Status)
 	if err != nil {
 		return nil, err
 	}
@@ -515,6 +515,7 @@ func (s *Service) ListReimbursements(ctx context.Context, userID string, q Reimb
 	// 明细：分页 + 状态筛选。
 	listFilter := base
 	listFilter.ReimbStatus = status
+	listFilter.ReimbExcludeNone = excludeNone
 	listFilter.Page, listFilter.Size = page, size
 	list, total, err := s.repo.ListRecords(ctx, userID, listFilter)
 	if err != nil {
@@ -586,19 +587,25 @@ func (s *Service) ListReimbursements(ctx context.Context, userID string, q Reimb
 	}, nil
 }
 
-// reimbStatusFilter 把 status 参数映射成仓储的 ReimbStatus 过滤值。
-// 空值默认 pending（保持旧接口"进来就是看待报销"的语义）；all 表示不过滤。
-func reimbStatusFilter(status string) (string, error) {
+// reimbStatusFilter 把 status 参数映射成仓储的过滤条件。
+// 空值默认 pending（保持「进来就是看待报销」的语义）。
+//
+// all 的语义是「所有**参与报销**的记录」= pending + done，**不含 none**：
+// 不涉及报销的记录本就不属于报销流程，混进报销页后还会被误标成"已报销"
+// （用户已实际遇到）。所以 all 返回空 status + excludeNone=true，
+// 由仓储追加 `<> 'none'` 条件。
+func reimbStatusFilter(status string) (value string, excludeNone bool, err error) {
 	s := strings.TrimSpace(status)
 	switch s {
 	case "":
-		return model.LedgerReimbPending, nil
+		return model.LedgerReimbPending, false, nil
 	case model.LedgerReimbPending, model.LedgerReimbDone, model.LedgerReimbNone:
-		return s, nil
+		// 显式查 none 仍然允许（API 兼容），只是前端不再提供该入口。
+		return s, false, nil
 	case "all":
-		return "", nil
+		return "", true, nil
 	default:
-		return "", apierr.New(apierr.CodeBadRequest, "status 只能是 pending / done / none / all")
+		return "", false, apierr.New(apierr.CodeBadRequest, "status 只能是 pending / done / none / all")
 	}
 }
 

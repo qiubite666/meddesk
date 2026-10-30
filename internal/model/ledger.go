@@ -138,9 +138,13 @@ type LedgerFilter struct {
 	From        string   // 起始自然日 YYYY-MM-DD（含）
 	To          string   // 结束自然日 YYYY-MM-DD（含）
 	ReimbStatus string   // none | pending | done | ""
-	IDs         []string // 指定 id（批量导出/批量操作用）
-	Page        int
-	Size        int
+	// ReimbExcludeNone 在 ReimbStatus 为空时生效：排除「不涉及报销」的记录。
+	// 报销管理页的 all 语义是「所有参与报销的记录」（pending + done），而不是
+	// 「所有支出」——不涉及报销的记录出现在报销页没有意义，还会被误标成已报销。
+	ReimbExcludeNone bool
+	IDs              []string // 指定 id（批量导出/批量操作用）
+	Page             int
+	Size             int
 }
 
 // LedgerSummary 是月度（或任意区间）汇总。

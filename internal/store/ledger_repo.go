@@ -433,6 +433,9 @@ func ledgerWhereFrom(f model.LedgerFilter, from, to string, startIdx int) (strin
 	}
 	if f.ReimbStatus != "" {
 		sb.WriteString(" AND r.reimbursement_status = " + next(f.ReimbStatus))
+	} else if f.ReimbExcludeNone {
+		// 报销管理页的 all：只取参与报销的记录，排除「不涉及」。
+		sb.WriteString(" AND r.reimbursement_status <> 'none'")
 	}
 	if from != "" {
 		sb.WriteString(" AND r.occurred_on >= " + next(from) + "::date")

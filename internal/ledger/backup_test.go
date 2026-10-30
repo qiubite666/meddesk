@@ -14,6 +14,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -916,4 +917,85 @@ func TestSchedulerRecoversFromPanic(t *testing.T) {
 		e.svc.cfg.loc = nil
 		s.safeLoop(context.Background())
 	})
+}
+
+// TestSaveCredentialsReuseExisting 覆盖：地址 / 用户名 / 口令留空时沿用已保存的值。
+//
+// 真实场景：用户只想改备份目录，或只想换口令。口令不可能回显，如果每次都要求
+// 三项全填，用户就得把账号口令重敲一遍——这正是「凭据看起来丢了、反复重填」的成因之一。
+func TestSaveCredentialsReuseExisting(t *testing.T) {
+	e := newBkEnv(t, nil, nil)
+	if err := bkSave(t, e, bkDavPass); err != nil {
+		t.Fatalf("首次保存失败: %v", err)
+	}
+
+	// 三项凭据字段全空，只改目录：应当成功并沿用其余旧值。
+	if err := e.svc.SaveCredentials(context.Background(), bkUserID, CredentialsInput{PathPrefix: "backup2"}); err != nil {
+		t.Fatalf("留空应沿用已保存的凭据，实际报错: %v", err)
+	}
+	creds, err := e.svc.LoadCredentials(context.Background(), bkUserID)
+	if err != nil {
+		t.Fatalf("读取凭据失败: %v", err)
+	}
+	if creds.BaseURL != e.base {
+		t.Fatalf("地址应沿用旧值 %q，实际 %q", e.base, creds.BaseURL)
+	}
+	if creds.Username != bkDavUser {
+		t.Fatalf("用户名应沿用旧值 %q，实际 %q", bkDavUser, creds.Username)
+	}
+	if creds.Password != bkDavPass {
+		t.Fatalf("口令应沿用旧值，实际被改写")
+	}
+	if creds.PathPrefix != "backup2" {
+		t.Fatalf("目录应更新为 backup2，实际 %q", creds.PathPrefix)
+	}
+}
+
+// TestSaveCredentialsFirstTimeNeedsPassword 保证「留空沿用」没有把首次配置的口令校验也放开。
+func TestSaveCredentialsFirstTimeNeedsPassword(t *testing.T) {
+	e := newBkEnv(t, nil, nil)
+	err := e.svc.SaveCredentials(context.Background(), bkUserID, CredentialsInput{
+		BaseURL: e.base, Username: bkDavUser, Password: "",
+	})
+	if err == nil {
+		t.Fatalf("首次配置未填口令应报错")
+	}
+	var ae *apierr.Error
+	if !errors.As(err, &ae) || ae.Code != apierr.CodeBadRequest {
+		t.Fatalf("应返回 bad_request，实际 %v", err)
+	}
+}
+
+// TestBackupStatusHidesCredentials 守护：状态接口只回显脱敏信息。
+//
+// 前端需要"看得见配置还在"（否则用户以为丢失、反复重填），但不能把完整地址与
+// 用户名回传——它们会进响应体、反代日志和错误上报。这里断言主机名可见、
+// 用户名与口令不可还原。
+func TestBackupStatusHidesCredentials(t *testing.T) {
+	e := newBkEnv(t, nil, nil)
+	if err := bkSave(t, e, bkDavPass); err != nil {
+		t.Fatalf("保存凭据失败: %v", err)
+	}
+	st, err := e.svc.Status(context.Background(), bkUserID, 5)
+	if err != nil {
+		t.Fatalf("读取状态失败: %v", err)
+	}
+	if !st.Configured || st.Credential == nil {
+		t.Fatalf("已配置时应回显脱敏信息，实际 %+v", st)
+	}
+	if st.Credential.Host == "" {
+		t.Fatalf("应回显主机名以便用户辨认，实际为空")
+	}
+	if strings.Contains(st.Credential.Host, "/") {
+		t.Fatalf("主机名不应包含路径: %q", st.Credential.Host)
+	}
+	if st.Credential.UsernameMasked == bkDavUser {
+		t.Fatalf("用户名不得原样回传: %q", st.Credential.UsernameMasked)
+	}
+	if !strings.HasSuffix(st.Credential.UsernameMasked, "***") {
+		t.Fatalf("用户名应脱敏，实际 %q", st.Credential.UsernameMasked)
+	}
+	if !st.Credential.HasPassword {
+		t.Fatalf("应标记已保存口令")
+	}
 }
