@@ -426,33 +426,229 @@ func (s *Service) Breakdown(ctx context.Context, userID string, f model.LedgerFi
 
 // ------------------------------------------------------------------ 报销
 
-// ListPending 返回当前账号全部待报销支出（不受月份筛选限制）。
-func (s *Service) ListPending(ctx context.Context, userID string) ([]model.LedgerRecord, int64, model.Money, error) {
+// 报销列表的默认值与上限。
+//
+// 为什么默认只查近 30 天而不是"全部"：报销场景是"这个月的账要报"，而全量扫描
+// 会随账本增长越来越慢；需要更早的数据时前端显式传 from/to 或 days 即可。
+const (
+	reimbDefaultDays = 30  // days 缺省/非法时的默认区间天数
+	reimbDefaultSize = 50  // 报销列表每页条数（比账单列表的 20 大，一次能看到"要报的一批"）
+	reimbMaxSize     = 200 // 与仓储层 ListRecords 的硬上限保持一致
+)
+
+// ReimbQuery 是报销列表的查询条件，由 HTTP 层的查询参数解析而来。
+type ReimbQuery struct {
+	Status string // pending（默认）| done | none | all
+	From   string // 起始自然日 YYYY-MM-DD（含），可选
+	To     string // 结束自然日 YYYY-MM-DD（含），可选
+	Days   int    // 仅在 From/To 都未提供时生效，默认 reimbDefaultDays
+	Page   int
+	Size   int
+}
+
+// ReimbCounts 是三种报销状态在**同一时间区间**内的条数。
+type ReimbCounts struct {
+	Pending int64 `json:"pending"`
+	Done    int64 `json:"done"`
+	None    int64 `json:"none"`
+}
+
+// ReimbSummary 是报销看板的汇总数字：两个金额 + 三个计数。
+type ReimbSummary struct {
+	PendingTotal model.Money `json:"pendingTotal"`
+	DoneTotal    model.Money `json:"doneTotal"`
+	Counts       ReimbCounts `json:"counts"`
+}
+
+// ReimbRange 回显本次查询实际生效的自然日区间，前端据此显示"近 30 天"之类的文案。
+type ReimbRange struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// ReimbPage 是 GET /ledger/reimbursements 的完整响应。
+type ReimbPage struct {
+	Items []model.LedgerRecord `json:"items"`
+	Total int64                `json:"total"`
+	Page  int                  `json:"page"`
+	Size  int                  `json:"size"`
+	// PendingTotal 是**兼容字段**，不能删：旧版前端只读顶层的 pendingTotal
+	// 来渲染"待报销合计"，字段一旦挪进 summary，旧客户端会读到零值并显示 ¥0.00，
+	// 用户会以为账目出错。它的语义是"当前时间区间内 status=pending 的支出合计"，
+	// 与 summary.pendingTotal 恒等，等旧版本客户端全部退场后才能移除。
+	PendingTotal model.Money  `json:"pendingTotal"`
+	Summary      ReimbSummary `json:"summary"`
+	Range        ReimbRange   `json:"range"`
+}
+
+// ListReimbursements 按状态/时间区间分页返回报销账单，并附带汇总。
+//
+// 【为什么不复用旧的待报销查询】
+// 旧实现固定 ReimbStatus=pending、Size=200、无时间条件：用户把记录标成「已报销」
+// 之后它就从这个列表里消失，看起来像"列表被清空了"，也无法查历史。现在状态、
+// 区间、分页全部由调用方决定，默认仍是 pending + 近 30 天，行为对老用户最接近。
+//
+// 【为什么只统计支出】
+// 收入不进入报销流程（buildRecord 会把收入强制归一为 none）。若不过滤 type，
+// status=none 的计数会把所有工资、红包都算进去，与"报销"语义无关。
+func (s *Service) ListReimbursements(ctx context.Context, userID string, q ReimbQuery) (*ReimbPage, error) {
 	if userID == "" {
-		return nil, 0, model.ZeroMoney(), apierr.New(apierr.CodeUnauthorized, "未登录或令牌已过期")
+		return nil, apierr.New(apierr.CodeUnauthorized, "未登录或令牌已过期")
 	}
-	f := model.LedgerFilter{
-		Type:        model.LedgerTypeExpense,
-		ReimbStatus: model.LedgerReimbPending,
-		Page:        1,
-		Size:        200,
-	}
-	list, total, err := s.repo.ListRecords(ctx, userID, f)
+	status, err := reimbStatusFilter(q.Status)
 	if err != nil {
-		return nil, 0, model.ZeroMoney(), apierr.Wrap(apierr.CodeInternal, err, "读取待报销失败")
+		return nil, err
 	}
-	// 合计必须走 SQL 聚合求**全量**，不能只累加当前页：
-	// 列表最多取 200 条，而 total 是全量条数。若用首页金额当合计，
-	// 待报销超过 200 笔时前端会出现"共 350 笔，合计 ¥1,200"（实为前 200 笔金额），
-	// 条数与金额口径自相矛盾，且误差随分页放大。
-	_, expenseCents, err := s.repo.SumRecords(ctx, userID, model.LedgerFilter{
-		Type:        model.LedgerTypeExpense,
-		ReimbStatus: model.LedgerReimbPending,
-	}, "", "")
+	from, to, err := reimbRange(q.From, q.To, q.Days)
 	if err != nil {
-		return nil, 0, model.ZeroMoney(), apierr.Wrap(apierr.CodeInternal, err, "统计待报销金额失败")
+		return nil, err
 	}
-	return list, total, model.MoneyFromCents(expenseCents), nil
+	page, size := normalizeReimbPaging(q.Page, q.Size)
+
+	// base 是"支出 + 区间"的公共条件，状态由各查询自己覆盖。
+	base := model.LedgerFilter{
+		Type: model.LedgerTypeExpense,
+		From: from,
+		To:   to,
+	}
+
+	// 明细：分页 + 状态筛选。
+	listFilter := base
+	listFilter.ReimbStatus = status
+	listFilter.Page, listFilter.Size = page, size
+	list, total, err := s.repo.ListRecords(ctx, userID, listFilter)
+	if err != nil {
+		return nil, apierr.Wrap(apierr.CodeInternal, err, "读取报销列表失败")
+	}
+	if list == nil {
+		list = []model.LedgerRecord{} // 保证 JSON 输出 []，不输出 null
+	}
+
+	// 金额合计必须走 SQL 聚合求全量，不能累加当前页：分页后首页金额与 total
+	// 口径不一致，条数越多误差越大（原实现注释里已经踩过这个坑）。
+	sumOf := func(st string) (model.Money, error) {
+		f := base
+		f.ReimbStatus = st
+		_, expenseCents, err := s.repo.SumRecords(ctx, userID, f, from, to)
+		if err != nil {
+			return model.ZeroMoney(), err
+		}
+		return model.MoneyFromCents(expenseCents), nil
+	}
+	pendingTotal, err := sumOf(model.LedgerReimbPending)
+	if err != nil {
+		return nil, apierr.Wrap(apierr.CodeInternal, err, "统计待报销金额失败")
+	}
+	doneTotal, err := sumOf(model.LedgerReimbDone)
+	if err != nil {
+		return nil, apierr.Wrap(apierr.CodeInternal, err, "统计已报销金额失败")
+	}
+
+	// 三个状态计数各查一次（Size=1 只取 total，不取数据）。
+	// 取舍：SUM(CASE WHEN ...) 一次查完确实更省，但仓储层不在本次改动范围，
+	// 而这三个计数是报销页的首屏数据、区间通常只有 30 天，三条 count 的代价
+	// 远小于为此新增一个仓储方法与一次 SQL 评审；真正的性能瓶颈在明细查询。
+	countOf := func(st string) (int64, error) {
+		f := base
+		f.ReimbStatus = st
+		f.Page, f.Size = 1, 1
+		_, n, err := s.repo.ListRecords(ctx, userID, f)
+		return n, err
+	}
+	var counts ReimbCounts
+	for _, it := range []struct {
+		status string
+		dst    *int64
+	}{
+		{model.LedgerReimbPending, &counts.Pending},
+		{model.LedgerReimbDone, &counts.Done},
+		{model.LedgerReimbNone, &counts.None},
+	} {
+		n, err := countOf(it.status)
+		if err != nil {
+			return nil, apierr.Wrap(apierr.CodeInternal, err, "统计报销条数失败")
+		}
+		*it.dst = n
+	}
+
+	return &ReimbPage{
+		Items:        list,
+		Total:        total,
+		Page:         page,
+		Size:         size,
+		PendingTotal: pendingTotal,
+		Summary: ReimbSummary{
+			PendingTotal: pendingTotal,
+			DoneTotal:    doneTotal,
+			Counts:       counts,
+		},
+		Range: ReimbRange{From: from, To: to},
+	}, nil
+}
+
+// reimbStatusFilter 把 status 参数映射成仓储的 ReimbStatus 过滤值。
+// 空值默认 pending（保持旧接口"进来就是看待报销"的语义）；all 表示不过滤。
+func reimbStatusFilter(status string) (string, error) {
+	s := strings.TrimSpace(status)
+	switch s {
+	case "":
+		return model.LedgerReimbPending, nil
+	case model.LedgerReimbPending, model.LedgerReimbDone, model.LedgerReimbNone:
+		return s, nil
+	case "all":
+		return "", nil
+	default:
+		return "", apierr.New(apierr.CodeBadRequest, "status 只能是 pending / done / none / all")
+	}
+}
+
+// reimbRange 计算生效的自然日区间。
+//
+// 只要 from/to 传了任意一个就以它们为准（另一端留空表示不设边界），
+// 两者都没传时按 days 反推：from = 今天 - (days-1)、to = 今天。
+// 日期一律按上海时区算——账本的"今天"必须与用户看到的一致，不能用 UTC。
+func reimbRange(fromRaw, toRaw string, days int) (string, string, error) {
+	from := strings.TrimSpace(fromRaw)
+	to := strings.TrimSpace(toRaw)
+	for _, v := range []string{from, to} {
+		if v == "" {
+			continue
+		}
+		// datePattern 与导出模块共用：用户输入的自然日必须先校验再进 SQL。
+		if !datePattern.MatchString(v) {
+			return "", "", apierr.New(apierr.CodeBadRequest, "日期格式应为 YYYY-MM-DD")
+		}
+		if _, err := time.ParseInLocation("2006-01-02", v, shanghai); err != nil {
+			return "", "", apierr.New(apierr.CodeBadRequest, "日期不是有效日期")
+		}
+	}
+	// YYYY-MM-DD 是定长格式，字符串比较即时间先后。
+	if from != "" && to != "" && from > to {
+		return "", "", apierr.New(apierr.CodeBadRequest, "开始日期不能晚于结束日期")
+	}
+	if from == "" && to == "" {
+		if days <= 0 {
+			days = reimbDefaultDays
+		}
+		today := time.Now().In(shanghai)
+		from = today.AddDate(0, 0, -(days - 1)).Format("2006-01-02")
+		to = today.Format("2006-01-02")
+	}
+	return from, to, nil
+}
+
+// normalizeReimbPaging 夹取分页参数，规则与 /records 保持一致。
+func normalizeReimbPaging(page, size int) (int, int) {
+	if page < 1 {
+		page = 1
+	}
+	if size <= 0 {
+		size = reimbDefaultSize
+	}
+	if size > reimbMaxSize {
+		size = reimbMaxSize
+	}
+	return page, size
 }
 
 // MarkReimbursement 批量改报销状态。只处理该账号名下、且确实是支出的记录。

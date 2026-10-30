@@ -453,7 +453,9 @@
     if (tabbar) {
       MD.ui.clear(tabbar);
       // 底部标签栏只放一级入口：子路由（工具箱下各工具）放进来会挤掉主模块。
-      list.filter(function (route) { return !route.parent; }).slice(0, 4)
+      // tab === false 的路由显式退出底部栏（仍完整保留在侧栏），把前 4 位让给更常用的模块。
+      // 用「显式排除」而不是改 order，是为了不影响侧栏既有顺序。
+      list.filter(function (route) { return !route.parent && route.tab !== false; }).slice(0, 4)
         .forEach(function (route) { tabbar.appendChild(routeButton(route, true)); });
     }
   }

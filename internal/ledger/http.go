@@ -250,13 +250,30 @@ func (h *Handler) breakdown(c *gin.Context) {
 
 // ------------------------------------------------------------------ 报销
 
+// reimbQueryFromQuery 解析报销列表参数。
+//
+// status 取值、日期格式、from<=to 的校验统一放在 service 层，这样无论入口是
+// HTTP 还是后台任务，规则都只有一份；这里只做数字解析（解析失败即视为未传，
+// 由 service 的默认值兜底，与 /records 的夹取风格一致）。
+func reimbQueryFromQuery(c *gin.Context) ReimbQuery {
+	q := ReimbQuery{
+		Status: strings.TrimSpace(c.Query("status")),
+		From:   strings.TrimSpace(c.Query("from")),
+		To:     strings.TrimSpace(c.Query("to")),
+	}
+	q.Days, _ = strconv.Atoi(c.Query("days"))
+	q.Page, _ = strconv.Atoi(c.Query("page"))
+	q.Size, _ = strconv.Atoi(c.Query("size"))
+	return q
+}
+
 func (h *Handler) listReimbursements(c *gin.Context) {
-	list, total, sum, err := h.svc.ListPending(c.Request.Context(), userIDOf(c))
+	out, err := h.svc.ListReimbursements(c.Request.Context(), userIDOf(c), reimbQueryFromQuery(c))
 	if err != nil {
 		writeErr(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"items": list, "total": total, "pendingTotal": sum})
+	c.JSON(http.StatusOK, out)
 }
 
 // markRequest 是批量改报销状态的请求体。

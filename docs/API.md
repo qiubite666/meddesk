@@ -1436,25 +1436,82 @@ curl -fsS "$HOST/api/v1/ledger/summary?month=2026-10" -H "Authorization: Bearer 
 
 #### 9.4.1 `GET /api/v1/ledger/reimbursements`
 
-**鉴权**：✅ Bearer。**说明**：返回**全部待报销支出**（`type=expense` 且 `reimbursementStatus=pending`），**不受月份筛选限制，无查询参数**。
+**鉴权**：✅ Bearer。**说明**：按「报销状态 + 自然日区间」**分页**返回**支出**账单，并附带该区间内的汇总数字与条数。
+
+- 只统计/返回支出：收入不进入报销流程（服务端对收入强制 `reimbursementStatus=none`），因此 `type` 恒为 `expense`，**无需也不能**传 `type` 参数。
+- 旧行为（固定只看待报销、固定 200 条、无时间条件）已废弃：用户把记录标成「已报销」后不会再"凭空消失"，历史也能查。
+
+**查询参数**
+
+| 参数 | 类型 | 默认 | 取值范围 | 非法输入的行为 |
+|---|---|---|---|---|
+| `status` | string | `pending` | `pending` / `done` / `none` / `all` | 其他值 → `400 bad_request`「status 只能是 pending / done / none / all」；空串等同 `pending` |
+| `from` | string | 不限 | `YYYY-MM-DD`，**含端点** | 格式不符 → `400`「日期格式应为 YYYY-MM-DD」；`2026-02-30` 这类不存在的日期 → `400`「日期不是有效日期」 |
+| `to` | string | 不限 | `YYYY-MM-DD`，**含端点** | 同上；`from` 晚于 `to` → `400`「开始日期不能晚于结束日期」 |
+| `days` | int | `30` | 正整数 | 非数字 / `≤0` → **静默回落到 30**（不报错）；**仅当 `from`、`to` 都缺省时生效** |
+| `page` | int | `1` | `≥1` | 非数字 / `≤0` → 夹取为 `1` |
+| `size` | int | `50` | `1–200` | 非数字 / `≤0` → `50`；`>200` → **夹取为 200**（不报错） |
+
+**区间规则（按 `Asia/Shanghai` 自然日计算）**
+
+1. `from` / `to` 只要传了**任意一个**就以它们为准，另一端留空表示该侧**不设边界**，此时 `days` 被忽略；
+2. 两者都缺省时按 `days` 反推：`from = 今天 - (days-1)`、`to = 今天`（`days=30` 即"近 30 天含今天"）；
+3. 自然日一律按 **`Asia/Shanghai`** 计算——账本的"今天"必须与用户看到的一致，不能用 UTC。
 
 **成功响应** `200`
 
 ```json
-{"items":[{"id":"r1…","type":"expense","amount":"123.45","amountCents":12345,"categoryName":"餐饮",
-           "reimbursementStatus":"pending","occurredOn":"2026-10-30","attachmentCount":2}],
- "total":3,"pendingTotal":{"value":"456.78","cents":45678}}
+{
+  "items": [
+    {"id":"r1…","type":"expense","amount":"123.45","amountCents":12345,"currency":"CNY",
+     "categoryId":"c1…","categoryName":"餐饮","transactionAt":"2026-10-30T12:30:00+08:00",
+     "occurredOn":"2026-10-30","note":"午餐","reimbursementStatus":"pending",
+     "attachmentCount":1,"createdAt":"2026-10-30T04:35:00+08:00","updatedAt":"2026-10-30T04:35:00+08:00"}
+  ],
+  "total": 12, "page": 1, "size": 50,
+  "pendingTotal": {"value":"123.45","cents":12345},
+  "summary": {
+    "pendingTotal": {"value":"123.45","cents":12345},
+    "doneTotal": {"value":"88.00","cents":8800},
+    "counts": {"pending":3,"done":9,"none":0}
+  },
+  "range": {"from":"2026-10-01","to":"2026-10-30"}
+}
 ```
 
-> `items` 单次最多返回 **200 条**（服务端固定 `page=1, size=200`，无分页参数）。
-> 因此 `pendingTotal` 是**当前返回这批 `items` 的金额合计**，而 `total` 是满足条件的**总条数**——
-> 待报销超过 200 条时二者口径不一致，展示汇总金额请留意。
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `items` | object[] | 当前页账单，**复用账单记录对象**（字段定义见 [9.2](#92-账单-ledgerrecords)）；空结果返回 `[]` 而非 `null` |
+| `total` | int64 | 满足 `status` + 区间条件的**总条数**（分页前的全量） |
+| `page` / `size` | int | **回显服务端实际生效的值**（已被夹取/回落），前端翻页请以此为准 |
+| `pendingTotal` | Money | **兼容字段，不可删**。语义为"当前筛选条件下 `status=pending` 的合计"，与 `summary.pendingTotal` **恒等**；保留它是为了旧版前端仍能渲染"待报销合计"，旧客户端全部退场后才能移除 |
+| `summary.pendingTotal` | Money | 区间内**待报销**金额合计 |
+| `summary.doneTotal` | Money | 区间内**已报销**金额合计 |
+| `summary.counts` | object | 区间内三种状态的**条数**：`pending` / `done` / `none`（与 `status` 参数无关，始终给全三种） |
+| `range` | object | **回显服务端实际采用的区间** `{"from","to"}`，前端据此显示"近 30 天 / 10-01 至 10-30"等文案；某一侧不设边界时对应值为 `""` |
 
-**错误**：`401`、`500 internal`（`读取待报销失败`）。
+> **金额口径**：`pendingTotal` / `summary.*` 走 SQL 聚合求**全量**，不是累加当前页——分页后首页金额与 `total` 口径仍然一致。
+> **`items[]` 的金额是平铺的 `amount`（字符串，两位小数）+ `amountCents`（整数分）**，与 9.2 的账单对象一致；
+> 请勿按嵌套的 `amount.value` 解析（那是早期草案的写法，服务端未采用）。
+
+**错误**
+
+| HTTP | code | message |
+|---|---|---|
+| 400 | `bad_request` | `status 只能是 pending / done / none / all` |
+| 400 | `bad_request` | `日期格式应为 YYYY-MM-DD` / `日期不是有效日期` / `开始日期不能晚于结束日期` |
+| 401 | `unauthorized` | `未登录或令牌已过期` |
+| 500 | `internal` | `读取报销列表失败` / `统计待报销金额失败` |
+
+```bash
+# 查「已报销」+ 最近 30 天（days 生效的前提是不传 from/to）
+curl -fsS "$HOST/api/v1/ledger/reimbursements?status=done&days=30&page=1&size=50" \
+  -H "Authorization: Bearer $TOKEN"
+```
 
 #### 9.4.2 `POST /api/v1/ledger/reimbursements/mark`
 
-**鉴权**：✅ Bearer。**说明**：批量改报销状态，**只处理当前账号名下、且确实是支出的记录**。
+**鉴权**：✅ Bearer。**说明**：批量改报销状态，**只处理当前账号名下、且确实是支出的记录**。接口行为本次**未变更**，新增的只是「退回」这一用法的说明。
 
 **请求体**
 
@@ -1464,8 +1521,22 @@ curl -fsS "$HOST/api/v1/ledger/summary?month=2026-10" -H "Authorization: Bearer 
 
 | 字段 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `ids` | string[] | ✅ | 账单 id 列表，至少 1 个非空中元素 |
-| `status` | string | ✅ | `none` / `pending` / `done` |
+| `ids` | string[] | ✅ | 账单 id 列表，至少 1 个非空的元素（空串会被剔除，全空即 400） |
+| `status` | string | ✅ | `none` / `pending` / `done`；其他值 → `400`。前后空格会被 `TrimSpace` |
+
+**三种状态的语义**
+
+| `status` | 含义 |
+|---|---|
+| `pending` | **待报销**。把已报销记录改回 `pending` 就是「**退回待报销**」，可直接作用于 `done` 记录 |
+| `done` | 已报销 |
+| `none` | 不参与报销（从流程中摘出） |
+
+> 三种状态之间**任意互相转换**（服务端无条件改写，不校验来源状态），因此「退回」不需要先改成 `none` 中转。
+
+> **退回（撤销报销）**：`status:"pending"` 不是"新建待报销"，而是把目标记录的状态**无条件改写**为 `pending`——
+> 因此对已标记 `done` 的记录再发一次 `{"status":"pending"}` 即可退回，无需先改成 `none`。
+> 退回后该记录会重新出现在默认（`status=pending`）的列表与 `summary.pendingTotal` 中；`doneTotal` 相应减少，服务端不做二次确认。
 
 **成功响应** `200`
 
@@ -1473,20 +1544,30 @@ curl -fsS "$HOST/api/v1/ledger/summary?month=2026-10" -H "Authorization: Bearer 
 {"updated": 2}
 ```
 
-（`updated` 为**实际更新条数**；不属于本账号或不是支出的 id 不计数。）
+（`updated` 为**实际更新条数**；不属于本账号、不是支出、或 id 不存在的记录**不计数**，也不报错——批量操作里逐条报错反而会打断整批。）
+
+**幂等性**：同一 `ids` + 同一 `status` 重复提交，`updated` 仍是这些记录的实际匹配条数（服务端按状态改写，不做"值未变则跳过"的过滤）。
 
 **错误**
 
 | HTTP | code | message |
 |---|---|---|
-| 400 | `bad_request` | `请先选择要操作的账单`（ids 为空） |
-| 400 | `bad_request` | `报销状态只能是 none / pending / done` |
+| 400 | `bad_request` | `请先选择要操作的账单`（ids 为空或全是空串） |
+| 400 | `bad_request` | `报销状态只能是 none / pending / done`（含 `status` 为空串） |
+| 400 | `bad_request` | `请求参数有误`（body 不是合法 JSON 或类型不符） |
 | 401 | `unauthorized` | `未登录或令牌已过期` |
+| 500 | `internal` | `更新报销状态失败` |
 
 ```bash
+# 标记已报销
 curl -fsS -X POST "$HOST/api/v1/ledger/reimbursements/mark" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"ids":["r1…"],"status":"done"}'
+
+# 退回待报销（status=pending 即"撤销报销"，可直接作用于已报销记录）
+curl -fsS -X POST "$HOST/api/v1/ledger/reimbursements/mark" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"ids":["r1…","r2…"],"status":"pending"}'
 ```
 
 ---
@@ -1637,6 +1718,34 @@ curl -fsS -o receipt.jpg "$HOST/api/v1/ledger/attachments/a1…" -H "Authorizati
 > `includeAttachments` 在 POST 侧用指针区分「未传」与「显式 false」——**未传时按内嵌处理**（备份完整性优先）。
 > GET 侧取值 `0` / `false` / `no`（不区分大小写）视为 false，其他视为 true。
 
+**时间范围：`preset` / `from` / `to` 的精确规则**
+
+| 参数 | 类型 | 默认值 | 取值范围 | 非法输入的行为 |
+|---|---|---|---|---|
+| `preset` | string | **`all`**（不传、传空串均视为 `all`） | `thisMonth` / `lastMonth` / `custom` / `all`（`month` = `thisMonth` 的别名） | 其他值 → `400`「未知的导出范围 preset，可用值：thisMonth / lastMonth / custom / all」 |
+| `from` | string | 不限 | `YYYY-MM-DD`，含端点 | **格式非法 → 静默按「不限」处理，不报错**（导出是"尽量给结果"的操作）；仅当 `preset=custom` 时才严格校验并报 `400 时间范围格式有误，应为 YYYY-MM-DD` |
+| `to` | string | 不限 | `YYYY-MM-DD`，含端点 | 同上；`from > to` 时 `all` 模式下不拦截，`custom` 模式下 `400 开始日期不能晚于结束日期` |
+| `month`（仅 GET） | string | — | `YYYY-MM` | 非法 → 回落为**当前月**（不报错） |
+
+各样式的实际区间（按 `Asia/Shanghai` 自然日）：
+
+| `preset` | 区间 |
+|---|---|
+| `all`（默认） | 不限；**若同时给了 `from`/`to`，仍会按它们收窄**（`all` 不等于"忽略日期"） |
+| `thisMonth` / `month` | 本自然月首日 ~ 末日 |
+| `lastMonth` | 上自然月首日 ~ 末日 |
+| `custom` | **必须同时给 `from` 与 `to`**，缺任一 → `400`「自定义时间范围需要同时提供 from 与 to」 |
+| 未传 `preset` 但 `from`、`to` 都给了 | **自动按 `custom` 处理**（无需显式写 `preset`） |
+| 未传 `preset` 且只给了一端 | 按 `all` + 该端为边界（"某日之后/之前"） |
+
+```bash
+# 导出自定义区间（POST /export/html、/export/zip 都用这套 body；GET /export/json 用查询串）
+curl -fsS -X POST "$HOST/api/v1/ledger/export/zip" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"preset":"custom","from":"2026-10-01","to":"2026-10-31","type":"expense"}' \
+  -o ledger-2026-10.zip
+```
+
 #### 9.6.2 `POST /api/v1/ledger/export/html`
 
 **鉴权**：✅ Bearer。**说明**：生成**自包含 HTML 报告**（图片以 `data:` URI 内嵌，可离线打开）。
@@ -1743,13 +1852,28 @@ curl -fsS "$HOST/api/v1/ledger/export/json?preset=thisMonth&includeAttachments=0
 
 #### 9.6.5 `POST /api/v1/ledger/import`
 
-**鉴权**：✅ Bearer。**说明**：从备份恢复，支持**合并（merge）** 与 **覆盖（overwrite）** 两种模式。
+**鉴权**：✅ Bearer。**说明**：从备份恢复。**同一个路径按 `Content-Type` 分流**：
+
+| `Content-Type` | 入口 | 说明 |
+|---|---|---|
+| `application/json` | JSON 导入 | 原有行为，支持**合并（merge）** 与 **覆盖（overwrite）**；body 需带 `mode`/`payload`/`confirm`。**本次未变更** |
+| `application/zip` | ZIP 备份包导入 | **本次新增**。直接把 **WebDAV 每日备份包**（[9.7](#97-webdav-每日备份-ledgerbackup)）当请求体发上来，服务端解析包内的 `ledger.json` 并还原 `images/` 下的附件 |
+
+> **如何判定走 ZIP**：`Content-Type` 为 `application/zip`（或 `application/x-zip-compressed`），
+> **或** body 的前 4 个字节是 ZIP 魔数 `PK\x03\x04`——即使客户端错标成 `application/octet-stream` 也能被识别。
+> 两条都不满足才走 JSON 解析。
+>
+> **上限的两个层次别混淆**：`200 MiB` 是**解压后**的内容上限（防 zip bomb），
+> 而**上传的 ZIP 本体仍受全局 8 MiB 限制**——含大量图片的备份包压缩后可能超过 8 MiB，
+> 此时会得到 `413`。这类备份请改用 `GET /ledger/export/json?includeAttachments=0` 走 JSON 导入，或先从 WebDAV 分卷取出再导入。
 
 > **安全底线（务必阅读）**
 > 1. payload 里的任何归属字段**都不采信**，每条记录强制改写为当前账号。
 > 2. **覆盖是破坏性操作**：必须先清空当前账本，要求 `confirm=true` 才执行；失败会整体回滚，不会留下「删了一半」的账本。
-> 3. **附件字节不会被恢复**（附件模块只有读取接口），会在结果里明确报告跳过数量。
+> 3. **JSON 导入不恢复附件字节**（备份里的 `data` 只是登记），会在结果里明确报告跳过数量；**ZIP 导入会真的把附件落盘还原**。
 > 4. 结构性错误一律在写库之前返回 400 —— **一行都不写**。
+
+##### A. JSON 导入（`Content-Type: application/json`，行为不变）
 
 **请求体**
 
@@ -1757,29 +1881,79 @@ curl -fsS "$HOST/api/v1/ledger/export/json?preset=thisMonth&includeAttachments=0
 {"mode":"merge","confirm":false,"payload":{"schema":"meddesk-ledger-export","version":1,"categories":[…],"records":[…]}}
 ```
 
-| 字段 | 类型 | 必填 | 说明 |
-|---|---|---|---|
-| `mode` | string | ✅ | `merge`（按 id 去重，跳过已存在）/ `overwrite`（清空后重建） |
-| `payload` | object | ✅ | `BackupPayload`，即 [9.6.4](#964-get-apiv1ledgerexportjson) 的输出结构 |
-| `confirm` | bool | 覆盖时必填 | `mode=overwrite` 时必须为 `true` |
+| 字段 | 类型 | 必填 | 默认 | 说明 |
+|---|---|---|---|---|
+| `mode` | string | ✅ | — | `merge`（按 id 去重，跳过已存在）/ `overwrite`（清空后重建）；其他值 → 400 |
+| `payload` | object | ✅ | — | `BackupPayload`，即 [9.6.4](#964-get-apiv1ledgerexportjson) 的输出结构（`schema` 为 `meddesk-ledger-export` 或 `meddesk-ledger-backup` 均可） |
+| `confirm` | bool | 覆盖时必填 | `false` | `mode=overwrite` 时必须为 `true`，否则 400 |
 
-**成功响应** `200`
+##### B. ZIP 备份包导入（`Content-Type: application/zip`，本次新增）
+
+**请求体**：ZIP 二进制本身（**不是** JSON 里再套一层），用 `--data-binary` 或 `-T` 发送。
+
+**包内结构**（与 [9.7](#97-webdav-每日备份-ledgerbackup) 每日备份一致）
+
+```
+ledger-backup-20261030.zip
+├── ledger.json          账单 + 分类 + 附件清单（BackupPayload，schema = meddesk-ledger-backup）
+├── images/<recordId>/<attachmentId>.<ext>
+└── manifest.json        {schema, version, generatedAt, recordCount, attachmentCount, checksum}
+```
+
+| 项 | 规则 |
+|---|---|
+| `ledger.json` | **必需**。位于包根目录（`./ledger.json`），缺失 → `400`「备份包里没有 ledger.json」 |
+| `images/…` | 可选。按 `images/<recordId>/<attachmentId>.<ext>` 还原为明文图片附件；不属于本次导入记录的图片会被跳过并记入 `warnings` |
+| `manifest.json` | 可选。存在时用于核对 `checksum`；**不一致不会中断导入**，只在 `warnings` 里提示（备份包可能被人工改过） |
+| 导入模式 | ZIP 入口**无 body 字段可传 `mode`**：缺省为 `merge`（"直接导入"最安全的那条路）；需要覆盖时用查询串 `?mode=overwrite&confirm=true` 显式声明，未带 `confirm=true` 的 `overwrite` 一律 400 |
+
+**限制与越界行为**（整包级越界即 400 不写库；单条目越界只跳过该条目并记 `warnings`）
+
+| 限制 | 阈值 | 越界行为 |
+|---|---|---|
+| **上传的 ZIP 本体（压缩后）** | ≤ 全局 **8 MiB**（[1.5](#15-请求体大小上限)），且受 Nginx `client_max_body_size 12m` 约束 | `413 payload_too_large`（Nginx 侧直接返回 413 HTML） |
+| 解压后总字节 | ≤ **200 MiB** | `400`「解压后内容超过 200 MiB 上限」 |
+| ZIP 条目数 | ≤ **5000** | `400`「备份包条目数超过 5000 上限」 |
+| 单个附件 | ≤ **2 MiB**（与 [9.5](#95-凭证附件-ledgerattachments) 一致） | 该附件被跳过并记入 `warnings`，不影响账单导入 |
+| 路径穿越（zip slip） | 条目名含 `..` 段或为绝对路径（`/…`、`C:\…`） | 该条目**被拒绝**并记入 `warnings`；包内其余内容照常处理 |
+| 账单条数 | ≤ **20000**（与 JSON 导入同一上限） | `400` |
+
+> **明文说明（重要）**：WebDAV 备份的内容是**明文**——`ledger.json` 是普通 JSON，`images/` 是明文图片，`manifest.json` 是普通 JSON，
+> 包本身**没有加密、没有二次编码**，就是普通的 ZIP。
+> 因此**服务异常时可以直接从 WebDAV 下载备份包，用一条 `curl` 导入**，无需任何解码或额外工具：
+>
+> ```bash
+> curl -fsS -X POST "$HOST/api/v1/ledger/import" \
+>   -H "Authorization: Bearer $TOKEN" \
+>   -H 'Content-Type: application/zip' \
+>   --data-binary @ledger-backup-20261030.zip
+> ```
+>
+> 这也意味着备份包**等同明文账本**：WebDAV 账号的权限、以及备份目录的访问控制就是唯一防线，请勿把备份包发到公开渠道。
+
+**成功响应 `200`（两个入口共用同一结构，ZIP 入口相关字段才有非零值）**
 
 ```json
 {"mode":"merge","recordsBefore":10,"recordsAfter":13,"recordsInserted":3,"recordsSkipped":2,
- "recordsFailed":0,"categoriesCreated":1,"attachmentsTotal":4,"attachmentsSkipped":4,
- "note":"附件字节不会通过导入恢复（附件模块只提供读取接口），请在原设备上保留凭证图片",
+ "recordsFailed":0,"categoriesCreated":1,"attachmentsTotal":4,"attachmentsSkipped":0,
+ "imported":3,"skipped":2,"attachmentsRestored":4,
+ "warnings":["条目 \"../etc/passwd\" 含路径穿越，已忽略","附件 a2… 超过 2 MiB 上限，已跳过"],
+ "note":"已从 ZIP 备份包恢复账单与 4 个附件",
  "errors":["第 2 条记录的金额 \"abc\" 非法：必须是大于 0 的数字，最多两位小数"]}
 ```
 
-| 字段 | 说明 |
-|---|---|
-| `recordsBefore` / `recordsAfter` | 导入前后的账单总数 |
-| `recordsInserted` / `recordsSkipped` / `recordsFailed` | 新增 / 已存在跳过 / 失败条数 |
-| `categoriesCreated` | 新建分类数 |
-| `attachmentsTotal` / `attachmentsSkipped` | 备份里登记的附件总数 / 未恢复数 |
-| `note` | 有附件时的固定提示 |
-| `errors` | 逐条失败原因（**合并模式下整体仍 200**，失败条目不写入） |
+| 字段 | 出现在 | 说明 |
+|---|---|---|
+| `mode` | 两者 | 实际生效的导入模式 `merge` / `overwrite` |
+| `recordsBefore` / `recordsAfter` | 两者 | 导入前后的账单总数 |
+| `recordsInserted` / `recordsSkipped` / `recordsFailed` | 两者 | 新增 / 已存在跳过 / 失败条数（原有字段） |
+| `imported` / `skipped` | 两者 | **`recordsInserted` / `recordsSkipped` 的等价别名**，供备份包客户端与脚本直接读取；两套字段同时返回 |
+| `categoriesCreated` | 两者 | 新建分类数 |
+| `attachmentsTotal` / `attachmentsSkipped` | 两者 | 备份里登记的附件总数 / 未恢复数 |
+| `attachmentsRestored` | 两者 | **真正落盘并登记成功的附件数**；JSON 导入恒为 `0`，ZIP 导入通常 `= attachmentsTotal - attachmentsSkipped` |
+| `warnings` | 两者 | 不影响结果但需知会的提示：被拒的 zip slip 条目、超限附件、`manifest.checksum` 不匹配等；无内容时**该字段不出现** |
+| `note` | 两者 | 结果摘要（有附件时的固定提示） |
+| `errors` | 两者 | 逐条失败原因（**整体仍 200**，失败条目不写入） |
 
 **错误**
 
@@ -1792,13 +1966,24 @@ curl -fsS "$HOST/api/v1/ledger/export/json?preset=thisMonth&includeAttachments=0
 | 400 | `bad_request` | `备份版本 %d 不受支持，当前支持版本 1` |
 | 400 | `bad_request` | `备份里没有账单记录，已取消导入` / `备份含 %d 条账单，超过单次导入上限 20000` |
 | 400 | `bad_request` | `第 %d 个分类的 kind 非法（应为 income 或 expense）` / `第 %d 条记录的金额 %q 非法：…` / `第 %d 条记录的金额与分值不一致（…）` 等逐条校验失败文案 |
-| 413 | `payload_too_large` | 请求体超过全局 8 MiB（**建议改用 `includeAttachments=0` 的备份**） |
+| 400 | `bad_request` | ZIP 专用：`备份包里没有 ledger.json` / `备份包不是合法的 ZIP 文件` / `解压后内容超过 200 MiB 上限` / `备份包条目数超过 5000 上限` |
+| 401 | `unauthorized` | `未登录或令牌已过期` |
+| 413 | `payload_too_large` | 请求体超过全局 8 MiB（JSON 备份建议改用 `includeAttachments=0`；ZIP 备份包体积通常远小于含附件字节的 JSON 备份，图片很多时仍可能顶到上限） |
 
 ```bash
+# ① JSON 导入（原有用法）
 curl -fsS -X POST "$HOST/api/v1/ledger/import" \
   -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d "{\"mode\":\"merge\",\"payload\":$(cat ledger-backup.json)}"
+
+# ② ZIP 备份包直接导入（WebDAV 每日备份包，明文无需解码）
+curl -fsS -X POST "$HOST/api/v1/ledger/import" \
+  -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/zip' \
+  --data-binary @ledger-backup-20261030.zip
 ```
+
+> **注意**：`POST /ledger/export/zip` 的产物是**报表包**（内含 `ledger.xlsx`，**没有** `ledger.json`），
+> 不可直接回灌到本接口；能直接导入的是 **WebDAV 每日备份包**。要把导出包变成可导入格式，请用 `GET /ledger/export/json`。
 
 ---
 

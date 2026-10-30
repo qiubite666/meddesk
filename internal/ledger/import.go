@@ -7,12 +7,23 @@ package ledger
 //     否则一份"别人导出的备份"就能把数据写进他人账号（越权写入）。
 //  2. 覆盖导入是破坏性操作，必须 confirm=true 才执行；执行前先把当前数据快照到内存，
 //     中途失败就整体回滚，绝不留下"删了一半"的账本。
-//  3. 附件只做登记：AttachmentSource 只有读取能力，导入方无法凭它写回文件，
+//  3. JSON 导入只登记附件：AttachmentSource 只有读取能力，导入方无法凭它写回文件，
 //     因此明细里明确报告"有多少凭证未被恢复"，不让用户误以为恢复完整。
+//     例外是每日备份 ZIP（ImportZIP）：它自带原图字节，附件服务若支持写入
+//     （AttachmentService 实现了 Save）就真的落盘还原。
 
 import (
+	"archive/zip"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -40,18 +51,40 @@ type ImportRequest struct {
 }
 
 // ImportResult 是导入统计。
+//
+// Imported / Skipped 是 RecordsInserted / RecordsSkipped 的等价别名：
+// 备份包客户端（以及"从 WebDAV 拖回文件直接导入"的脚本）只关心这两项，
+// 原有字段全部保留，保持向后兼容。
 type ImportResult struct {
-	Mode               string   `json:"mode"`
-	RecordsBefore      int      `json:"recordsBefore"`
-	RecordsAfter       int      `json:"recordsAfter"`
-	RecordsInserted    int      `json:"recordsInserted"`
-	RecordsSkipped     int      `json:"recordsSkipped"`
-	RecordsFailed      int      `json:"recordsFailed"`
-	CategoriesCreated  int      `json:"categoriesCreated"`
-	AttachmentsTotal   int      `json:"attachmentsTotal"`
-	AttachmentsSkipped int      `json:"attachmentsSkipped"`
-	Note               string   `json:"note,omitempty"`
-	Errors             []string `json:"errors,omitempty"`
+	Mode               string `json:"mode"`
+	RecordsBefore      int    `json:"recordsBefore"`
+	RecordsAfter       int    `json:"recordsAfter"`
+	RecordsInserted    int    `json:"recordsInserted"`
+	RecordsSkipped     int    `json:"recordsSkipped"`
+	RecordsFailed      int    `json:"recordsFailed"`
+	CategoriesCreated  int    `json:"categoriesCreated"`
+	AttachmentsTotal   int    `json:"attachmentsTotal"`
+	AttachmentsSkipped int    `json:"attachmentsSkipped"`
+	Imported           int    `json:"imported"`
+	Skipped            int    `json:"skipped"`
+	// AttachmentsRestored 是真正落盘并登记成功的凭证数量（仅 ZIP 备份包导入可能 > 0）。
+	AttachmentsRestored int `json:"attachmentsRestored"`
+	// Warnings 是"不影响结果但用户该知道"的提示（ZIP 包结构、被跳过的凭证等）。
+	Warnings []string `json:"warnings,omitempty"`
+	Note     string   `json:"note,omitempty"`
+	Errors   []string `json:"errors,omitempty"`
+}
+
+// normalizeImportMode 校验导入模式；"" 表示用户没选，需要更明确的提示。
+func normalizeImportMode(mode string) (string, error) {
+	switch strings.TrimSpace(mode) {
+	case "":
+		return "", apierr.New(apierr.CodeBadRequest, "请指定导入模式：merge（合并）或 overwrite（覆盖）")
+	case ImportModeMerge, ImportModeOverwrite:
+		return strings.TrimSpace(mode), nil
+	default:
+		return "", apierr.New(apierr.CodeBadRequest, "导入模式只能是 merge 或 overwrite")
+	}
 }
 
 // Import 执行导入。任何结构性错误都在写库之前返回 400，不产生部分写入。
@@ -59,13 +92,9 @@ func (s *ExportService) Import(ctx context.Context, userID string, req ImportReq
 	if userID == "" {
 		return nil, apierr.New(apierr.CodeUnauthorized, "未登录或令牌已过期")
 	}
-	mode := strings.TrimSpace(req.Mode)
-	switch mode {
-	case "":
-		return nil, apierr.New(apierr.CodeBadRequest, "请指定导入模式：merge（合并）或 overwrite（覆盖）")
-	case ImportModeMerge, ImportModeOverwrite:
-	default:
-		return nil, apierr.New(apierr.CodeBadRequest, "导入模式只能是 merge 或 overwrite")
+	mode, err := normalizeImportMode(req.Mode)
+	if err != nil {
+		return nil, err
 	}
 	if req.Payload == nil {
 		return nil, apierr.New(apierr.CodeBadRequest, "缺少 payload（备份内容）")
@@ -110,6 +139,8 @@ func (s *ExportService) Import(ctx context.Context, userID string, req ImportReq
 		return nil, err
 	}
 	res.RecordsAfter = len(after)
+	res.Imported = res.RecordsInserted
+	res.Skipped = res.RecordsSkipped
 	return res, nil
 }
 
@@ -317,6 +348,14 @@ func (r *ImportResult) addErr(msg string) {
 	r.Errors = append(r.Errors, msg)
 }
 
+// addWarning 记录一条不影响结果的提示（同样只留前 10 条，避免响应体被撑爆）。
+func (r *ImportResult) addWarning(msg string) {
+	if len(r.Warnings) >= 10 {
+		return
+	}
+	r.Warnings = append(r.Warnings, msg)
+}
+
 // ------------------------------------------------------------------ 覆盖导入
 
 // ledgerSnapshot 是覆盖导入前的内存快照，用于失败回滚。
@@ -511,4 +550,365 @@ func (c *catCache) resolve(ctx context.Context, kind, name string) (id string, c
 	}
 	c.byKey[c.key(kind, name)] = cat.ID
 	return cat.ID, true, nil
+}
+
+// ------------------------------------------------------------------ 备份 ZIP 包导入
+
+// ZIP 备份包导入的规模上限。
+//
+// 【为什么必须限制】备份包是用户上传的**不受信任输入**，一个 1 KiB 的压缩包可以
+// 解压出十几 GB，因此不能只信 manifest 声明的大小，必须按实际读到的字节数记账：
+//   - maxZipEntries 挡"条目数爆炸"（每条目都要建 Reader、做路径校验）；
+//   - maxZipUncompressed 挡 zip bomb（解压后总量）；
+//   - maxZipLedgerBytes 单独限制 ledger.json，避免一个超大 JSON 直接吃光内存；
+//   - maxZipAttachmentBytes 与附件模块的单张上限一致（2 MiB），超限的凭证跳过并计数。
+const (
+	maxZipEntries         = 5000
+	maxZipUncompressed    = 200 << 20 // 200 MiB
+	maxZipLedgerBytes     = 32 << 20  // 32 MiB
+	maxZipAttachmentBytes = maxAttachmentBytes
+)
+
+// zipEntryPrefixImages 是备份包里附件目录的前缀（backup.go: imagePath）。
+const zipEntryPrefixImages = "images/"
+
+var (
+	// errUnsafeZipEntry 表示条目名像路径穿越（zip slip），整个包一律拒收。
+	errUnsafeZipEntry = errors.New("备份包内存在非法路径条目")
+	// errZipTooLarge 表示解压后的字节数超出预算（zip bomb 防护）。
+	errZipTooLarge = errors.New("备份包解压后超出大小上限")
+)
+
+// zipBudget 是解压字节预算：每次读取都从预算里扣，扣不动就拒绝。
+//
+// 为什么不用 zip.File.UncompressedSize64 判断：那是打包方写进头部的值，
+// 可以被伪造；只有实际读出的字节数才是真的。
+type zipBudget struct{ left int64 }
+
+func (b *zipBudget) read(f *zip.File, limit int64) ([]byte, error) {
+	if b.left <= 0 {
+		return nil, errZipTooLarge
+	}
+	if limit > b.left {
+		limit = b.left
+	}
+	rc, err := f.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rc.Close() }()
+	// 多读 1 字节用于判定超限：既不把超大条目整块读进内存，也能区分"正好达上限"。
+	buf, err := io.ReadAll(io.LimitReader(rc, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(buf)) > limit {
+		return nil, errZipTooLarge
+	}
+	b.left -= int64(len(buf))
+	return buf, nil
+}
+
+// zipEntryName 校验并规范化 ZIP 条目名（zip slip 的第一道闸）。
+//
+// 判定顺序：先拒空名/空字节/反斜杠/绝对路径，再 path.Clean 后逐段检查 ".."，
+// 最后要求规范化结果不以 "../" 开头。任何一条不满足就拒收整个包——
+// 因为备份包由我们自己生成，出现这类条目只可能是构造出来的攻击载荷。
+func zipEntryName(raw string) (string, error) {
+	if raw == "" || strings.IndexByte(raw, 0) >= 0 {
+		return "", errUnsafeZipEntry
+	}
+	// 反斜杠在 Windows 解压器里是分隔符，是最常见的穿越载体，直接拒绝。
+	if strings.Contains(raw, `\`) {
+		return "", errUnsafeZipEntry
+	}
+	if strings.HasPrefix(raw, "/") || path.IsAbs(raw) {
+		return "", errUnsafeZipEntry
+	}
+	for _, seg := range strings.Split(raw, "/") {
+		if seg == ".." {
+			return "", errUnsafeZipEntry
+		}
+	}
+	clean := path.Clean(raw)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || strings.HasPrefix(clean, "/") {
+		return "", errUnsafeZipEntry
+	}
+	return clean, nil
+}
+
+// zipManifest 只取恢复所需的 manifest.json 字段（两种形态共用）。
+type zipManifest struct {
+	Schema       string          `json:"schema"`
+	Checksum     string          `json:"checksum"`
+	ChecksumAlgo string          `json:"checksumAlgo"`
+	Files        json.RawMessage `json:"files"`
+}
+
+// manifestFileNames 解析 manifest.files。
+//
+// 两种形态都要认：每日备份（backup.go）是字符串数组，
+// 导出包（export.go 的 exportManifest）是 {path,bytes,sha256} 对象数组。
+func manifestFileNames(raw []byte) ([]string, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, nil
+	}
+	var names []string
+	if err := json.Unmarshal(trimmed, &names); err == nil {
+		out := make([]string, 0, len(names))
+		for _, n := range names {
+			if n = strings.TrimSpace(n); n != "" {
+				out = append(out, n)
+			}
+		}
+		return out, nil
+	}
+	var items []struct {
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(trimmed, &items); err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		if it.Path = strings.TrimSpace(it.Path); it.Path != "" {
+			out = append(out, it.Path)
+		}
+	}
+	return out, nil
+}
+
+// ImportZIP 直接导入一份每日备份 ZIP（ledger-backup-YYYY-MM-DD.zip）。
+//
+// 设计目标就是用户那句"服务挂了，从 WebDAV 拖下备份文件直接导入就能用"：
+// 解包 → 取 ledger.json → 复用 Import 的全部合并/覆盖与回滚逻辑 →
+// 再把 images/<recordId>/<attachmentId>.<ext> 还原成附件记录并落盘。
+//
+// 顺序刻意是"先全量解析校验、再写库"：ZIP 结构、路径、体积、JSON 都在写库之前判定，
+// 任何一项不合格都返回 400 且一行数据都不写；写库之后的失败仍由 Import 的快照回滚兜住。
+func (s *ExportService) ImportZIP(ctx context.Context, userID string, body []byte, mode string, confirm bool) (*ImportResult, error) {
+	if userID == "" {
+		return nil, apierr.New(apierr.CodeUnauthorized, "未登录或令牌已过期")
+	}
+	mode, err := normalizeImportMode(mode)
+	if err != nil {
+		return nil, err
+	}
+	if mode == ImportModeOverwrite && !confirm {
+		return nil, apierr.New(apierr.CodeBadRequest, "覆盖导入会清空当前账本数据，请确认后重试（confirm=true）")
+	}
+	zr, err := zip.NewReader(bytes.NewReader(body), int64(len(body)))
+	if err != nil {
+		return nil, apierr.Wrap(apierr.CodeBadRequest, err, "备份压缩包无法解析，请确认上传的是 ledger-backup-YYYY-MM-DD.zip")
+	}
+	if len(zr.File) > maxZipEntries {
+		return nil, apierr.Newf(apierr.CodeBadRequest, "备份包含 %d 个条目，超过上限 %d", len(zr.File), maxZipEntries)
+	}
+
+	budget := &zipBudget{left: maxZipUncompressed}
+	files := map[string]*zip.File{} // 规范化条目名 -> 条目
+	declared := map[string]bool{}   // manifest.files 列出的条目
+	names := make([]string, 0, len(zr.File))
+	for _, f := range zr.File {
+		name, nameErr := zipEntryName(f.Name)
+		if nameErr != nil {
+			return nil, apierr.Newf(apierr.CodeBadRequest, "备份包内存在非法路径条目（疑似路径穿越）：%q", f.Name)
+		}
+		if f.FileInfo().IsDir() {
+			continue
+		}
+		if _, dup := files[name]; dup {
+			return nil, apierr.Newf(apierr.CodeBadRequest, "备份包内存在重复条目：%s", name)
+		}
+		files[name] = f
+		names = append(names, name)
+	}
+
+	// manifest.json 是"允许清单"：只有列在 files 里的条目才会被读取。
+	mf, ok := files["manifest.json"]
+	if !ok {
+		return nil, apierr.New(apierr.CodeBadRequest, "备份包缺少 manifest.json，无法确认内容清单")
+	}
+	manifestBytes, err := budget.read(mf, maxZipLedgerBytes)
+	if err != nil {
+		return nil, zipReadErr(err, "manifest.json")
+	}
+	var manifest zipManifest
+	if err := json.Unmarshal(manifestBytes, &manifest); err != nil {
+		return nil, apierr.Wrap(apierr.CodeBadRequest, err, "备份包的 manifest.json 无法解析")
+	}
+	listed, err := manifestFileNames(manifest.Files)
+	if err != nil {
+		return nil, apierr.Wrap(apierr.CodeBadRequest, err, "备份包的 manifest.json 中 files 字段无法解析")
+	}
+	for _, n := range listed {
+		if clean, nameErr := zipEntryName(n); nameErr == nil {
+			declared[clean] = true
+		}
+	}
+
+	lj, ok := files["ledger.json"]
+	if !ok {
+		return nil, apierr.New(apierr.CodeBadRequest,
+			"备份包不含 ledger.json（如果这是导出包，请改用 JSON 备份导入）")
+	}
+	if len(declared) > 0 && !declared["ledger.json"] {
+		return nil, apierr.New(apierr.CodeBadRequest, "manifest.json 未登记 ledger.json，备份包可能不完整")
+	}
+	ledgerBytes, err := budget.read(lj, maxZipLedgerBytes)
+	if err != nil {
+		return nil, zipReadErr(err, "ledger.json")
+	}
+
+	warnings := []string{}
+	// 校验和只覆盖 ledger.json；对不上说明文件被手工改过或传输损坏。
+	// 不直接拒收：结构校验已经能挡住非法数据，手工整理后再导入是合理需求，只提示。
+	if sum := strings.TrimSpace(manifest.Checksum); sum != "" {
+		algo := strings.ToLower(strings.TrimSpace(manifest.ChecksumAlgo))
+		if algo == "" || algo == "sha256" {
+			got := sha256.Sum256(ledgerBytes)
+			if !strings.EqualFold(hex.EncodeToString(got[:]), sum) {
+				warnings = append(warnings,
+					"ledger.json 的 sha256 与 manifest.json 不一致（文件可能被手工修改或传输损坏），已按结构校验继续")
+			}
+		}
+	}
+
+	var payload BackupPayload
+	if err := json.Unmarshal(ledgerBytes, &payload); err != nil {
+		return nil, apierr.Wrap(apierr.CodeBadRequest, err, "备份包的 ledger.json 无法解析")
+	}
+
+	known := make(map[string]bool, len(payload.Records))
+	for _, r := range payload.Records {
+		if id := strings.TrimSpace(r.ID); id != "" {
+			known[id] = true
+		}
+	}
+	images := imageEntries(names, declared)
+
+	// merge 模式下"本地已存在"的账单不会重写，其凭证也不重复恢复（否则会越导越多）。
+	// 必须在 Import 之前取快照：导入之后就分不清哪些是本地原有的了。
+	existing := map[string]bool{}
+	if mode == ImportModeMerge && len(images) > 0 {
+		if before, listErr := s.listRecords(ctx, userID, model.LedgerFilter{}, 0); listErr == nil {
+			for _, r := range before {
+				existing[r.ID] = true
+			}
+		}
+	}
+
+	// 账单与分类走与 JSON 导入完全相同的路径（校验、强制归属、覆盖回滚都在里面）。
+	res, err := s.Import(ctx, userID, ImportRequest{Mode: mode, Payload: &payload, Confirm: confirm})
+	if err != nil {
+		return nil, err
+	}
+	for _, w := range warnings {
+		res.addWarning(w)
+	}
+	for _, name := range names {
+		if !strings.HasPrefix(name, zipEntryPrefixImages) {
+			continue
+		}
+		if len(declared) > 0 && !declared[name] {
+			res.addWarning("备份包内存在 manifest.json 未登记的条目，已忽略：" + name)
+		}
+	}
+
+	// 附件必须等账单落库之后再还原：附件服务要用账单归属做越权校验。
+	// Import 里把附件一律记成"跳过"（JSON 的附件只有清单没有字节），这里重算。
+	res.AttachmentsSkipped = 0
+	s.restoreZipAttachments(ctx, userID, images, files, budget, known, existing, res)
+	if len(images) > 0 {
+		res.Note = fmt.Sprintf("凭证恢复 %d 个，跳过 %d 个", res.AttachmentsRestored, res.AttachmentsSkipped)
+	}
+	return res, nil
+}
+
+// imageEntries 取出"已登记、且位于 images/ 下"的条目名（排序保证结果稳定）。
+func imageEntries(names []string, declared map[string]bool) []string {
+	out := []string{}
+	for _, name := range names {
+		if !strings.HasPrefix(name, zipEntryPrefixImages) {
+			continue
+		}
+		if len(declared) > 0 && !declared[name] {
+			continue
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// attachmentRestorer 是"能写回凭证"的附件服务能力。
+//
+// 为什么用类型断言而不是加接口方法：*AttachmentService 已实现 Save
+// （落盘 + 嗅探真实类型 + 归属校验 + 写元数据 + 失败回收），它就是我们要复用的实现；
+// 而 ExportService 只依赖只读的 AttachmentSource，加一个字段就得改导出模块，
+// 断言让"只读替身"（测试、未接入附件模块的部署）照旧工作。
+type attachmentRestorer interface {
+	Save(ctx context.Context, userID, recordID string, data []byte) (*model.LedgerAttachment, error)
+}
+
+// restoreZipAttachments 把 images/ 下的条目写回附件存储并登记元数据。
+//
+// 归属规则：条目路径第二段是 recordId，必须能在本备份的 ledger.json 里找到对应账单，
+// 找不到的图片一律不落地（防止往他人或已删除的账单上挂凭证），只计数并提示。
+func (s *ExportService) restoreZipAttachments(ctx context.Context, userID string, images []string,
+	files map[string]*zip.File, budget *zipBudget, known, existing map[string]bool, res *ImportResult) {
+	if len(images) == 0 {
+		return
+	}
+	restorer, ok := s.attachments.(attachmentRestorer)
+	if !ok {
+		res.AttachmentsSkipped += len(images)
+		res.addWarning("当前部署未接入可写入的附件服务，凭证图片未恢复（账单数据已恢复）")
+		return
+	}
+	for _, name := range images {
+		segs := strings.Split(strings.TrimPrefix(name, zipEntryPrefixImages), "/")
+		if len(segs) != 2 {
+			res.AttachmentsSkipped++
+			res.addWarning("凭证条目路径不符合 images/<recordId>/<file> 规则，已跳过：" + name)
+			continue
+		}
+		recordID := segs[0]
+		if !known[recordID] {
+			res.AttachmentsSkipped++
+			res.addWarning("凭证无法归属到备份内的任何账单，已跳过：" + name)
+			continue
+		}
+		if existing[recordID] {
+			// merge：账单在本地已存在（用户可能已改过），凭证不重复恢复。
+			res.AttachmentsSkipped++
+			continue
+		}
+		f := files[name]
+		data, err := budget.read(f, maxZipAttachmentBytes)
+		if err != nil {
+			res.AttachmentsSkipped++
+			if errors.Is(err, errZipTooLarge) && budget.left <= 0 {
+				res.addWarning("备份包解压后总量超出上限，剩余凭证未恢复")
+				return
+			}
+			res.addWarning("单张凭证超过上限或无法读取，已跳过：" + name)
+			continue
+		}
+		if _, err := restorer.Save(ctx, userID, recordID, data); err != nil {
+			res.AttachmentsSkipped++
+			res.addWarning(fmtErr("恢复凭证失败", name, err))
+			continue
+		}
+		res.AttachmentsRestored++
+	}
+}
+
+// zipReadErr 把解压期错误翻译成对外可读的 400（结构错误一律是用户可修正的输入问题）。
+func zipReadErr(err error, name string) error {
+	if errors.Is(err, errZipTooLarge) {
+		return apierr.Newf(apierr.CodeBadRequest, "备份包解压后超出大小上限（%d 字节），已拒绝导入", int64(maxZipUncompressed))
+	}
+	return apierr.Wrap(apierr.CodeBadRequest, err, "读取备份包内的 "+name+" 失败")
 }

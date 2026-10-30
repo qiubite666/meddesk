@@ -97,9 +97,15 @@ func New(d Deps) (*gin.Engine, error) {
 	r.Use(middleware.Logger(log))
 	r.Use(middleware.SecurityHeaders())
 	r.Use(middleware.CORS(cfg.CORS.AllowedOrigins))
-	// 请求体上限按路径区分：WebDAV 走的是网盘文件，远大于业务附件上限（默认 8 MiB）。
+	// 请求体上限按路径区分：WebDAV 与记账本备份导入走的是文件/压缩包，
+	// 远大于业务附件上限（默认 8 MiB）。
 	r.Use(middleware.BodyLimitByPath(cfg.Upload.MaxBytes, []middleware.PathLimit{
 		{Prefix: "/api/v1/webdav/", Bytes: webdavUploadLimit},
+		// 记账本备份 ZIP 直接导入：包内是 ledger.json + 照片，
+		// 照片本身已是压缩格式、再打 ZIP 几乎不缩小，体积与 webdav 同量级。
+		// 不给单独上限就会被全局 8 MiB 掐死——而这条路径正是"服务异常时从备份救数据"
+		// 的最后一根稻草，413 等于救援通道失效。
+		{Prefix: "/api/v1/ledger/import", Bytes: ledgerImportLimit},
 	}))
 
 	// 存活与就绪探针（不鉴权、不计入业务限流）。
@@ -237,6 +243,12 @@ func New(d Deps) (*gin.Engine, error) {
 // webdavUploadLimit 是 WebDAV 上传的请求体上限（200 MiB），与 internal/webdav 的
 // 下载上限保持一致：网盘单文件通常远大于业务附件，沿用 8 MiB 会误伤正常上传。
 const webdavUploadLimit = 200 << 20
+
+// ledgerImportLimit 是记账本备份 ZIP 直接导入的请求体上限（200 MiB），
+// 与 webdavUploadLimit 取齐：两者承载的都是"文件级"数据，而非普通 JSON。
+// 说明：该上限对应的是**压缩包**大小；解压后的总字节数由导入实现另行限制
+// （200 MiB / 5000 条目），两层限制共同防 zip bomb。
+const ledgerImportLimit = 200 << 20
 
 // probe 把 error 转成健康状态字符串。
 func probe(err error) string { return probeBool(err == nil) }

@@ -528,7 +528,14 @@
       line: { state: 'loading', days: [], meta: '', error: '' },
       bar: { state: 'loading', income: [], expense: [], meta: '', error: '' }
     },
-    reimb: { state: 'loading', items: [], total: 0, pendingTotal: 0, selected: {}, error: '' },
+    // 报销视图：默认「全部状态 + 最近 30 天」，保证已报销记录一进页面就可见，列表不会因为标记而清空。
+    reimb: {
+      state: 'loading', items: [], total: 0, page: 1, size: 50,
+      pendingTotal: 0, doneTotal: 0, counts: null, range: { from: '', to: '' },
+      selected: {}, error: ''
+    },
+    rbFilter: { status: 'all', range: 'd30', from: '', to: '' },
+    exp: { preset: 'all', from: '', to: '' },
     backup: { state: 'loading', status: null, error: '' },
     formFiles: [],
     formAttachments: []
@@ -557,6 +564,31 @@
       to: range.to,
       reimbStatus: S.filters.reimbStatus
     };
+  }
+
+  /** 今天往前第 n 天（本地时区，n=0 即今天）。 */
+  function daysAgo(n) {
+    var d = new Date();
+    d.setDate(d.getDate() - (Number(n) || 0));
+    return dateStr(d);
+  }
+
+  /**
+   * 报销视图的时间区间：d30（最近 30 天，含今天）/ month / last / custom。
+   * 与「工作台」的 month/last/custom 语义一致，复用 monthRange + shiftMonthKey。
+   */
+  function reimbRange() {
+    var f = S.rbFilter;
+    if (f.range === 'custom') return { from: f.from, to: f.to };
+    if (f.range === 'month') return monthRange(S.monthKey);
+    if (f.range === 'last') return monthRange(shiftMonthKey(S.monthKey, -1));
+    return { from: daysAgo(29), to: daysAgo(0) };
+  }
+
+  /** 报销状态筛选值 → 接口 status 参数（all 表示不限）。 */
+  function rbStatusParam() {
+    var v = S.rbFilter.status;
+    return v === 'pending' || v === 'done' || v === 'none' ? v : 'all';
   }
 
   /* ============================ 6. 数据加载 ============================ */
@@ -720,19 +752,48 @@
     return isNaN(ms) ? 0 : ms;
   }
 
-  function loadReimbursements() {
-    S.reimb.state = 'loading';
-    S.reimb.error = '';
-    S.reimb.selected = {};
+  /**
+   * 报销列表：默认 status=all（含已报销），因此「标记已报销」后记录仍留在列表里，只是徽标变了。
+   * append=true 时按 page 追加下一页（勾选状态保留）。
+   */
+  function loadReimbursements(append) {
+    var page = append ? (S.reimb.page || 1) + 1 : 1;
+    var range = reimbRange();
+    if (!append) {
+      S.reimb.state = 'loading';
+      S.reimb.error = '';
+      S.reimb.page = 1;
+    }
     paintReimb();
-    // 报销视图不受月份/时间筛选限制：只按 type=expense（后端已默认只返回待报销）
-    return ledgerApi('/ledger/reimbursements').then(function (res) {
-      S.reimb.items = (res && res.items) || [];
-      S.reimb.total = Number(res && res.total) || S.reimb.items.length;
-      S.reimb.pendingTotal = centsOf(res && res.pendingTotal != null ? res.pendingTotal : sumCents(S.reimb.items));
+    var query = {
+      status: rbStatusParam(),
+      from: range.from,
+      to: range.to,
+      page: page,
+      size: S.reimb.size
+    };
+    return ledgerApi('/ledger/reimbursements' + qs(query)).then(function (res) {
+      var list = (res && res.items) || [];
+      S.reimb.items = append ? S.reimb.items.concat(list) : list;
+      S.reimb.page = Number(res && res.page) || page;
+      S.reimb.total = Number(res && res.total);
+      if (isNaN(S.reimb.total)) S.reimb.total = S.reimb.items.length;
+      var sum = (res && res.summary) || {};
+      S.reimb.counts = sum.counts || null;
+      S.reimb.doneTotal = centsOf(sum.doneTotal);
+      S.reimb.pendingTotal = res && res.pendingTotal != null
+        ? centsOf(res.pendingTotal)
+        : centsOf(sum.pendingTotal);
+      S.reimb.range = (res && res.range && res.range.from) ? res.range : range;
+      // 只保留仍在当前列表里的勾选，避免刷新后勾选错位（不整体清空，列表因此不会「塌陷」）
+      var alive = {};
+      S.reimb.items.forEach(function (item) { alive[item.id] = true; });
+      Object.keys(S.reimb.selected).forEach(function (id) {
+        if (!alive[id]) delete S.reimb.selected[id];
+      });
       S.reimb.state = 'ready';
     }).catch(function (error) {
-      S.reimb.items = [];
+      if (!append) S.reimb.items = [];
       S.reimb.state = 'error';
       S.reimb.error = msgOf(error);
     }).then(function () { paintReimb(); });
@@ -805,10 +866,12 @@
       body.innerHTML =
         '<section class="card">' +
         '<div class="ldg-panel__head"><span class="ldg-panel__title">报销管理</span>' +
-        '<span class="ldg-panel__meta">不受月份筛选限制</span></div>' +
+        '<span class="ldg-panel__meta" id="ldg-rb-range"></span></div>' +
+        '<div id="ldg-rb-filters"></div>' +
         '<div id="ldg-rb-sum"></div>' +
         '<div id="ldg-rb-list"></div>' +
         '</section>';
+      paintReimbFilters();
       if (S.reimb.state === 'loading' && !S.reimb.items.length) loadReimbursements(); else paintReimb();
       return;
     }
@@ -1025,57 +1088,131 @@
 
   /* ---------- 报销管理 ---------- */
 
+  // 状态筛选四档：全部 / 待报销 / 已报销 / 不涉及。默认 all，已报销记录才不会「凭空消失」。
+  var RB_STATUS_OPTIONS = [['all', '全部'], ['pending', '待报销'], ['done', '已报销'], ['none', '不涉及']];
+  var RB_RANGE_OPTIONS = [['d30', '最近 30 天'], ['month', '本月'], ['last', '上月'], ['custom', '自定义']];
+
   function selectedIds() {
     return Object.keys(S.reimb.selected).filter(function (id) { return S.reimb.selected[id]; });
+  }
+
+  /** 报销状态徽标：三种状态都渲染，已报销用 ok 色，不再是「有就显示、没有就消失」。 */
+  function reimbBadge(status) {
+    var st = status || 'none';
+    var tone = REIMB_TONE[st] || '';
+    return '<span class="badge' + (tone ? ' badge--' + tone : '') + '">' + esc(REIMB_TEXT[st] || st) + '</span>';
+  }
+
+  function paintReimbFilters() {
+    var host = $('ldg-rb-filters');
+    if (!host) return;
+    var f = S.rbFilter;
+    host.innerHTML =
+      '<div class="ldg-frow" style="margin-bottom:8px">' +
+      '<span class="ldg-flabel">状态</span>' +
+      '<select class="select" data-act="rb-status" aria-label="报销状态筛选" style="flex:0 1 180px">' +
+      RB_STATUS_OPTIONS.map(function (opt) {
+        return '<option value="' + opt[0] + '"' + (f.status === opt[0] ? ' selected' : '') + '>' + esc(opt[1]) + '</option>';
+      }).join('') +
+      '</select></div>' +
+      '<div class="ldg-frow">' +
+      '<span class="ldg-flabel">时间</span><div class="ldg-chips">' +
+      RB_RANGE_OPTIONS.map(function (opt) {
+        return '<button class="chip' + (f.range === opt[0] ? ' chip--active' : '') + '" type="button" data-act="rb-range" data-value="' + opt[0] + '">' + esc(opt[1]) + '</button>';
+      }).join('') +
+      '</div></div>' +
+      (f.range === 'custom'
+        ? '<div class="ldg-frow" style="margin-top:8px">' +
+        '<input class="input" type="date" id="ldg-rb-from" value="' + esc(f.from) + '" aria-label="开始日期" style="flex:1 1 140px">' +
+        '<input class="input" type="date" id="ldg-rb-to" value="' + esc(f.to) + '" aria-label="结束日期" style="flex:1 1 140px">' +
+        '<button class="btn btn-primary" type="button" data-act="rb-custom" style="min-height:44px">应用</button>' +
+        '</div>'
+        : '');
   }
 
   function paintReimbSum() {
     var host = $('ldg-rb-sum');
     if (!host) return;
     var ids = selectedIds();
-    var items = S.reimb.items;
+    var byId = {};
+    S.reimb.items.forEach(function (item) { byId[item.id] = item; });
     var selAmount = 0;
+    var canDone = false;
+    var canPending = false;
     ids.forEach(function (id) {
-      var hit = S.reimb.items.filter(function (item) { return item.id === id; })[0];
-      if (hit) selAmount += centsOf(hit);
+      var hit = byId[id];
+      if (!hit) return;
+      selAmount += centsOf(hit);
+      var st = hit.reimbursementStatus || 'none';
+      if (st !== 'done') canDone = true;
+      if (st !== 'pending') canPending = true;
     });
-    var allChecked = items.length > 0 && ids.length === items.length;
+    var allChecked = S.reimb.items.length > 0 && ids.length === S.reimb.items.length;
+    var counts = S.reimb.counts || {};
     host.innerHTML =
       '<div class="ldg-sumline">' +
-      '<span>待报销总金额 <b style="color:var(--warn)">' + esc(money(S.reimb.pendingTotal)) + '</b></span>' +
-      '<span>已选金额 <b id="ldg-rb-sel-amount" style="color:var(--brand)">' + esc(money(selAmount)) + '</b></span>' +
-      '<span>已选条数 <b id="ldg-rb-sel-count">' + ids.length + '</b></span>' +
+      '<span>待报销 <b style="color:var(--warn)">' + esc(money(S.reimb.pendingTotal)) + '</b>' +
+      (counts.pending != null ? ' · ' + Number(counts.pending) + ' 条' : '') + '</span>' +
+      '<span>已报销 <b style="color:var(--ok)">' + esc(money(S.reimb.doneTotal)) + '</b>' +
+      (counts.done != null ? ' · ' + Number(counts.done) + ' 条' : '') + '</span>' +
+      '<span>已选 <b id="ldg-rb-sel-amount" style="color:var(--brand)">' + esc(money(selAmount)) + '</b>' +
+      ' · <b id="ldg-rb-sel-count">' + ids.length + '</b> 条</span>' +
       '</div>' +
       '<div class="ldg-strip">' +
       '<label class="ldg-check"><input type="checkbox" data-act="rb-all"' + (allChecked ? ' checked' : '') + '><span>全选</span></label>' +
-      '<button class="btn btn-primary" type="button" data-act="rb-mark" data-status="done"' + (ids.length ? '' : ' disabled') + '>标记已报销</button>' +
-      '<button class="btn btn-ghost" type="button" data-act="rb-mark" data-status="pending"' + (ids.length ? '' : ' disabled') + '>退回待报销</button>' +
+      '<button class="btn btn-primary" type="button" data-act="rb-mark" data-status="done"' + (canDone ? '' : ' disabled') + '>标记已报销</button>' +
+      '<button class="btn btn-ghost" type="button" data-act="rb-mark" data-status="pending"' + (canPending ? '' : ' disabled') + '>退回待报销</button>' +
       '<button class="btn btn-ghost" type="button" data-act="rb-export"' + (ids.length ? '' : ' disabled') + '>导出勾选项</button>' +
+      '</div>';
+  }
+
+  function reimbRow(rec) {
+    var st = rec.reimbursementStatus || 'none';
+    var next = st === 'done'
+      ? { status: 'pending', label: '退回待报销' }
+      : { status: 'done', label: '标记已报销' };
+    return '<div class="ldg-rec" data-id="' + esc(rec.id) + '">' +
+      '<label class="ldg-check" style="flex:0 0 auto"><input type="checkbox" data-act="rb-check" data-id="' + esc(rec.id) + '"' +
+      (S.reimb.selected[rec.id] ? ' checked' : '') + ' aria-label="选择"></label>' +
+      '<div class="ldg-rec__body">' +
+      '<div class="ldg-rec__title">' + esc(rec.note || rec.categoryName || '支出') + '</div>' +
+      '<div class="ldg-rec__meta"><span>' + esc(fmtOccurred(rec)) + '</span>' +
+      '<span class="badge">' + esc(rec.categoryName || '未分类') + '</span>' +
+      reimbBadge(st) +
+      '</div></div>' +
+      '<div class="ldg-rec__amt ldg-amt--out">-' + money(centsOf(rec)) + '</div>' +
+      '<button class="btn btn-ghost" type="button" data-act="rb-one" data-id="' + esc(rec.id) +
+      '" data-status="' + next.status + '" style="min-height:36px;flex:0 0 auto">' + next.label + '</button>' +
       '</div>';
   }
 
   function paintReimb() {
     if (!mountedRoot()) return;
     if (S.tab !== 'reimb') return;
+    paintReimbFilters();
     paintReimbSum();
+    var rangeHost = $('ldg-rb-range');
+    if (rangeHost) {
+      var r = S.reimb.range || {};
+      rangeHost.textContent = (r.from || '不限') + ' ~ ' + (r.to || '不限');
+    }
     var host = $('ldg-rb-list');
     if (!host) return;
-    if (S.reimb.state === 'loading') { host.innerHTML = loadingBox(); return; }
-    if (S.reimb.state === 'error') { host.innerHTML = errorBox(S.reimb.error, 'rb-retry'); return; }
-    if (!S.reimb.items.length) { host.innerHTML = emptyBox(); return; }
-    host.innerHTML = S.reimb.items.map(function (rec) {
-      return '<div class="ldg-rec">' +
-        '<label class="ldg-check" style="flex:0 0 auto"><input type="checkbox" data-act="rb-check" data-id="' + esc(rec.id) + '"' +
-        (S.reimb.selected[rec.id] ? ' checked' : '') + ' aria-label="选择"></label>' +
-        '<div class="ldg-rec__body">' +
-        '<div class="ldg-rec__title">' + esc(rec.note || rec.categoryName || '支出') + '</div>' +
-        '<div class="ldg-rec__meta"><span>' + esc(fmtOccurred(rec)) + '</span>' +
-        '<span class="badge">' + esc(rec.categoryName || '未分类') + '</span>' +
-        '<span class="badge badge--' + (REIMB_TONE[rec.reimbursementStatus] || '') + '">' + esc(REIMB_TEXT[rec.reimbursementStatus] || rec.reimbursementStatus) + '</span>' +
-        '</div></div>' +
-        '<div class="ldg-rec__amt ldg-amt--out">-' + money(centsOf(rec)) + '</div>' +
-        '</div>';
-    }).join('');
+    // 刷新期间保留上一版列表，避免每次标记都闪一次骨架屏（观感上像「列表被清空」）
+    if (S.reimb.state === 'loading' && !S.reimb.items.length) { host.innerHTML = loadingBox(); return; }
+    if (S.reimb.state === 'error' && !S.reimb.items.length) { host.innerHTML = errorBox(S.reimb.error, 'rb-retry'); return; }
+    if (!S.reimb.items.length) {
+      host.innerHTML = '<div class="ldg-placeholder">' + iconSvg('wallet', 30) +
+        '<span>当前筛选范围内没有报销记录</span></div>';
+      return;
+    }
+    var stale = (S.reimb.state === 'error' && S.reimb.error)
+      ? '<p class="muted" style="font-size:12px;color:var(--danger);margin:0 0 8px">刷新失败：' + esc(S.reimb.error) + '（以下为上次结果）</p>'
+      : '';
+    host.innerHTML = stale + '<div>' + S.reimb.items.map(reimbRow).join('') + '</div>' +
+      (S.reimb.items.length < S.reimb.total
+        ? '<button class="btn btn-ghost" type="button" data-act="rb-more" style="min-height:44px;margin-top:10px;width:100%">加载更多（共 ' + Number(S.reimb.total) + ' 条）</button>'
+        : '');
   }
 
   /* ---------- 导出与备份 ---------- */
@@ -1083,8 +1220,23 @@
   function paintExport() {
     var host = $('ldg-exp');
     if (!host) return;
+    var e = S.exp;
+    var presets = [['all', '全部'], ['thisMonth', '本月'], ['lastMonth', '上月'], ['custom', '自定义']];
     host.innerHTML =
-      '<div class="ldg-strip">' +
+      '<div class="field"><span class="ldg-flabel">导出时间范围</span>' +
+      '<div class="ldg-chips">' +
+      presets.map(function (p) {
+        return '<button class="chip' + (e.preset === p[0] ? ' chip--active' : '') + '" type="button" data-act="exp-range" data-value="' + p[0] + '">' + esc(p[1]) + '</button>';
+      }).join('') +
+      '</div>' +
+      (e.preset === 'custom'
+        ? '<div class="ldg-frow" style="margin-top:8px">' +
+        '<input class="input" type="date" id="ldg-exp-from" value="' + esc(e.from) + '" aria-label="导出开始日期" style="flex:1 1 140px">' +
+        '<input class="input" type="date" id="ldg-exp-to" value="' + esc(e.to) + '" aria-label="导出结束日期" style="flex:1 1 140px">' +
+        '</div>'
+        : '') +
+      '</div>' +
+      '<div class="ldg-strip" style="margin-top:10px">' +
       '<button class="btn btn-primary" type="button" data-act="exp-html">HTML 报告</button>' +
       '<button class="btn btn-ghost" type="button" data-act="exp-zip">ZIP 数据包</button>' +
       '<button class="btn btn-ghost" type="button" data-act="exp-json">JSON 备份下载</button>' +
@@ -1099,9 +1251,32 @@
       '「覆盖导入」会先自动备份现有数据再整体替换。</p>';
   }
 
+  /** 导出区间的可读文案（与请求体里的 preset 保持一致）。 */
   function describeRange() {
-    var r = activeRange();
-    return (r.from || '全部') + ' ~ ' + (r.to || '全部') + (S.filters.type ? ' · ' + TYPE_TEXT[S.filters.type] : '');
+    var e = S.exp;
+    if (e.preset === 'thisMonth') { var m = monthRange(S.monthKey); return '本月 ' + m.from + ' ~ ' + m.to; }
+    if (e.preset === 'lastMonth') { var l = monthRange(shiftMonthKey(S.monthKey, -1)); return '上月 ' + l.from + ' ~ ' + l.to; }
+    if (e.preset === 'custom') return (e.from || '未选') + ' ~ ' + (e.to || '未选');
+    return '全部时间';
+  }
+
+  /** 组 ExportFilter 请求体；自定义区间非法时返回 null（已 toast），调用方不再发请求。 */
+  function exportFilter() {
+    var e = S.exp;
+    var preset = e.preset || 'all';
+    if (preset === 'custom') {
+      // 直接以输入框为准：用户填完日期就该能导，不必再点「应用」
+      var fromNode = $('ldg-exp-from');
+      var toNode = $('ldg-exp-to');
+      var from = String(fromNode ? fromNode.value : (e.from || ''));
+      var to = String(toNode ? toNode.value : (e.to || ''));
+      e.from = from;
+      e.to = to;
+      if (!from || !to) { toast('请选择完整的导出开始与结束日期', 'warn'); return null; }
+      if (from > to) { toast('开始日期不能晚于结束日期', 'warn'); return null; }
+      return { preset: 'custom', from: from, to: to };
+    }
+    return { preset: preset };
   }
 
   function paintBackup() {
@@ -1225,12 +1400,56 @@
       case 'rb-retry':
         loadReimbursements();
         return;
+      case 'rb-more':
+        loadReimbursements(true);
+        return;
+      case 'rb-range': {
+        var prevFrom = $('ldg-rb-from'), prevTo = $('ldg-rb-to');
+        if (prevFrom || prevTo) {
+          S.rbFilter.from = prevFrom ? prevFrom.value : S.rbFilter.from;
+          S.rbFilter.to = prevTo ? prevTo.value : S.rbFilter.to;
+        }
+        S.rbFilter.range = node.getAttribute('data-value') || 'd30';
+        paintReimbFilters();
+        if (S.rbFilter.range === 'custom') {
+          // 自定义：等用户点「应用」再查，避免半截日期就去请求
+          toast('请选择起止日期后点「应用」', 'info');
+          return;
+        }
+        loadReimbursements();
+        return;
+      }
+      case 'rb-custom': {
+        var rbFrom = $('ldg-rb-from');
+        var rbTo = $('ldg-rb-to');
+        S.rbFilter.from = rbFrom ? rbFrom.value : '';
+        S.rbFilter.to = rbTo ? rbTo.value : '';
+        if (!S.rbFilter.from || !S.rbFilter.to) { toast('请选择完整的开始与结束日期', 'warn'); return; }
+        if (S.rbFilter.from > S.rbFilter.to) { toast('开始日期不能晚于结束日期', 'warn'); return; }
+        loadReimbursements();
+        return;
+      }
       case 'rb-mark':
         markReimbursements(node.getAttribute('data-status') || 'done');
+        return;
+      case 'rb-one':
+        markReimbursements(node.getAttribute('data-status') || 'pending', [node.getAttribute('data-id')]);
         return;
       case 'rb-export':
         exportSelectedReimbursements();
         return;
+      case 'exp-range': {
+        var preset = node.getAttribute('data-value') || 'all';
+        var efCur = $('ldg-exp-from'), etCur = $('ldg-exp-to');
+        if (efCur || etCur) {
+          // 切档前先记住已填的日期，避免在档位间来回切时丢失输入
+          S.exp.from = efCur ? efCur.value : S.exp.from;
+          S.exp.to = etCur ? etCur.value : S.exp.to;
+        }
+        S.exp.preset = preset;
+        paintExport();
+        return;
+      }
       case 'bk-refresh':
         loadBackup();
         return;
@@ -1280,6 +1499,11 @@
     if (act === 'sel-reimb') {
       S.filters.reimbStatus = node.value || '';
       loadRecords(true).then(loadBar);
+      return;
+    }
+    if (act === 'rb-status') {
+      S.rbFilter.status = node.value || 'all';
+      loadReimbursements();
       return;
     }
     if (act === 'rb-all') {
@@ -1796,15 +2020,21 @@
 
   /* ============================ 11. 报销批量操作 ============================ */
 
-  function markReimbursements(status) {
-    var ids = selectedIds();
-    if (!ids.length) { toast('请先勾选账单', 'warn'); return; }
-    runTask(status === 'done' ? '标记已报销' : '退回待报销', function () {
-      return ledgerApi('/ledger/reimbursements/mark', { method: 'POST', body: { ids: ids, status: status } })
+  /**
+   * 批量/单条改报销状态。ids 省略时取勾选项。
+   * 刷新后沿用当前筛选（默认 all），该记录仍在列表里，只是徽标变了 —— 列表不会「清空」。
+   */
+  function markReimbursements(status, ids) {
+    var targets = (ids && ids.length ? ids : selectedIds()).filter(function (id) { return !!id; });
+    if (!targets.length) { toast('请先勾选账单', 'warn'); return Promise.resolve(); }
+    var label = status === 'done' ? '标记已报销' : (status === 'none' ? '标记不涉及' : '退回待报销');
+    return runTask(label, function () {
+      return ledgerApi('/ledger/reimbursements/mark', { method: 'POST', body: { ids: targets, status: status } })
         .then(function (res) {
           return loadReimbursements().then(function () {
             reloadAll();
-            return (res && res.message) || ('已更新 ' + ids.length + ' 条（导出/标记不会改变其它数据）');
+            var n = res && typeof res.updated === 'number' ? res.updated : targets.length;
+            return (res && res.message) || (label + '：已更新 ' + n + ' 条');
           });
         });
     });
@@ -1835,15 +2065,24 @@
     });
   }
 
+  /**
+   * 下载导出文件。时间范围走 ExportFilter：
+   *   HTML/ZIP 是 POST，范围放请求体；JSON 是 GET，范围放查询串（后端 bindExportFilter 两条路都支持）。
+   */
   function downloadExport(path, ext, baseName) {
-    var q = baseQuery();
-    if (ext === 'json') q = { from: q.from, to: q.to };
+    var filter = exportFilter();
+    if (!filter) return;
     var opts = { raw: true };
-    if (ext !== 'json') opts.method = 'POST';
+    if (ext === 'json') {
+      path += qs({ preset: filter.preset, from: filter.from, to: filter.to });
+    } else {
+      opts.method = 'POST';
+      opts.body = filter;
+    }
     runTask('导出', function () {
-      return ledgerApi(path + qs(q), opts).then(function (res) {
+      return ledgerApi(path, opts).then(function (res) {
         return saveResponse(res, baseName, ext);
-      }).then(function () { return '导出成功'; });
+      }).then(function () { return '导出成功（' + describeRange() + '）'; });
     });
   }
 

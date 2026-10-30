@@ -9,7 +9,10 @@ package ledger
 // 而不是给一个空壳文件：空文件会被误当成"导出成功但数据丢了"。
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -169,9 +172,49 @@ func (h *exportHandler) exportJSON(c *gin.Context) {
 
 // ------------------------------------------------------------------ 导入
 
+// zipMagic 是 ZIP 本地文件头（PK\x03\x04）：用它识别"直接拖进来的备份压缩包"，
+// 比只信 Content-Type 可靠——浏览器/系统给 .zip 的 Content-Type 五花八门，
+// 而 curl -T 之类往往是 application/octet-stream。
+var zipMagic = []byte{'P', 'K', 0x03, 0x04}
+
+// importData 同时接受两种请求体：
+//  1. JSON：{mode, payload, confirm}——行为与历史版本完全一致；
+//  2. 每日备份 ZIP（ledger-backup-YYYY-MM-DD.zip）：模式从查询串取
+//     ?mode=merge|overwrite&confirm=true，附件（images/）一并还原。
+//
+// 为什么要在同一个入口做：用户的真实场景是"服务挂了，从 WebDAV 把备份文件拖回来导入"，
+// 多一个专用路由只会让前端与文档多一处不一致。识别只看 body 字节的魔数，
+// 不依赖文件扩展名（WebDAV 客户端下载后可能被改名）。
 func (h *exportHandler) importData(c *gin.Context) {
+	var body []byte
+	if c.Request.Body != nil {
+		var err error
+		body, err = io.ReadAll(c.Request.Body)
+		if err != nil {
+			// 读取阶段才超限（chunked / 未声明长度）时给出 413 而不是含糊的 400。
+			var mb *http.MaxBytesError
+			if errors.As(err, &mb) {
+				writeErr(c, apierr.New(apierr.CodePayloadTooLarge, "备份文件过大，超出请求体上限"))
+				return
+			}
+			writeErr(c, apierr.Wrap(apierr.CodeBadRequest, err, "读取请求体失败"))
+			return
+		}
+	}
+
+	if isZipUpload(c, body) {
+		res, err := h.svc.ImportZIP(c.Request.Context(), userIDOf(c), body,
+			c.Query("mode"), importConfirm(c))
+		if err != nil {
+			writeErr(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, res)
+		return
+	}
+
 	var req ImportRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeErr(c, apierr.Wrap(apierr.CodeBadRequest, err, "请求参数有误"))
 		return
 	}
@@ -181,6 +224,33 @@ func (h *exportHandler) importData(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, res)
+}
+
+// isZipUpload 判断请求体是不是备份 ZIP。
+//
+// 判定优先级：ZIP 魔数 > JSON 起始字符 > Content-Type 声明。
+// 先看字节是因为它无法被伪造/误标；Content-Type 只作为"body 既不像 ZIP
+// 也不像 JSON"时的兜底（此时仍交给 ZIP 解析器，由它返回可读的 400）。
+func isZipUpload(c *gin.Context, body []byte) bool {
+	if bytes.HasPrefix(body, zipMagic) {
+		return true
+	}
+	trimmed := bytes.TrimLeft(body, " \t\r\n")
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		return false
+	}
+	ct := strings.ToLower(strings.TrimSpace(c.GetHeader("Content-Type")))
+	return strings.Contains(ct, "zip") || strings.Contains(ct, "octet-stream")
+}
+
+// importConfirm 读取覆盖导入的确认标记（ZIP 请求没有 JSON body，只能走查询串）。
+func importConfirm(c *gin.Context) bool {
+	switch strings.ToLower(strings.TrimSpace(c.Query("confirm"))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
 }
 
 // ------------------------------------------------------------------ 工具
