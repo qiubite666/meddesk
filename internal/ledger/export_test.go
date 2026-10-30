@@ -74,19 +74,28 @@ func newTestEnv(t *testing.T, withAttachments bool) (*fake.Repos, *ExportService
 	for _, c := range cats {
 		catByName[c.Kind+"/"+c.Name] = c.ID
 	}
+	// 种子账单一律落在「当前自然月」内：thisMonth / lastMonth 这类 preset 以真实
+	// 当前时间为准（svc.now 只影响导出时间与文件名），写死月份会让跨月后用例必然
+	// 失效——2026-10 的种子在 11 月就会让「本月」命中 0 条。取当月 3 日 / 5 日：
+	// 任何月份都存在，且恒在本月区间内，同时保证上月一定无数据。
+	now := time.Now().In(shanghai)
+	inThisMonth := func(day, hour, minute int) time.Time {
+		return time.Date(now.Year(), now.Month(), day, hour, minute, 0, 0, shanghai)
+	}
+	txA, txB := inThisMonth(3, 9, 0), inThisMonth(5, 12, 30)
 	seed := []model.LedgerRecord{
 		{
 			ID: "11111111-1111-1111-1111-111111111111", UserID: testUser, Type: model.LedgerTypeIncome,
 			Amount: "1000.00", AmountCents: 100000, Currency: "CNY",
 			CategoryID: catByName["income/工资"], CategoryName: "工资",
-			TransactionAt: time.Date(2026, 10, 3, 9, 0, 0, 0, shanghai), OccurredOn: "2026-10-03",
-			Note: "十月工资", ReimbursementStatus: model.LedgerReimbNone,
+			TransactionAt: txA, OccurredOn: txA.Format("2006-01-02"),
+			Note: "本月工资", ReimbursementStatus: model.LedgerReimbNone,
 		},
 		{
 			ID: "22222222-2222-2222-2222-222222222222", UserID: testUser, Type: model.LedgerTypeExpense,
 			Amount: "12.34", AmountCents: 1234, Currency: "CNY",
 			CategoryID: catByName["expense/餐饮"], CategoryName: "餐饮",
-			TransactionAt: time.Date(2026, 10, 5, 12, 30, 0, 0, shanghai), OccurredOn: "2026-10-05",
+			TransactionAt: txB, OccurredOn: txB.Format("2006-01-02"),
 			Note: "<script>alert('xss')</script>", ReimbursementStatus: model.LedgerReimbPending,
 			AttachmentCount: 1,
 		},
@@ -660,10 +669,57 @@ func TestHTTPEmptyResultReturns400(t *testing.T) {
 	}
 }
 
+// TestLastMonthRangeMonthEndOverflow 是 A-01 的回归测试：覆盖「减去一个月后该日期
+// 不存在」的月末溢出。全部用固定日期断言，不读真实时钟，任何一天跑结果都一致。
+func TestLastMonthRangeMonthEndOverflow(t *testing.T) {
+	cases := []struct {
+		name    string
+		now     time.Time
+		wantKey string // 上一个月 YYYY-MM
+		wantFrom,
+		wantTo string
+	}{
+		{"10-31 → 09（溢出：9 月无 31 日）", time.Date(2026, 10, 31, 23, 59, 0, 0, shanghai), "2026-09", "2026-09-01", "2026-09-30"},
+		{"10-30 → 09（正常）", time.Date(2026, 10, 30, 10, 0, 0, 0, shanghai), "2026-09", "2026-09-01", "2026-09-30"},
+		{"03-31 → 02（溢出：2 月无 31 日）", time.Date(2026, 3, 31, 8, 0, 0, 0, shanghai), "2026-02", "2026-02-01", "2026-02-28"},
+		{"03-30 → 02（溢出：2 月无 30 日）", time.Date(2026, 3, 30, 8, 0, 0, 0, shanghai), "2026-02", "2026-02-01", "2026-02-28"},
+		{"03-01 → 02（正常）", time.Date(2026, 3, 1, 8, 0, 0, 0, shanghai), "2026-02", "2026-02-01", "2026-02-28"},
+		{"05-31 → 04（溢出：4 月无 31 日）", time.Date(2026, 5, 31, 8, 0, 0, 0, shanghai), "2026-04", "2026-04-01", "2026-04-30"},
+		{"07-31 → 06（溢出：6 月无 31 日）", time.Date(2026, 7, 31, 8, 0, 0, 0, shanghai), "2026-06", "2026-06-01", "2026-06-30"},
+		{"01-31 → 去年 12（跨年）", time.Date(2026, 1, 31, 8, 0, 0, 0, shanghai), "2025-12", "2025-12-01", "2025-12-31"},
+		{"01-01 → 去年 12（跨年）", time.Date(2026, 1, 1, 0, 0, 0, 0, shanghai), "2025-12", "2025-12-01", "2025-12-31"},
+		{"闰年 2024-03-31 → 02-29", time.Date(2024, 3, 31, 8, 0, 0, 0, shanghai), "2024-02", "2024-02-01", "2024-02-29"},
+	}
+	for _, tc := range cases {
+		from, to := lastMonthRange(tc.now)
+		if from != tc.wantFrom || to != tc.wantTo {
+			t.Fatalf("%s：得到 %s ~ %s，期望 %s ~ %s", tc.name, from, to, tc.wantFrom, tc.wantTo)
+		}
+		if got := from[:7]; got != tc.wantKey {
+			t.Fatalf("%s：上月被算成 %s，期望 %s（AddDate 月末归一化）", tc.name, got, tc.wantKey)
+		}
+	}
+	// 上月绝不能等于本月：对每一天扫一遍（含月末 28~31 日），确保没有归一化残留。
+	for d := 1; d <= 31; d++ {
+		for m := time.January; m <= time.December; m++ {
+			now := time.Date(2026, m, d, 12, 0, 0, 0, shanghai)
+			if now.Month() != m || now.Day() != d {
+				continue // 该月没有这一天
+			}
+			from, _ := lastMonthRange(now)
+			if from[:7] == now.Format("2006-01") {
+				t.Fatalf("lastMonthRange(%s) 落回了本月：%s", now.Format("2006-01-02"), from)
+			}
+		}
+	}
+}
+
 // TestExportFilterPresets 覆盖本月 / 上月 / 自定义 / 勾选 ids / 仅待报销 五种筛选。
 func TestExportFilterPresets(t *testing.T) {
 	_, svc, _ := newTestEnv(t, false)
 	ctx := context.Background()
+	// 区间同样取当前自然月：写死 2026-10 会让用例随时间失效。
+	monthFrom, monthTo := MonthRange("")
 	cases := []struct {
 		name      string
 		filter    ExportFilter
@@ -672,12 +728,12 @@ func TestExportFilterPresets(t *testing.T) {
 	}{
 		{"本月", ExportFilter{Preset: "thisMonth"}, 2, false},
 		{"上月（无数据）", ExportFilter{Preset: "lastMonth"}, 0, true},
-		{"自定义命中", ExportFilter{Preset: "custom", From: "2026-10-01", To: "2026-10-31"}, 2, false},
+		{"自定义命中", ExportFilter{Preset: "custom", From: monthFrom, To: monthTo}, 2, false},
 		{"仅待报销", ExportFilter{ReimbOnly: true}, 1, false},
 		{"勾选 ids", ExportFilter{IDs: []string{"11111111-1111-1111-1111-111111111111"}}, 1, false},
 		{"非法 preset", ExportFilter{Preset: "nextYear"}, 0, true},
-		{"自定义缺 to", ExportFilter{Preset: "custom", From: "2026-10-01"}, 0, true},
-		{"起止倒置", ExportFilter{Preset: "custom", From: "2026-10-31", To: "2026-10-01"}, 0, true},
+		{"自定义缺 to", ExportFilter{Preset: "custom", From: monthFrom}, 0, true},
+		{"起止倒置", ExportFilter{Preset: "custom", From: monthTo, To: monthFrom}, 0, true},
 	}
 	for _, tc := range cases {
 		_, payload, err := svc.BuildJSON(ctx, testUser, tc.filter)

@@ -3,7 +3,7 @@
 > 面向开发者：照着本文档执行即可把现有 `web/` 前端打包成一个安卓 App。
 > 本文不改动 `web/` 下任何一行代码，也不引入任何前端构建步骤。
 >
-> 相关契约：`docs/CONTRACTS-ANDROID.md` 第 5 节（Contract E，本文档即其产出）、
+> 相关契约：`docs/archive/CONTRACTS-ANDROID.md` 第 5 节（Contract E，本文档即其产出；原件已归档）、
 > 第 1 节（Contract A，原生闹钟插件）、第 4 节（Contract D，后端 CORS）。
 
 ---

@@ -443,7 +443,7 @@ A：**不会**。文件按原样转发到你的 WebDAV 服务，不进 E2EE 信�
 
 ## 10. 新增一个工具
 
-与 [EXTENDING.md](EXTENDING.md) 的「加一个模块 = 一个文件 + 一段注册」同构，工具更轻量——**只加一个前端文件**：
+与 `docs/DEVELOPMENT.md` 附录 C 的「加一个模块 = 一个文件 + 一段注册」同构，工具更轻量——**只加一个前端文件**：
 
 1. 新建 `web/assets/js/tool-<id>.js`，结构照抄任一现有工具：
    `输入层（MD.tools.field/select） → 计算层（纯函数，返回 `{...}`） → 渲染层（MD.ui + MD.tools.resultCard）`。

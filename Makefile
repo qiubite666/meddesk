@@ -132,7 +132,7 @@ check-yaml: ## 校验两份 docker-compose（优先 docker compose config，退�
 
 .PHONY: check-docs
 check-docs: ## 校验 docs 与 deploy 下所有脚本/配置的存在性
-	@for f in docs/API.md docs/DEPLOYMENT.md docs/DATA-MODEL.md docs/SECURITY.md docs/EXTENDING.md \
+	@for f in docs/API.md docs/DEPLOYMENT.md docs/SECURITY.md docs/DEVELOPMENT.md \
 	          deploy/nginx/meddesk.conf deploy/systemd/meddesk.service deploy/Dockerfile \
 	          deploy/postgres-tuning.conf meddesk.env.example; do \
 	   [ -f "$$f" ] && echo "OK   $$f" || { echo "MISS $$f"; exit 1; }; \

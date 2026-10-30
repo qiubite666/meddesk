@@ -3,7 +3,9 @@
 > **适用版本**：v0.3.50（Go 模块 `github.com/qiubite666/meddesk`）
 > **适用环境**：开发（dev）/ 测试（test）/ 生产（prod）—— 各章节标题下方标注
 > **目标**：新人半天内完成「拉代码 → 起依赖 → 跑服务 → 跑测试 → 改一行前端并看到效果」
-> **配套文档**：`docs/API.md`（接口契约）、`docs/DEPLOYMENT.md`（部署）、`docs/OPERATIONS.md`（运维）、`CONTRACTS.md`（端到端契约）、`docs/DATA-MODEL.md`
+> **配套文档**：`docs/API.md`（接口契约）、`docs/DEPLOYMENT.md`（部署）、`docs/OPERATIONS.md`（运维）、
+> `../PROJECT-SUMMARY.md`（项目总览 / E2E 与同步契约 / 数据模型，2026-10-31 由 `CONTRACTS.md` 与 `docs/DATA-MODEL.md` 合并而成，原件见 `docs/archive/`）
+> ⚠️ 该文档已移至**工作区根**（`D:\workbuddy\工作台\PROJECT-SUMMARY.md`），**不在本仓库内、不随仓库公开**。
 
 **环境标记约定**
 
@@ -448,7 +450,7 @@ make check      # vet + test
 | 5 | `sw.js` 的 `SHELL_ASSETS` 需与 `index.html` 手工同步，且 `SHELL_REV` 需人工递增 | `web/sw.js:18`、`:27` | 漏同步会导致离线缺脚本或 SW 整体 install 失败，属高危手工点；建议加 CI 校验 |
 | 6 | 账本每日备份调度器是进程内 `go` 协程 | `internal/server/router.go:179` | 多实例部署时每个实例都会触发一次备份（源码注释已标注该限制） |
 | 7 | 家庭短码 pepper 由 `MEDDESK_JWT_SECRET` 派生 | `internal/server/router.go:193` | 轮换 JWT 密钥会让**尚未兑换**的短码失效（已建立的授权不受影响），轮换前需公告 |
-| 8 ✅ | `MEDDESK_ADMIN_EMAILS` 在 `config` 里有非空默认值 | `internal/config/config.go:150` | 若生产环境未显式覆盖，会启用一个内置邮箱作为后台白名单，属默认凭据风险；上线前必须显式设置 |
+| 8 ✅ | ~~`MEDDESK_ADMIN_EMAILS` 有非空默认值~~ **已于 v0.3.51 修复**：现默认值为**空名单** | `internal/config/config.go:154`（`envString("MEDDESK_ADMIN_EMAILS", "")`）、`internal/server/router.go:229` | 未配置时 `/admin` 不挂载并打 WARN（"无人可登录"），不存在默认凭据风险；但**必须显式配置**否则后台不可用。原表项是 v0.3.51 之前的旧结论，已被代码推翻 |
 | 9 | `tmp/` 与 `dist/` 内容靠 `.gitignore` 排除，但目录本身承载着历史调试脚本与旧版本二进制 | `tmp/`、`dist/` | 新人容易误以为它们是产品代码；建议定期清理，避免磁盘与认知负担 |
 
 ## 附录 B：新人半天上手路线
@@ -458,4 +460,136 @@ make check      # vet + test
 3. 打开 `http://127.0.0.1:8089/` 注册账号，`curl /api/v1/health` 确认版本（约 10 分钟）
 4. `go test ./... -count=1` 跑通全量测试（约 10 分钟）
 5. 改 `web/assets/js/core.js` 一行 → 刷新页面看效果 → 再 `make build` 验证内嵌路径（约 30 分钟）
-6. 读 `CONTRACTS.md` 了解 E2E 与同步契约，再动手改业务代码（约 60 分钟）
+6. 读 `../PROJECT-SUMMARY.md`（**工作区根**，不在本仓库）了解 E2E、同步契约与全模块接口（原 `CONTRACTS.md` 已归档为 `docs/archive/CONTRACTS-v0.1.0.md`），再动手改业务代码（约 60 分钟）
+
+---
+
+## 附录 C：扩展指南（新增模块）
+
+> 来源：原 `docs/EXTENDING.md`（已于 2026-10-31 合并入本文并删除原件）。
+> 合并时修正了原件的 3 处失效示例，见每节「⚠ 已修正」标注。
+
+架构目标：**加一个功能模块 = 一个前端文件 + 一个后端包 + 一行表名白名单**，不动现有代码。
+
+```
+web/assets/js/         前端：core/crypto/db/api/data/sync 是平台层（共享）；
+                       各业务模块一个独立文件（med.js 是一期的示范）
+internal/<module>/     后端：一个模块一个包，对外只暴露 NewService + Mount
+internal/store/        数据层：所有 SQL 集中于此，其他包零 SQL
+```
+
+三条铁律：
+
+1. **模块之间不互相 import**——跨模块交互只走 `MD.bus`（前端）或显式接口（后端）。
+2. **后端模块包不写 SQL**——需要新表时在 `internal/store` 加 repo + 迁移文件。
+3. **进同步通道的业务数据一律密文信封**——服务端不解析、不索引业务字段。
+   ⚠ **已修正**：原件未区分「同步信封」与「服务端真实表」。记账本（ledger）是**明文独立表**，
+   不进信封（见 `internal/store/migrations/0004_ledger.sql:3-7`），这是用户确认过的取舍，
+   必须在 UI 与文档中明示。铁律 3 只约束 `sync_records` 通道。
+
+### C.1 新增模块的 6 步
+
+**① 表名加入白名单（后端，1 行）**
+
+```go
+// internal/model/model.go
+func KnownTables() []string {
+    return []string{TableProfile, TableMedication, TableSchedule, TableIntake, TableSetting, TableFamily}
+}
+```
+
+⚠ **已修正**：原件示例写 `TableVital`，该常量**不存在**；当前白名单是
+`profile / medication / schedule / intake / setting / family`（`internal/model/model.go:27-28`）。
+注意 **ledger 不在白名单**——记账本不走同步通道。
+同步表 `sync_records` 无需迁移，它按 `(user_id, table_name, record_id)` 存任意表名。
+
+**② 前端领域访问器**（`web/assets/js/data.js` 加一组，与 meds/schedules/intakes 同构）
+
+```js
+MD.data.vitals = { list, get, save, remove };  // list 过滤 deleted、save 自动 ver++ 与置脏
+```
+
+**③ 前端模块文件**（新建 `web/assets/js/health.js`）
+
+```js
+(function () {
+  'use strict';
+  MD.health = {
+    register: function () {
+      MD.router.register({
+        id: 'health', title: '健康记录', icon: 'heart', order: 100,
+        render: function (el) { /* 数据 → 计算 → 渲染，参照 med.js 结构 */ }
+      });
+    }
+  };
+})();
+```
+
+在 `index.html` 脚本链插入 `<script src="assets/js/health.js"></script>`（**必须在 `app.js` 之前**），
+并在 `app.js` 启动链注册：`if (MD.health && MD.health.register) MD.health.register();`
+
+**④ 后端模块包**（新建 `internal/health/`，仅当需要服务端逻辑时）
+
+```go
+// internal/health/health.go
+package health
+
+func NewService(deps Deps) *Service { ... }
+func Mount(rg *gin.RouterGroup, svc *Service, requireAuth gin.HandlerFunc) {
+    if requireAuth != nil { // 与其他模块保持一致：防御 nil
+        // ...
+    }
+    g := rg.Group("/health")
+    g.Use(requireAuth)
+}
+```
+
+⚠ **已修正**：原件写「挂载点只有一处：`internal/server/router.go` 的 `registerAPI`」——
+该函数**不存在**。实际入口是 `internal/server/router.go:71 func New(d Deps)`（业务路由）
+与 `:272 func mountSPA`（前端静态资源）。错误处理复用 `apierr` 的 `writeError` 模式。
+
+若模块仓储是**可选**的（像 ledger / family / admin），用可选接口断言挂载，
+这样 `internal/fake` 的内存替身不实现就自动跳过挂载，集成测试零外部依赖：
+
+```go
+if repo, ok := d.Store.(interface{ Health() store.HealthRepo }); ok {
+    health.Mount(v1, health.NewService(repo.Health()), requireAuth)
+}
+```
+
+**⑤ 需要服务端真实表时才做**
+
+- 新增 `internal/store/migrations/0006_xxx.sql`（**只增不改，编号递增**）。
+  ⚠ **已修正**：原件示例写 `0002_vital.sql`，但 0002 已被 `family_grants` 占用
+  （现已有 0001–0005，下一个可用编号是 **0006**）。
+- 在 `internal/store` 加 repo 与接口，`internal/fake/` 同步补一份；
+- `internal/server/integration_test.go` 追加一组用例。
+
+**⑥ 侧栏入口**：`app.js` 的占位数组里已有 `health`/`todo`/`ledger`（`comingSoon: true`），
+模块实现后去掉 `comingSoon` 即可，侧栏与移动端底部 Tab 按 `order` 自动重排。
+
+### C.2 同步层为什么"免费"
+
+`sync_records` 是 K/V 密文表，新模块的记录只是新的 `table_name` 取值，
+push/pull/冲突裁决/游标逻辑全部原样复用——后端一行不改即可跨设备同步。
+
+前提两条：记录是自包含 JSON 对象（信封模式，不需要服务端 JOIN）；
+单条 ≤ `MEDDESK_SYNC_MAX_RECORD_BYTES`（默认 1 MiB），照片走附件通道而非塞进信封。
+
+需要**服务端可查询**的数据才建独立表（如记账本），这类数据不进 E2EE 信封，
+必须在 UI 与 SECURITY 威胁模型中注明其明文属性。
+
+### C.3 二期候选与接口预留点
+
+| 候选 | 数据形态 | 主要工作 |
+|---|---|---|
+| 健康记录 | 体征测量（血压/血糖/体重），信封同步 | 前端视图 + 折线图（内联 SVG） |
+| 日程待办 | 任务列表，信封同步 | 前端视图；提醒复用 `MD.remind` 调度器 |
+| 家庭账本**共享**形态 | 在已上线的记账本之上做共享 | 密钥协商 + 权限模型；**记账本本体已上线**，勿与本体混淆 |
+
+| 接口预留点 | 位置 | 说明 |
+|---|---|---|
+| Web Push（真·勿扰穿透） | `MD.remind.registerPush(vapidPublicKey)`（现为 `not_implemented` 占位） | 服务端需新增 VAPID 密钥管理与 push 网关表；`urgency=high` 可穿透 Android 勿扰 |
+| 附件转 S3 兼容对象存储 | `internal/attachments` 的落盘层 | 抽象为 `BlobStore` 接口后接 MinIO/OSS，元数据表结构不变 |
+| 照片 OCR 识别药名 | 客户端 | 密文照片服务端不可读，OCR 只能在前端（如 onnxruntime-web）或"导出解密后手动送 OCR" |
+| 多用户共享档案 | `profile` 加成员关系表 | E2EE 下共享 = 共享 DEK 的密钥协商（服务端只见密文信封），设计成本高，暂缓 |

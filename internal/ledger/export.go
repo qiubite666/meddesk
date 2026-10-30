@@ -150,8 +150,7 @@ func (f ExportFilter) resolveRange() (string, string, error) {
 		f, t := MonthRange("")
 		return f, t, nil
 	case "lastMonth":
-		prev := time.Now().In(shanghai).AddDate(0, -1, 0).Format("2006-01")
-		f, t := MonthRange(prev)
+		f, t := lastMonthRange(time.Now().In(shanghai))
 		return f, t, nil
 	case "custom":
 		if from == "" || to == "" {
@@ -168,6 +167,21 @@ func (f ExportFilter) resolveRange() (string, string, error) {
 	default:
 		return "", "", apierr.New(apierr.CodeBadRequest, "未知的导出范围 preset，可用值：thisMonth / lastMonth / custom / all")
 	}
+}
+
+// lastMonthRange 返回 now 所在月份的「上一个自然月」[首日, 末日]。
+//
+// 【为什么不直接 now.AddDate(0, -1, 0)】AddDate 对不存在的日期会做归一化：
+// 2026-10-31 减一个月得到 2026-09-31 → 被归一化成 2026-10-01，于是「上月」
+// 被算成了「本月」，用户点「导出上月账单」拿到的却是本月账单（每月 31 日、
+// 3 月 30/31 日等约每年 7 天会触发）。改成先取当月 1 号再减一个月：日恒为 1，
+// 任何月份都存在，天然不会触发归一化。
+//
+// now 按可注入参数传入，测试可以固定日期而不依赖真实时钟（见 export_test.go）。
+func lastMonthRange(now time.Time) (string, string) {
+	cur := now.In(shanghai)
+	first := time.Date(cur.Year(), cur.Month(), 1, 0, 0, 0, 0, shanghai)
+	return MonthRange(first.AddDate(0, -1, 0).Format("2006-01"))
 }
 
 // checkDate 校验自然日格式：合法返回原值，非法或为空返回空串（表示不限）。

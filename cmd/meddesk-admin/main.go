@@ -18,8 +18,6 @@ package main
 
 import (
 	"context"
-	"crypto/aes"
-	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"flag"
@@ -28,25 +26,11 @@ import (
 	"os"
 	"strings"
 
-	"golang.org/x/crypto/hkdf"
-	"crypto/sha256"
-	"golang.org/x/crypto/pbkdf2"
-
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/qiubite666/meddesk/internal/auth"
 	"github.com/qiubite666/meddesk/internal/config"
-)
-
-// 与 web/assets/js/crypto.js 严格一致的客户端派生参数。
-const (
-	pbkdf2Iterations = 210000
-	pbkdf2KeyLen     = 32 // 256 bit
-	hkdfInfo         = "meddesk-kek-v1"
-	dekLen           = 32
-	kekIVLen         = 12
-	kdfSaltLen       = 16
 )
 
 func main() {
@@ -158,30 +142,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	salt := make([]byte, kdfSaltLen)
-	dek := make([]byte, dekLen)
-	if _, err = io.ReadFull(rand.Reader, salt); err != nil {
-		fatal("生成盐失败", err)
-	}
-	if _, err = io.ReadFull(rand.Reader, dek); err != nil {
-		fatal("生成 DEK 失败", err)
-	}
-
-	// PBKDF2-SHA256（客户端第一步），再 argon2id 二次哈希（服务端口径）
-	clientHash := b64(pbkdf2.Key([]byte(password), salt, pbkdf2Iterations, pbkdf2KeyLen, sha256.New))
 	cfg, err := config.Load()
 	if err != nil {
 		fatal("读取配置失败", err)
 	}
-	passwordHash, err := auth.HashClientHash(clientHash, cfg.Auth.Argon2Memory, cfg.Auth.Argon2Time, cfg.Auth.Argon2Threads)
+	mat, err := buildResetCredentials(password, cfg.Auth.Argon2Memory, cfg.Auth.Argon2Time, cfg.Auth.Argon2Threads)
 	if err != nil {
-		fatal("argon2id 失败", err)
-	}
-
-	// HKDF(authHash, salt, 'meddesk-kek-v1') → AES-GCM 包裹 DEK
-	wrapped, iv, err := wrapDEK(dek, clientHash, salt)
-	if err != nil {
-		fatal("包裹 DEK 失败", err)
+		fatal("生成凭据材料失败", err)
 	}
 
 	// 3) 事务写入
@@ -193,7 +160,7 @@ func main() {
 
 	if _, err = tx.Exec(ctx,
 		`UPDATE users SET kdf_salt=$1, wrapped_dek=$2, dek_iv=$3, password_hash=$4 WHERE id=$5`,
-		salt, wrapped, iv, passwordHash, userID); err != nil {
+		mat.KDFSalt, mat.WrappedDEK, mat.DEKIV, mat.PasswordHash, userID); err != nil {
 		fatal("更新口令失败", err)
 	}
 	if _, err = tx.Exec(ctx, `DELETE FROM refresh_tokens WHERE user_id=$1`, userID); err != nil {
@@ -214,28 +181,18 @@ func main() {
 	fmt.Println("（请立即保存。旧设备的登录已全部失效；旧设备本地数据仍在，可导出备份后导入新会话。）")
 }
 
-// wrapDEK 复刻客户端 wrapDEK：KEK = HKDF-SHA256(ikm=PBKDF2 结果, salt, info=meddesk-kek-v1, 256bit)
-func wrapDEK(dek []byte, clientHash string, salt []byte) (wrappedB64, ivB64 string, err error) {
-	ikm := []byte(clientHash)
-	reader := hkdf.New(sha256.New, ikm, salt, []byte(hkdfInfo))
-	kekBytes := make([]byte, 32)
-	if _, err = io.ReadFull(reader, kekBytes); err != nil {
-		return "", "", err
-	}
-	block, err := aes.NewCipher(kekBytes)
-	if err != nil {
-		return "", "", err
-	}
-	iv := make([]byte, kekIVLen)
-	if _, err = io.ReadFull(rand.Reader, iv); err != nil {
-		return "", "", err
-	}
-	gcm, err := cipher.NewGCM(block)
-	if err != nil {
-		return "", "", err
-	}
-	sealed := gcm.Seal(nil, iv, dek, nil)
-	return base64.StdEncoding.EncodeToString(sealed), base64.StdEncoding.EncodeToString(iv), nil
+// buildResetCredentials 生成「重置口令」所需的凭据材料（新 salt + 新 DEK + 新口令）。
+//
+// 【为什么必须走 auth 包，不能在 CLI 里自己派生】
+// 这里曾经内联过一份派生实现，把 HKDF 的 ikm 写成了 PBKDF2 结果的**base64 文本**
+// （44 字节），而客户端/服务端正确口径都是**原始 32 字节**（见 crypto.js 的
+// deriveKEK 与 internal/auth/credential.go:113）。后果是写入的 wrapped_dek 永远解不开：
+// 用户能登录（password_hash 口径一致），但拿不到 DEK，而 reset-password 紧接着就
+// DELETE FROM sync_records 清空了旧密文 → 账号永久不可用。
+// reset-password 是全清模式，需要全新 DEK，所以用 GenerateCredentials（它自己生成
+// salt 与 DEK）；不能改用 GenerateCredentialsWithDEK，那个是「保留 DEK」的场景。
+func buildResetCredentials(password string, mem, tm uint32, th uint8) (auth.CredentialMaterial, error) {
+	return auth.GenerateCredentials(password, mem, tm, th)
 }
 
 func generatePassword(n int) string {
@@ -248,8 +205,6 @@ func generatePassword(n int) string {
 	}
 	return string(out)
 }
-
-func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
 
 func fatal(msg string, err error) {
 	fmt.Fprintln(os.Stderr, msg+":", err)

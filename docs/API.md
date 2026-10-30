@@ -111,7 +111,7 @@ Authorization: Bearer <accessToken>
 | `/api/v1/export/*` | 健康数据导出（PDF/CSV） | ✅ | [第 7 章](#7-导出接口-export) |
 | `/api/v1/ledger/*` | 记账本（26 个） | ✅ | **[第 9 章](#9-记账本接口-ledger)** |
 | `/api/v1/admin/*` | 管理后台（7 个） | 后台令牌 | **[第 10 章](#10-管理后台接口-admin)** |
-| `/api/v1/family/*` | 家庭关联 | ✅ | 不在本文展开，见 [`CONTRACTS-FAMILY-LINK.md`](./CONTRACTS-FAMILY-LINK.md) |
+| `/api/v1/family/*` | 家庭关联 | ✅ | 不在本文展开，见 [PROJECT-SUMMARY.md](../../PROJECT-SUMMARY.md)「家庭关联」（仓库外，工作区根）；原契约已归档为 [archive/CONTRACTS-FAMILY-LINK.md](./archive/CONTRACTS-FAMILY-LINK.md) |
 | `/api/v1/webdav/*` | WebDAV 网盘代理 | ✅ | 不在本文展开，见 [`SECURITY.md`](./SECURITY.md) |
 | `/admin`、`/admin/app.js` | 后台页面与脚本 | 否（页面） | [10.9](#109-后台页面入口) |
 
@@ -1053,7 +1053,7 @@ curl -fsS -X POST https://med.example.com/api/v1/export/pdf \
 | 凭证附件 | 客户端压缩加密后上传，服务端只有密文 | 明文图片（服务端按魔数校验真实类型） |
 | 库表 | `sync_records` / `attachments` | `ledger_records` / `ledger_categories` / `ledger_attachments` / `ledger_backup_*` |
 
-> 这是**用户明确确认过的取舍**（见 [`CONTRACTS-LEDGER.md`](./CONTRACTS-LEDGER.md) 第 0 节）：
+> 这是**用户明确确认过的取舍**（见 [PROJECT-SUMMARY.md](../../PROJECT-SUMMARY.md)「记账本为何明文建表」（仓库外，工作区根）；原契约已归档为 [archive/CONTRACTS-LEDGER.md](./archive/CONTRACTS-LEDGER.md) 第 0 节）：
 > 账本放弃 E2EE 换取统计与自动备份能力；**健康数据的 E2EE 不受任何影响，两者互不影响**。
 > 凭证是明文图片，因此服务端可读；产品侧应在记账本设置页明确告知用户。
 
@@ -2456,7 +2456,7 @@ Expires: 0
 | 7 | `/api/v1/ledger/attachments/*` | `internal/ledger/attachment_http.go`（4） | ✅ [9.5](#95-凭证附件-ledgerattachments) |
 | 8 | `/api/v1/ledger/export/*`、`/ledger/import` | `internal/ledger/export_http.go`（4） | ✅ [9.6](#96-导出与导入-ledgerexport-ledgerimport) |
 | 9 | `/api/v1/ledger/backup/*` | `internal/ledger/backup_http.go`（4） | ✅ [9.7](#97-webdav-每日备份-ledgerbackup) |
-| 10 | `/api/v1/family/*` | `internal/family/family.go`（7） | ⚠ **本文未展开**：`POST /grants`、`POST /grants/code`、`POST /grants/redeem`、`GET /grants`、`DELETE /grants/:id`、`GET /records`、`POST /records`；字段以 [`CONTRACTS-FAMILY-LINK.md`](./CONTRACTS-FAMILY-LINK.md) 为准 |
+| 10 | `/api/v1/family/*` | `internal/family/family.go`（7） | ⚠ **本文未展开**：`POST /grants`、`POST /grants/code`、`POST /grants/redeem`、`GET /grants`、`DELETE /grants/:id`、`GET /records`、`POST /records`；字段以 [PROJECT-SUMMARY.md](../../PROJECT-SUMMARY.md)「家庭关联」为准（仓库外，工作区根）（原契约见 [archive/CONTRACTS-FAMILY-LINK.md](./archive/CONTRACTS-FAMILY-LINK.md)） |
 | 11 | `/api/v1/webdav/*` | `internal/webdav/webdav.go`（6） | ⚠ **本文未展开**：`POST /test`、`/list`、`/mkdir`、`/delete`、`/upload`、`/download`；凭据随请求传入、服务端不持久化，见 [`SECURITY.md`](./SECURITY.md) |
 | 12 | `/api/v1/admin/*` | `internal/admin/admin.go`（7） | ✅ [第 10 章](#10-管理后台接口-admin) |
 | 13 | `/admin`、`/admin/app.js` | `serveFile` | ✅ [10.9](#109-后台页面入口) |

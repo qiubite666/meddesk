@@ -4,7 +4,8 @@ package ledger
 //
 // 【为什么需要落盘】契约 0 节：备份由**服务端定时**执行（默认 02:00 Asia/Shanghai），
 // 那一刻没有用户请求、没有会话，凭据只能从数据库里取。这是用户明确批准的取舍
-// （见 CONTRACTS-LEDGER.md 第 0 节「每日备份：服务端定时，需持久化 WebDAV 凭据」）。
+// （见 ../PROJECT-SUMMARY.md「备份与调度」——该文档位于工作区根，不在本仓库；
+// 原契约已归档为 docs/archive/CONTRACTS-LEDGER.md）。
 //
 // 【怎么降低风险】
 //  1. 只存密文：AES-256-GCM，密钥来自环境变量 MEDDESK_SECRETBOX_KEY（base64 的 32 字节），

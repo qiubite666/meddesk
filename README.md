@@ -331,9 +331,9 @@ meddesk/
 └── docs/
     ├── API.md                     # HTTP 接口详述
     ├── DEPLOYMENT.md              # 从零到上线 11 步
-    ├── DATA-MODEL.md              # 数据模型与同步协议
+    ├── （PROJECT-SUMMARY.md 已移至工作区根 ../PROJECT-SUMMARY.md，不在本仓库；见下）
     ├── SECURITY.md                # 威胁模型与安全基线
-    ├── EXTENDING.md               # 如何新增模块
+    ├── archive/                   # 已归档的契约与一次性报告（见 ../PROJECT-SUMMARY.md 第 11 章）
     └── TOOLS.md                   # 工具箱与文件存储（WebDAV）
 ```
 
@@ -590,7 +590,7 @@ curl -fsS https://med.example.com/api/v1/health
 | **健康记录** *(health)* | 血压、血糖、体重、体温趋势图；异常值标注 | 成员档案、同步协议、导出管道、主题/图表工具 |
 | **日程待办** *(todo)* | 家庭日程、重复任务、到期提醒 | 排程引擎（`schedule.js` 的 occurrence 逻辑可泛化）、提醒通道 |
 | **家庭账本** *(ledger)* | 收入支出、分类统计、家庭共享视图 | 成员档案、同步协议、CSV/PDF 导出 |
-| **Web Push**（服务端推送） | VAPID + Push API，实现真正的「后台到达」 | 见 [EXTENDING.md](docs/EXTENDING.md) 预留点 |
+| **Web Push**（服务端推送） | VAPID + Push API，实现真正的「后台到达」 | 见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 附录 C.3 预留点 |
 
 侧栏里未上线的模块会显示为「即将上线」，点击给出提示。
 
@@ -615,9 +615,9 @@ curl -fsS https://med.example.com/api/v1/health
 | [docs/API.md](docs/API.md) | **接口文档**：全部对外接口（含记账本 26 个、后台 7 个）+ 字段表 + 错误码 + curl 示例 + 限流 |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | **部署文档**：环境矩阵、配置说明、全新安装/增量升级/回滚、验证清单、版本变更记录 |
 | [docs/OPERATIONS.md](docs/OPERATIONS.md) | **运维文档**：监控告警、日志采集、备份恢复、故障 Runbook、扩容、日常巡检 |
-| [docs/DATA-MODEL.md](docs/DATA-MODEL.md) | 服务端关系模型、客户端域模型、同步协议、IndexedDB |
+| [../PROJECT-SUMMARY.md](../PROJECT-SUMMARY.md) | ★ 主干：架构、接口、数据模型、安全、部署、评审与审计结论。**已移至工作区根，不在本仓库内、不随仓库公开**（2026-10-31 合并 DATA-MODEL 等） |
 | [docs/SECURITY.md](docs/SECURITY.md) | 密钥派生、令牌策略、威胁模型与能力边界 |
-| [docs/EXTENDING.md](docs/EXTENDING.md) | 新增模块的标准步骤与二期预留点 |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 附录 C | 新增模块的标准步骤与二期预留点（原 EXTENDING.md 已并入） |
 | [docs/TOOLS.md](docs/TOOLS.md) | 工具箱（四个计算器）与文件存储（WebDAV）用法、契约与安全边界 |
 
 > 四份主文档均标注**适用环境**（开发/测试/生产）与**适用版本**；当前基线为 **v0.3.51**（2026-10-30 生产）。
