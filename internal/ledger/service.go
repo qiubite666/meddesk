@@ -729,5 +729,12 @@ func notFoundOrInternal(err error, msg string) error {
 	if errors.Is(err, store.ErrNotFound) {
 		return apierr.New(apierr.CodeNotFound, msg)
 	}
+	// 参数类错误必须原样透传：uuidParam 对非法 ID 返回的是 bad_request（400），
+	// 若在这里再包一层 internal，调用方会看到 500，误以为是服务故障而非自己传错了 id。
+	// （实测症状：GET /ledger/records/undefined 返回 500 "账单不存在"。）
+	var e *apierr.Error
+	if errors.As(err, &e) {
+		return e
+	}
 	return apierr.Wrap(apierr.CodeInternal, err, msg)
 }

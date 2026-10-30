@@ -455,7 +455,16 @@
       // 底部标签栏只放一级入口：子路由（工具箱下各工具）放进来会挤掉主模块。
       // tab === false 的路由显式退出底部栏（仍完整保留在侧栏），把前 4 位让给更常用的模块。
       // 用「显式排除」而不是改 order，是为了不影响侧栏既有顺序。
-      list.filter(function (route) { return !route.parent && route.tab !== false; }).slice(0, 4)
+      // 底部栏顺序与侧栏顺序**解耦**：优先用 tabOrder，未声明则回落到 order。
+      // 否则「侧栏把设置挪到最后」会连带把底部栏的设置一起挪走，而两者诉求常常不同
+      // （侧栏按使用频率+分组，底部栏只放最常用的 4 个）。
+      list.filter(function (route) { return !route.parent && route.tab !== false; })
+        .sort(function (a, b) {
+          var ao = a.tabOrder != null ? a.tabOrder : a.order;
+          var bo = b.tabOrder != null ? b.tabOrder : b.order;
+          return (Number(ao) || 0) - (Number(bo) || 0);
+        })
+        .slice(0, 4)
         .forEach(function (route) { tabbar.appendChild(routeButton(route, true)); });
     }
   }

@@ -148,7 +148,10 @@
       subtitle: '同步、备份与隐私',
       icon: 'settings',
       group: '系统',
-      order: 40,
+      // 侧栏最后一位（低频入口放末尾）；底部栏仍保持在「家庭健康」之后，
+      // 由 tabOrder 单独指定，二者互不影响。
+      order: 6,
+      tabOrder: 3,
       comingSoon: false,
       render: renderSettings
     });
@@ -158,7 +161,7 @@
       // 「记账本」占位已删除：真实实现在 ledger.js，它在加载期自行注册
       // 路由 id 'ledger'（order 105，排在日程待办 110 之上）。此处若再保留同 id
       // 项，registerRoutes() 在 DOMContentLoaded 里执行时会把真模块覆盖成「即将上线」。
-      { id: 'todo', title: '日程待办', subtitle: '家庭日程与任务', icon: 'calendar', order: 110 }
+      { id: 'todo', title: '日程待办', subtitle: '家庭日程与任务', icon: 'calendar', order: 5 }
     ].forEach(function (route) {
       MD.router.register({
         id: route.id,

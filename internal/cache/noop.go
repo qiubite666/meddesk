@@ -142,18 +142,26 @@ func (n *noopCache) Incr(_ context.Context, key string, ttl time.Duration) (int6
 	now := time.Now()
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	var next int64
+	// 【固定窗口语义】TTL 只在**窗口建立时**（计数为 1）设置，窗口内后续自增不刷新过期时间。
+	//
+	// 早期实现每次 Incr 都重设 expireAt，等价于滑动窗口：只要请求间隔始终小于窗口长度，
+	// key 就永不过期、计数只增不减，累计到上限后**永久 429**——而且每个被拒的请求
+	// 又会把 TTL 续上，形成自锁。真实后果：任何客户端连续操作累计到上限（生产为 60 次 / 3 秒）
+	// 后会被彻底锁死，必须完全停手满一个窗口才恢复。
+	//
+	// 这里与 redis 的 incrLua（仅 cur==1 时 PEXPIRE）保持一致，两条实现语义必须相同，
+	// 否则"有没有开 Redis"会表现为两种完全不同的限流行为（这正是本 bug 长期未被发现的原因）。
 	if e, ok := n.items[k]; ok && (e.expireAt.IsZero() || now.Before(e.expireAt)) {
 		if v, err := strconv.ParseInt(e.value, 10, 64); err == nil {
-			next = v + 1
-		} else {
-			next = 1
+			next := v + 1
+			// 关键：沿用原 expireAt，不刷新窗口
+			n.items[k] = noopEntry{value: strconv.FormatInt(next, 10), expireAt: e.expireAt}
+			return next, nil
 		}
-	} else {
-		next = 1
 	}
-	n.items[k] = noopEntry{value: strconv.FormatInt(next, 10), expireAt: expireAtFrom(now, ttl)}
-	return next, nil
+	// 键不存在或已过期：开启一个新窗口
+	n.items[k] = noopEntry{value: "1", expireAt: expireAtFrom(now, ttl)}
+	return 1, nil
 }
 
 // Del 批量删除键。

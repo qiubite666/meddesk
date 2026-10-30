@@ -323,6 +323,14 @@ func (s *ExportService) importMerge(ctx context.Context, userID string, cats []m
 		}
 		rec.CategoryID = catID
 		if err := s.repo.CreateRecord(ctx, &rec); err != nil {
+			// 并发 merge 同一份数据时，两个请求可能都通过了上面的"已存在"检查，
+			// 随后各自 INSERT，后到的撞主键。这不是数据错误：该条已由另一次导入写入，
+			// 结果集里它就是"已存在"，应计 skipped 而不是 failed——否则用户会看到
+			// 几十条"写入账单失败"，误以为数据丢了（实测并发 3 次导入 100 条时出现 65 条误报）。
+			if errors.Is(err, store.ErrConflict) {
+				res.RecordsSkipped++
+				continue
+			}
 			res.RecordsFailed++
 			res.addErr(fmtErr("写入账单失败", rec.ID, err))
 			continue

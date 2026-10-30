@@ -1537,7 +1537,9 @@
     runTask('保存凭据', function () {
       return ledgerApi('/ledger/backup/credentials', {
         method: 'PUT',
-        body: { url: url, username: user, password: pass }
+        // 字段名必须与后端 CredentialsInput 的 json tag 一致（baseURL/username/password）。
+        // 曾经这里写成 url，后端解析到空字符串，于是无论填什么都报「请填写 WebDAV 服务地址」。
+        body: { baseURL: url, username: user, password: pass }
       }).then(function () {
         form.reset();
         return loadBackup().then(function () { return '凭据已保存'; });
@@ -2164,8 +2166,11 @@
       subtitle: '收支记账与报销',
       icon: 'wallet',
       group: '更多',
-      // 105 < 日程待办(110)：记账本必须排在「日程待办」之上。
-      order: 105,
+      // 侧栏第 4 位：排在「文件存储」之后、「日程待办」之前。
+      order: 4,
+      // 底部栏独立排序：侧栏里「设置」排最后，但底部栏仍需「设置」在第 3 位，
+      // 故这里显式声明 tabOrder，避免随 order 一起被挪走。
+      tabOrder: 4,
       comingSoon: false,
       render: render
     });

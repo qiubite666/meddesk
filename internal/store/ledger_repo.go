@@ -317,6 +317,14 @@ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING created_at, updated_at`
 		rec.CategoryName, rec.TransactionAt, occurred, rec.Note, rec.ReimbursementStatus).
 		Scan(&rec.CreatedAt, &rec.UpdatedAt)
 	if err != nil {
+		// 主键冲突 = 该账单已存在，不是"写入失败"。
+		// 并发导入同一份数据时，"先查后插"之间存在竞态：两个请求都判断"不存在"，
+		// 于是都去 INSERT，后到的必然撞主键。若这里不区分，上层会把它们记成 failed，
+		// 用户看到一堆"写入账单失败"却查不出丢了哪条数据（实际一条没丢）。
+		// 转成 ErrConflict 后，上层可准确计为 skipped。
+		if isUniqueViolation(err) {
+			return newConflict("账单已存在")
+		}
 		return wrap("创建账单失败", err)
 	}
 	return nil
