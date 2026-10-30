@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>MedDesk 管理后台</title>
+<style>
+  /* 关键：.auth/.mask 这类元素自带 display，会覆盖 UA 的 [hidden]{display:none}，
+     导致 hidden=true 后登录卡片仍在屏幕上（登录成功但看起来"点击没反应"）。
+     统一强制 hidden 生效。 */
+  [hidden] { display: none !important; }
+  :root {
+    --bg: #f5f7fa;
+    --surface: #ffffff;
+    --border: #e3e8ef;
+    --text: #1f2937;
+    --text-dim: #6b7280;
+    --brand: #4f8cff;
+    --brand-dim: #eaf1ff;
+    --danger: #e5484d;
+    --danger-dim: #fdecec;
+    --ok: #12a150;
+    --radius: 12px;
+    --shadow: 0 1px 2px rgba(16, 24, 40, .04), 0 8px 24px rgba(16, 24, 40, .06);
+  }
+  * { box-sizing: border-box; }
+  /* 关键：.auth/.mask 等类设置了 display，会覆盖 UA 的 [hidden]{display:none}，
+     导致 hidden=true 后元素仍在屏幕上（登录成功后登录卡片不消失，看起来"点击没反应"）。
+     这里统一强制 hidden 生效。 */
+  [hidden] { display: none !important; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--brand); text-decoration: none; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 20px 16px 48px; }
+
+  /* ---------- 登录 ---------- */
+  .auth {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    padding: 24px 16px; padding-bottom: calc(24px + env(safe-area-inset-bottom));
+  }
+  .auth__card {
+    width: 100%; max-width: 380px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 16px;
+    box-shadow: var(--shadow); padding: 28px 24px;
+  }
+  .auth__brand { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .auth__mark {
+    width: 34px; height: 34px; border-radius: 9px; background: var(--brand-dim);
+    display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
+  }
+  .auth__mark svg { width: 18px; height: 18px; fill: var(--brand); }
+  .auth__title { font-size: 17px; font-weight: 700; letter-spacing: .2px; }
+  .auth__sub { margin: 0 0 20px; color: var(--text-dim); font-size: 13px; }
+
+  /* ---------- 通用控件 ---------- */
+  .field { margin-bottom: 14px; }
+  .field__label { display: block; font-size: 12px; font-weight: 600; color: var(--text-dim); margin-bottom: 6px; letter-spacing: .2px; }
+  .input {
+    width: 100%; height: 44px; padding: 0 12px;
+    border: 1px solid var(--border); border-radius: 10px;
+    background: var(--surface); color: var(--text);
+    font-size: 16px; /* 移动端 <16px 会触发 iOS 自动放大 */
+    outline: none; transition: border-color .15s, box-shadow .15s;
+  }
+  .input:focus { border-color: var(--brand); box-shadow: 0 0 0 3px rgba(79, 140, 255, .18); }
+  .input--sm { height: 40px; font-size: 15px; }
+  .btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+    min-height: 44px; padding: 0 16px; border-radius: 10px;
+    border: 1px solid transparent; background: var(--brand); color: #fff;
+    font-size: 15px; font-weight: 600; cursor: pointer;
+    transition: filter .15s, background .15s, border-color .15s;
+  }
+  .btn:hover { filter: brightness(1.05); }
+  .btn:disabled { opacity: .55; cursor: not-allowed; }
+  .btn--block { width: 100%; }
+  .btn--ghost { background: transparent; color: var(--text); border-color: var(--border); }
+  .btn--ghost:hover { background: #f3f5f9; }
+  .btn--danger { background: var(--danger); }
+  .btn--sm { min-height: 36px; padding: 0 12px; font-size: 13px; border-radius: 8px; }
+  .icon-btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 36px; height: 36px; border: 0; border-radius: 50%;
+    background: transparent; color: var(--text-dim); cursor: pointer;
+    transition: background .15s, color .15s;
+  }
+  .icon-btn:hover { background: #f1f4f9; color: var(--text); }
+  .icon-btn svg { width: 18px; height: 18px; fill: currentColor; }
+  .icon-btn--danger:hover { background: var(--danger-dim); color: var(--danger); }
+  .err { color: var(--danger); font-size: 13px; min-height: 20px; margin: 4px 0 10px; }
+  .hint { color: var(--text-dim); font-size: 12px; line-height: 1.6; margin: 6px 0 0; }
+
+  /* ---------- 顶栏 ---------- */
+  .topbar {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 14px 16px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+    margin-bottom: 16px;
+  }
+  .topbar__title { font-size: 16px; font-weight: 700; letter-spacing: .2px; flex: 1 1 auto; min-width: 0; }
+  .topbar__who { color: var(--text-dim); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---------- 统计卡 ---------- */
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 16px; }
+  .stat {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    box-shadow: var(--shadow); padding: 14px 16px;
+  }
+  .stat__label { font-size: 12px; color: var(--text-dim); letter-spacing: .2px; }
+  .stat__value { font-size: 24px; font-weight: 700; font-variant-numeric: tabular-nums; margin-top: 2px; }
+
+  /* ---------- 工具条 ---------- */
+  .toolbar { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+  .toolbar__search { flex: 1 1 220px; min-width: 0; }
+
+  /* ---------- 表格 ---------- */
+  .panel {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 12px 14px; font-size: 13px; }
+  th { color: var(--text-dim); font-weight: 600; background: #fafbfd; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  td { border-bottom: 1px solid #f0f2f6; }
+  tr:last-child td { border-bottom: 0; }
+  .mono { font-variant-numeric: tabular-nums; }
+  .empty { padding: 28px 16px; text-align: center; color: var(--text-dim); }
+  .pager { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; border-top: 1px solid var(--border); }
+  .pager__info { font-size: 12px; color: var(--text-dim); }
+
+  /* ---------- 弹窗 ---------- */
+  .mask {
+    position: fixed; inset: 0; background: rgba(17, 24, 39, .38);
+    display: flex; align-items: flex-end; justify-content: center; z-index: 50;
+  }
+  .mask[hidden] { display: none; }
+  .sheet {
+    width: 100%; max-width: 440px; background: var(--surface);
+    border-radius: 16px 16px 0 0; padding: 20px 20px calc(20px + env(safe-area-inset-bottom));
+    box-shadow: 0 -8px 32px rgba(16, 24, 40, .18); max-height: 88vh; overflow: auto;
+  }
+  .sheet__title { font-size: 16px; font-weight: 700; margin: 0 0 4px; }
+  .sheet__desc { color: var(--text-dim); font-size: 12px; margin: 0 0 16px; line-height: 1.65; }
+  .sheet__acts { display: flex; gap: 10px; margin-top: 18px; }
+  .sheet__acts .btn { flex: 1; }
+  .warn {
+    background: var(--danger-dim); color: #a92a2e; border: 1px solid #f6c9ca;
+    border-radius: 10px; padding: 10px 12px; font-size: 12px; line-height: 1.65; margin-bottom: 14px;
+  }
+  .checkbox { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; line-height: 1.55; }
+  .checkbox input { width: 18px; height: 18px; margin-top: 2px; flex: 0 0 auto; }
+
+  /* ---------- Toast ---------- */
+  .toast {
+    position: fixed; left: 50%; bottom: calc(24px + env(safe-area-inset-bottom));
+    transform: translateX(-50%) translateY(8px);
+    background: #111827; color: #fff; font-size: 13px;
+    padding: 10px 16px; border-radius: 999px; z-index: 60;
+    opacity: 0; transition: opacity .18s, transform .18s; pointer-events: none;
+    max-width: calc(100vw - 32px); text-align: center;
+  }
+  .toast--show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast--err { background: var(--danger); }
+
+  @media (min-width: 720px) {
+    .mask { align-items: center; }
+    .sheet { border-radius: 16px; }
+  }
+  @media (max-width: 640px) {
+    .stats { grid-template-columns: 1fr; }
+    thead { display: none; }
+    table, tbody, tr, td { display: block; width: 100%; }
+    tr { border-bottom: 1px solid var(--border); padding: 10px 14px; }
+    tr:last-child { border-bottom: 0; }
+    td { border: 0; padding: 3px 0; display: flex; justify-content: space-between; gap: 12px; }
+    td::before { content: attr(data-label); color: var(--text-dim); font-size: 12px; flex: 0 0 auto; }
+    td[data-label="操作"] { justify-content: flex-end; gap: 4px; padding-top: 8px; }
+    td[data-label="操作"]::before { display: none; }
+    .pager { flex-direction: column; align-items: stretch; }
+  }
+</style>
+</head>
+<body>
+
+<!-- 登录视图 -->
+<div class="auth" id="authView" hidden>
+  <form class="auth__card" id="loginForm" autocomplete="off">
+    <div class="auth__brand">
+      <div class="auth__mark">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 1 3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4Zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8Z"/></svg>
+      </div>
+      <div class="auth__title">MedDesk 管理后台</div>
+    </div>
+    <p class="auth__sub">仅限授权管理员账号登录</p>
+
+    <div class="field">
+      <label class="field__label" for="email">管理员邮箱</label>
+      <input class="input" id="email" type="email" inputmode="email" autocomplete="username" required>
+    </div>
+    <div class="field">
+      <label class="field__label" for="password">登录口令</label>
+      <input class="input" id="password" type="password" autocomplete="current-password" required>
+    </div>
+    <div class="err" id="loginErr"></div>
+    <button class="btn btn--block" id="loginBtn" type="submit">登 录</button>
+    <p class="hint">口令在本机派生后仅传输派生值，服务端不接触明文口令。</p>
+  </form>
+</div>
+
+<!-- 后台视图 -->
+<div class="wrap" id="adminView" hidden>
+  <div class="topbar">
+    <div class="topbar__title">用户管理</div>
+    <div class="topbar__who" id="whoami"></div>
+    <button class="btn btn--ghost btn--sm" id="logoutBtn" type="button">退出</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><div class="stat__label">注册用户</div><div class="stat__value" id="statUsers">–</div></div>
+    <div class="stat"><div class="stat__label">同步密文记录</div><div class="stat__value" id="statRecords">–</div></div>
+    <div class="stat"><div class="stat__label">生效中的家庭授权</div><div class="stat__value" id="statGrants">–</div></div>
+  </div>
+
+  <div class="toolbar">
+    <div class="toolbar__search">
+      <input class="input input--sm" id="search" type="search" placeholder="按邮箱搜索" autocomplete="off">
+    </div>
+    <button class="btn btn--ghost btn--sm" id="refreshBtn" type="button">刷新</button>
+    <button class="btn btn--sm" id="addBtn" type="button">添加用户</button>
+  </div>
+
+  <div class="panel">
+    <table>
+      <thead>
+        <tr><th>邮箱</th><th>创建时间</th><th>密文记录</th><th style="text-align:right">操作</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="pager">
+      <div class="pager__info" id="pagerInfo"></div>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn--ghost btn--sm" id="prevBtn" type="button">上一页</button>
+        <button class="btn btn--ghost btn--sm" id="nextBtn" type="button">下一页</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- 弹窗 -->
+<div class="mask" id="mask" hidden>
+  <div class="sheet" id="sheet"></div>
+</div>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+<script src="/admin/app.js?v=17"></script>
+</body>
+</html>

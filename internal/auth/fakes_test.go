@@ -54,6 +54,35 @@ func (f *fakeUsers) UpdateCredentials(_ context.Context, id, passwordHash string
 	return nil
 }
 
+func (f *fakeUsers) UpdatePasswordKeepEnvelope(_ context.Context, id, passwordHash string, kdfSalt []byte) error {
+	u, ok := f.byID[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.PasswordHash, u.KDFSalt = passwordHash, kdfSalt
+	u.EnvelopeStale = true
+	return nil
+}
+
+func (f *fakeUsers) RepairEnvelope(_ context.Context, id string, wrappedDEK, dekIV []byte) error {
+	u, ok := f.byID[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.WrappedDEK, u.DEKIV = wrappedDEK, dekIV
+	u.EnvelopeStale = false
+	return nil
+}
+
+func (f *fakeUsers) SetRecoveryEnvelope(_ context.Context, id string, wrapped, iv []byte) error {
+	u, ok := f.byID[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	u.RecoveryWrappedDEK, u.RecoveryIV = wrapped, iv
+	return nil
+}
+
 // fakeRefresh 是 store.RefreshRepo 的内存实现。
 type fakeRefresh struct {
 	byID       map[string]*model.RefreshToken

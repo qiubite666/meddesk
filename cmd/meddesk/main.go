@@ -40,6 +40,11 @@ func main() {
 	log := newLogger(cfg)
 	slog.SetDefault(log)
 
+	// 管理后台配置缺失只告警、不阻断：主功能（健康档案/记账本）应先保证可用。
+	for _, w := range cfg.AdminWarnings() {
+		log.Warn("管理后台配置告警", "detail", w)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

@@ -120,7 +120,13 @@
 
   async function clearApplied(applied, sent) {
     var appliedKeys = Object.create(null);
-    (applied || []).forEach(function (item) { appliedKeys[itemKey(item)] = true; });
+    // 服务端 SyncPushResponse.applied 是 []string（"table:id"），不是对象数组。
+    // 按对象解析会生成 "undefined:undefined"，一条都匹配不上，
+    // _dirty 永远清不掉 → 每轮重推 → 多设备 ver 军备竞赛互相覆盖（改名丢失的根源）。
+    (applied || []).forEach(function (item) {
+      if (typeof item === 'string') { appliedKeys[item] = true; return; }
+      appliedKeys[itemKey(item)] = true;
+    });
     if (!applied || !applied.length) {
       var conflictKeys = Object.create(null);
       sent.conflicts.forEach(function (item) { conflictKeys[itemKey(item)] = true; });
@@ -145,6 +151,9 @@
     if (MD.data._tables.indexOf(table) < 0 || !id) return false;
     var remote = await decryptItem(item, dek);
     var local = await MD.db.get(table, id);
+    // 墓碑保护：本地已删（墓碑干净），远端是活记录且并不严格更新 → 保持删除。
+    // 没有这条，平局分支会用远端活记录覆盖墓碑，被删的行随同步"复活"。
+    if (local && local.deleted === true && !remote.deleted && !better(remote, local)) return false;
     if (!local || better(remote, local) || (!local._dirty && !better(local, remote))) {
       remote._dirty = false;
       await MD.db.put(table, remote);
@@ -165,12 +174,39 @@
       if (MD.data._tables.indexOf(table) < 0 || !id) continue;
       var remote = await decryptItem(item, dek);
       var local = await MD.db.get(table, id);
+
+      // 本地有未推送的改动，且改动时间不早于远端 → 以本地为准。
+      //
+      // 【为什么不能只比 ver】
+      // 服务端只按 ver 裁决（in.Ver > cur.Ver）。而故障期（v0.3.26 及以前）的
+      // 冲突重试会把同一条记录的 ver 一路抬高，实测能到几千。之后用户改名拿到的是
+      // base+500，仍然低于那条陈旧副本 → 推送冲突 → 远端"胜出" → 本地被覆盖回旧值，
+      // 用户看到的就是"改了又变回去"。这里把本地 ver 直接抬到「远端 ver + 1」再推一次，
+      // 用最新一次真实编辑覆盖陈旧副本；只抬一次，重试若仍冲突则按远端采纳，不会来回拉锯。
+      if (local && local._dirty && !remote.deleted && better(remote, local)
+          && (Number(local.updatedAt) || 0) >= (Number(remote.updatedAt) || 0)) {
+        local.ver = (Number(remote.ver) || 0) + 1;
+        local.updatedAt = MD.util.nowMs();
+        await MD.db.put(table, local);
+        retryItems.push(await encryptedItem(table, local, dek, localDeviceId));
+        retryLocals.push({ table: table, record: local });
+        continue;
+      }
+
       if (!local || better(remote, local)) {
         remote._dirty = false;
         await MD.db.put(table, remote);
         MD.toast.show('该记录已在其他设备更新', 'info');
         MD.bus.emit('data:changed', { table: table, id: id, action: 'conflict' });
       } else if (local._dirty) {
+        // 平局（ver/updatedAt 完全相等）：服务器拒绝等 ver 推送，原样重试永远冲突，
+        // 脏标记永远清不掉 → 每分钟重推同样的字节（实测死循环）。
+        // 让本地胜出：ver+1 落库后再推，服务器必然接受，一轮收敛。
+        if (!better(remote, local) && !better(local, remote)) {
+          local.ver = (Number(local.ver) || 0) + 1;
+          local.updatedAt = MD.util.nowMs();
+          await MD.db.put(table, local);
+        }
         retryItems.push(await encryptedItem(table, local, dek, localDeviceId));
         retryLocals.push({ table: table, record: local });
       }

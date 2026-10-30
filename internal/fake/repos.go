@@ -42,17 +42,23 @@ type Repos struct {
 
 	// attachments: 用户 id -> (附件 id -> 附件元数据)。
 	attachments map[string]map[string]*model.Attachment
+
+	// ledger 是记账本的内存数据（见 ledger.go），懒初始化。
+	ledger *ledgerStore
+	// ledgerAttachments 是账本凭证附件的内存数据（见 ledger_attachment.go）。
+	ledgerAttachments map[string]*model.LedgerAttachment
 }
 
 // New 创建一套空的内存仓储。
 func New() *Repos {
 	return &Repos{
-		users:          make(map[string]*model.User),
-		emailIdx:       make(map[string]string),
-		refresh:        make(map[string]*model.RefreshToken),
-		refreshHashIdx: make(map[string]string),
-		syncStates:     make(map[string]*syncState),
-		attachments:    make(map[string]map[string]*model.Attachment),
+		users:             make(map[string]*model.User),
+		emailIdx:          make(map[string]string),
+		refresh:           make(map[string]*model.RefreshToken),
+		refreshHashIdx:    make(map[string]string),
+		syncStates:        make(map[string]*syncState),
+		attachments:       make(map[string]map[string]*model.Attachment),
+		ledgerAttachments: make(map[string]*model.LedgerAttachment),
 	}
 }
 

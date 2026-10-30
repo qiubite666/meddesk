@@ -437,10 +437,71 @@
 
   /* ============================ 6. 计算层 ============================ */
 
+  // 未归类药物的修复入口：恢复原档案，或整体归到某个现存档案。
+  // 不做静默猜测 —— 归到哪个"人"身上必须由用户点。
+  function openOrphanFix() {
+    if (!MD.family || typeof MD.family.orphanReport !== 'function') {
+      MD.toast.show('当前版本不支持修复', 'error');
+      return;
+    }
+    MD.family.orphanReport().then(function (rep) {
+      var total = rep.meds.length;
+      if (!total) { MD.toast.show('没有未归类的药物', 'info'); return; }
+      var body = MD.ui.el('div', { class: 'stack', style: { gap: '10px' } }, [
+        MD.ui.el('p', {
+          class: 'muted',
+          style: { fontSize: '13px', margin: '0', lineHeight: '1.7' },
+          text: '共 ' + total + ' 味药（另有 ' + rep.schedules.length + ' 条用药方案、'
+            + rep.intakes.length + ' 条服药记录）没有归属档案。'
+            + '它们原来的档案已不存在，因此只在「全部」里能看到。'
+        })
+      ]);
+      if (Object.keys(rep.byPid).length) {
+        body.appendChild(MD.ui.el('button', {
+          class: 'btn btn-primary', type: 'button', text: '恢复这些药原来的档案',
+          onClick: async function () {
+            var n = await MD.family.reviveOrphanProfiles();
+            MD.toast.show(n > 0 ? ('已恢复 ' + n + ' 个档案，药物已归位') : '没有可恢复的档案', n > 0 ? 'success' : 'warn');
+            MD.ui.closeSheet();
+            refreshAll();
+          }
+        }));
+      }
+      if (rep.liveProfiles.length) {
+        body.appendChild(MD.ui.el('p', {
+          class: 'muted', style: { fontSize: '12px', margin: '4px 0 0' }, text: '或者，把它们整体归到：'
+        }));
+        rep.liveProfiles.forEach(function (pr) {
+          body.appendChild(MD.ui.el('button', {
+            class: 'btn btn-ghost', type: 'button',
+            text: (pr.name || '未命名') + (pr.relation ? ' · ' + pr.relation : ''),
+            onClick: async function () {
+              var n = await MD.family.moveOrphansTo(pr.id);
+              MD.toast.show('已归位 ' + n + ' 味药到「' + (pr.name || '未命名') + '」', 'success');
+              MD.ui.closeSheet();
+              refreshAll();
+            }
+          }));
+        });
+      }
+      MD.ui.sheet({ title: '修复未归类药物', body: function (host) { host.appendChild(body); } });
+    }).catch(function (e) {
+      MD.toast.show((e && e.message) || '读取未归类数据失败', 'error');
+    });
+  }
+
   function computeVM(d) {
     var now = nowMs();
     var pid = isAll() ? null : S.profileId;
     var meds = isAll() ? d.meds : d.meds.filter(function (m) { return m.profileId === pid; });
+
+    // 未归类药物：profileId 指向一个不存在的档案（删档案不删药，或对方重建档案换了 id）。
+    // 这些药在「全部」里能看到，切到任何档案都看不到 —— 必须显式告知，否则就是"药凭空少了一堆"。
+    var livePid = {};
+    (d.profiles || []).forEach(function (pr) { livePid[String(pr.id)] = true; });
+    var orphanMeds = (d.meds || []).filter(function (m) {
+      return m && !livePid[String(m.profileId || '')];
+    });
     var medIds = {};
     meds.forEach(function (m) { medIds[m.id] = true; });
     var schedules = d.schedules.filter(function (s) { return medIds[s.medicationId]; });
@@ -550,6 +611,7 @@
 
     return {
       now: now, profiles: d.profiles, profileId: S.profileId,
+      orphanCount: orphanMeds.length,
       doses: doses, todayRate: todayRate, done: done, total: doses.length, overdueCount: overdueCount,
       meds: medVM, history: history, hasMoreHistory: true,
       stats7: stats7, stats30: stats30, bars: bars, heat: heat
@@ -751,6 +813,14 @@
   function renderMeds(el, vm) {
     if (!el) return;
     var head = '<div class="md-section__bar"><div class="section-title">药物清单（' + vm.meds.length + '）</div></div>';
+    if (vm.orphanCount > 0) {
+      head += '<div class="card" style="margin:0 0 10px;border-color:var(--danger)">'
+        + '<div style="font-size:13px;font-weight:600;margin-bottom:4px">有 ' + vm.orphanCount + ' 味药未归属任何档案</div>'
+        + '<div class="muted" style="font-size:12px;line-height:1.6;margin-bottom:8px">'
+        + '它们原来的档案已被删除（删档案不会连药一起删）。这些药只在「全部」里出现，切到具体档案就看不到了。</div>'
+        + '<button class="btn btn-primary" type="button" data-act="orphan-fix">修复归属</button>'
+        + '</div>';
+    }
     var body;
     if (!vm.meds.length) {
       body = '<div class="empty">还没有药物，点击「添加药物」开始</div>';
@@ -1568,6 +1638,7 @@
     if (act === 'med-copy') { promptCopyMed(id); return; }
     if (act === 'profile') { switchProfile(id); return; }
     if (act === 'profile-new') { openProfileForm(null); return; }
+    if (act === 'orphan-fix') { openOrphanFix(); return; }
     if (act === 'profile-edit') { e.stopPropagation(); openProfileForm(id); return; }
     if (act === 'hist-open') { openHistoryActions(id); return; }
     if (act === 'hist-more') { S.historyDays += HISTORY_STEP; refreshAll(); return; }

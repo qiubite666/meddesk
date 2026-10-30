@@ -598,15 +598,29 @@ curl -fsS https://med.example.com/api/v1/health
 
 ## 11. 文档索引
 
+**按角色查阅：**
+
+| 我是… | 先读 |
+|---|---|
+| 新加入的开发 | [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) → [CONTRACTS.md](CONTRACTS.md) |
+| 要对接接口 / 写客户端 | [docs/API.md](docs/API.md) |
+| 要部署或升级 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| 值班 / 排障 | [docs/OPERATIONS.md](docs/OPERATIONS.md) |
+| 关心安全边界 | [docs/SECURITY.md](docs/SECURITY.md) |
+
 | 文档 | 内容 |
 |---|---|
 | [CONTRACTS.md](CONTRACTS.md) | **契约**：所有接口的唯一事实来源 |
-| [docs/API.md](docs/API.md) | HTTP 接口详述（字段表 + 错误码 + curl 示例） |
-| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | 从零到上线 11 步 + 故障排查表 |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | **开发文档**：项目结构、模块职责、技术选型、本地搭建、调试流程、编码规范 |
+| [docs/API.md](docs/API.md) | **接口文档**：全部对外接口（含记账本 26 个、后台 7 个）+ 字段表 + 错误码 + curl 示例 + 限流 |
+| [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | **部署文档**：环境矩阵、配置说明、全新安装/增量升级/回滚、验证清单、版本变更记录 |
+| [docs/OPERATIONS.md](docs/OPERATIONS.md) | **运维文档**：监控告警、日志采集、备份恢复、故障 Runbook、扩容、日常巡检 |
 | [docs/DATA-MODEL.md](docs/DATA-MODEL.md) | 服务端关系模型、客户端域模型、同步协议、IndexedDB |
 | [docs/SECURITY.md](docs/SECURITY.md) | 密钥派生、令牌策略、威胁模型与能力边界 |
 | [docs/EXTENDING.md](docs/EXTENDING.md) | 新增模块的标准步骤与二期预留点 |
 | [docs/TOOLS.md](docs/TOOLS.md) | 工具箱（四个计算器）与文件存储（WebDAV）用法、契约与安全边界 |
+
+> 四份主文档均标注**适用环境**（开发/测试/生产）与**适用版本**；当前基线为 **v0.3.51**（2026-10-30 生产）。
 
 ---
 

@@ -52,7 +52,15 @@
     if (state.image) state.image.textContent = '加载中…';
     return load().then(function (data) {
       state.id = data.captchaId;
-      if (state.image) state.image.innerHTML = data.svg;
+      if (state.image) {
+        state.image.innerHTML = data.svg;
+        // 服务端 SVG 是 6 位宽 174px，容器过窄会 overflow 裁掉右侧两位，
+        // 用户按可见位数输入必错。等比缩放到容器宽度，保证 6 位全部可见。
+        var svgEl = state.image.querySelector('svg');
+        if (svgEl) {
+          svgEl.setAttribute('style', 'display:block;width:100%;height:auto');
+        }
+      }
       if (state.input) state.input.value = '';
       return data;
     }).catch(function (error) {
@@ -79,9 +87,10 @@
       title: '看不清？点击换一张',
       'aria-label': '图形验证码，点击刷新',
       style: {
-        width: '120px', height: '40px', flex: '0 0 auto', cursor: 'pointer',
+        width: 'auto', minWidth: '120px', maxWidth: '60%', height: 'auto',
+        flex: '0 1 auto', cursor: 'pointer',
         border: '1px solid var(--line, #d8dee9)', borderRadius: '8px',
-        overflow: 'hidden', background: '#f4f6f8', lineHeight: '40px',
+        overflow: 'hidden', background: '#f4f6f8',
         textAlign: 'center', fontSize: '12px', color: '#636e72'
       },
       onClick: function () { refresh().catch(function () {}); }

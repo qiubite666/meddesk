@@ -205,6 +205,10 @@
   MD.theme.init();
 
   var sheetCleanup = null;
+  // 每次打开弹窗自增。动作按钮的关闭是异步（等 onClick 的 Promise），
+  // 若该动作顺带打开了新弹窗（如"清空数据"的二次确认），延迟关闭必须能被识别为
+  // 上一代弹窗的遗留动作——否则会把刚打开的新弹窗顺手关掉，表现为"点了没反应"。
+  var sheetSeq = 0;
 
   function appendChildren(node, children) {
     if (children == null) return node;
@@ -267,6 +271,7 @@
       options = options || {};
       var host = doc.getElementById('modal-host');
       if (!host) return null;
+      var mySeq = ++sheetSeq;
       MD.ui.closeSheet();
       host.hidden = false;
       host.setAttribute('role', 'presentation');
@@ -291,7 +296,9 @@
           onClick: function () {
             MD.haptic.tap();
             Promise.resolve(action.onClick ? action.onClick() : undefined).then(function (result) {
-              if (result !== false) MD.ui.closeSheet();
+              // 只关自己这一代：动作若已打开新弹窗（sheetSeq 变大），跳过，
+              // 否则会把新弹窗关掉（连续确认框曾因此在第二个框上凭空消失）。
+              if (result !== false && mySeq === sheetSeq) MD.ui.closeSheet();
             }).catch(function (error) {
               MD.toast.show(error && error.message ? error.message : '操作失败', 'error');
             });

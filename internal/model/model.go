@@ -156,6 +156,19 @@ type TokenResponse struct {
 	KDFSalt      string `json:"kdfSalt"`
 	WrappedDEK   string `json:"wrappedDek"`
 	DEKIV        string `json:"dekIv"`
+
+	// EnvelopeStale 表示「口令已被管理员改过，但 wrappedDek 仍由旧口令包裹」。
+	// 客户端拿到 true 时不要尝试用新口令解包，而应使用本地缓存的 DEK
+	// 重新包裹一次并调用 /auth/repair-envelope（详见 migrations/0003 的说明）。
+	EnvelopeStale bool `json:"envelopeStale"`
+}
+
+// EnvelopeRequest 是「用本地 DEK 重新包裹」的请求体（修复待修复信封 / 开启托管）。
+//
+// WrappedDEK 为空表示清除托管信封。
+type EnvelopeRequest struct {
+	WrappedDEK string `json:"wrappedDek"`
+	DEKIV      string `json:"dekIv"`
 }
 
 // UserDTO 对外暴露的用户信息。
@@ -169,6 +182,12 @@ type UserDTO struct {
 type MeResponse struct {
 	User     UserDTO `json:"user"`
 	ServerTime int64 `json:"serverTime"`
+
+	// RecoveryEnabled 表示该账号是否开启了「托管恢复」（设置页据此显示开关状态）。
+	RecoveryEnabled bool `json:"recoveryEnabled"`
+	// IsAdmin 表示该账号在后台白名单内（前端据此显示「网站后台」入口）。
+	// 它只是展示用的提示，真正的权限校验在 /api/v1/admin/* 上。
+	IsAdmin bool `json:"isAdmin"`
 }
 
 // ---------------------------------------------------------------- 存储实体
@@ -181,8 +200,16 @@ type User struct {
 	KDFSalt      []byte
 	WrappedDEK   []byte
 	DEKIV        []byte
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+
+	// EnvelopeStale 见 TokenResponse.EnvelopeStale。
+	EnvelopeStale bool
+	// RecoveryWrappedDEK 是被服务端恢复公钥包裹的 DEK（账号自愿开启托管时才有）。
+	// 未开启时为空；服务端只用它在「管理员直接改口令」时解出 DEK 再重新包裹。
+	RecoveryWrappedDEK []byte
+	RecoveryIV         []byte
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // RefreshToken 是 refresh_tokens 表的行映射。

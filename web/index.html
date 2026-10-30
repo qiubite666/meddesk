@@ -105,5 +105,8 @@
   <script src="/assets/js/family-link.js" defer></script>
   <script src="/assets/js/family.js" defer></script>
   <script src="/assets/js/app.js" defer></script>
+  <!-- 记账本：defer 脚本在 DOMContentLoaded 之前执行完成，
+       因此它自己注册路由即可，app.js 里不再保留 ledger 占位项（避免重复路由）。 -->
+  <script src="/assets/js/ledger.js" defer></script>
 </body>
 </html>

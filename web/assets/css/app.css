@@ -298,3 +298,125 @@ svg { display: block; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
 }
+
+/* ==========================================================================
+ * 家庭健康（family.js 专用）
+ *
+ * 集中在这里而不是散落成内联 style：同一种"档案卡片/药物条目"在列表页有 N 个，
+ * 内联写在每处会逐渐跑偏；类名带 fam- 前缀，不会与其它模块的样式互相影响。
+ * ========================================================================== */
+
+/* 档案卡片：整张卡可点进详情，右侧只留图标动作。
+   去掉"查看"文字按钮后，用 chevron 暗示可点，比三个文字按钮省一半宽度。 */
+.fam-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+  cursor: pointer;
+  transition: border-color var(--dur), box-shadow var(--dur), transform var(--dur);
+}
+.fam-card:hover { border-color: color-mix(in srgb, var(--brand) 45%, var(--border)); }
+.fam-card:active { transform: scale(.995); }
+
+.fam-card__body { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1 1 auto; }
+.fam-card__name {
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.35;
+  letter-spacing: .2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fam-card__meta {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  letter-spacing: .2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.fam-card__acts { display: flex; align-items: center; gap: 2px; flex: 0 0 auto; }
+.fam-card__chev { display: flex; margin-left: 2px; color: color-mix(in srgb, var(--text-dim) 55%, transparent); }
+.fam-card__chev .icon { width: 18px; height: 18px; }
+
+/* 图标动作按钮。
+   比通用 .btn-icon 的 44px 小一号（36px）：这是密集列表里的次级操作，
+   44px 两个并排会把药名挤成两行；36px 仍在可点范围内，且让整行更紧凑。 */
+.fam-act {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  min-width: 36px;
+  height: 36px;
+  min-height: 36px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--dur), color var(--dur);
+}
+.fam-act .icon { width: 18px; height: 18px; }
+.fam-act:hover { background: var(--surface-2); color: var(--text); }
+.fam-act:focus-visible { outline: 3px solid color-mix(in srgb, var(--brand) 30%, transparent); outline-offset: 2px; }
+.fam-act--danger { color: var(--danger); }
+.fam-act--danger:hover {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+/* 药物条目：名称与剂量/频次分两行，行间用细分隔线而不是卡片，
+   一屏能放下更多药，也避免卡片套卡片。 */
+.fam-med {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+.fam-med:last-of-type { border-bottom: 0; padding-bottom: 2px; }
+.fam-med__body { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1 1 auto; }
+.fam-med__name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: .2px;
+}
+.fam-med__meta {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  letter-spacing: .2px;
+  word-break: break-word;
+}
+.fam-med__acts { display: flex; gap: 2px; flex: 0 0 auto; }
+
+/* 卡片内的次要说明文字，统一字号与行距，避免各处 12/13px 混用 */
+.fam-hint { font-size: 12px; line-height: 1.6; color: var(--text-dim); margin: 0; }
+
+/* 卡片内分区标题：18px 的 .section-title 是给页面级标题的，
+   放进卡片会压过档案名，这里用 14px 建立"卡片标题 > 条目名 > 说明"的层级 */
+.fam-title {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .3px;
+  color: var(--text);
+}
+/* 数值列对齐：依从率/次数这类数字逐行比较时才不会左右跳动 */
+.fam-num { font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1; }
+/* 详情页返回：chevron 默认朝右，旋转成朝左 */
+.fam-back .icon { width: 18px; height: 18px; transform: rotate(180deg); }

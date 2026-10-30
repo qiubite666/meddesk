@@ -23,6 +23,7 @@ type Config struct {
 	DB        DBConfig
 	Redis     RedisConfig
 	Auth      AuthConfig
+	Admin     AdminConfig
 	Sync      SyncConfig
 	Upload    UploadConfig
 	PDF       PDFConfig
@@ -55,6 +56,29 @@ type AuthConfig struct {
 	Argon2Threads  uint8
 	SignupEnabled  bool
 	RefreshReuseGrace time.Duration // 刷新令牌重用宽限期（并发刷新容错）
+
+	// RecoveryKey 是「托管恢复」的 RSA 私钥（base64 PKCS#8 DER）。
+	// 为空表示本部署不支持托管恢复：管理员改口令仍可走「设备自愈」的无损路径，
+	// 但需要用户在仍持有 DEK 的设备上登录一次才能恢复完整访问。
+	RecoveryKey string
+}
+
+// AdminConfig 是管理后台的配置。
+//
+// 管理员身份 = 白名单邮箱 + 该账号自身的口令（复用用户表凭据，不另存密码）。
+// 后台 token 与业务 token 分离（不同 scope），即使业务 token 泄露也无法调用后台接口。
+type AdminConfig struct {
+	Emails []string      // 允许登录后台的邮箱白名单（大小写不敏感）
+	TTL    time.Duration // 后台会话有效期
+
+	// 独立管理员凭据（可选）。设置后，白名单邮箱除账号口令外，
+	// 还可以用这组凭据登录后台。
+	//
+	// 【为什么需要】meddesk 是端到端加密：重置账号口令会让旧 KEK 无法解包 DEK，
+	// 该账号已同步的密文与家庭关联全部失效。为了"能进后台"而重置真实账号口令，
+	// 代价过大。因此后台允许配置一组独立凭据：密码只用于后台，账号本身不受影响。
+	Salt         string // KDF salt（base64），前端派生 PBKDF2 用
+	PasswordHash string // argon2id(PBKDF2(管理员口令, salt))，与用户表同格式
 }
 
 type SyncConfig struct {
@@ -118,8 +142,19 @@ func Load() (*Config, error) {
 			Argon2Memory:      uint32(envInt("MEDDESK_ARGON2_MEMORY", 65536)),
 			Argon2Time:        uint32(envInt("MEDDESK_ARGON2_ITERATIONS", 3)),
 			Argon2Threads:     uint8(envInt("MEDDESK_ARGON2_PARALLELISM", 2)),
-			SignupEnabled:     envBool("MEDDESK_SIGNUP_ENABLED", true),
+			// 默认关闭：避免"部署到公网却忘了关注册"变成公开的匿名账本。
+			// 需要开户时临时置 true → 重启 → 注册 → 改回 false → 重启。
+			SignupEnabled:     envBool("MEDDESK_SIGNUP_ENABLED", false),
 			RefreshReuseGrace: envDuration("MEDDESK_REFRESH_REUSE_GRACE", 30*time.Second),
+			RecoveryKey:       envString("MEDDESK_RECOVERY_KEY", ""),
+		},
+		Admin: AdminConfig{
+			// 默认**空名单**：不在代码里内置任何个人邮箱。
+			// 生产环境必须在 .meddesk.env 显式配置，否则 /admin 无人可登录（启动时会有 WARN）。
+			Emails:       splitEmails(envString("MEDDESK_ADMIN_EMAILS", "")),
+			TTL:          envDuration("MEDDESK_ADMIN_TTL", 8*time.Hour),
+			Salt:         envString("MEDDESK_ADMIN_SALT", ""),
+			PasswordHash: envString("MEDDESK_ADMIN_PASSWORD_HASH", ""),
 		},
 		Sync: SyncConfig{
 			MaxItemsPerPush: envInt("MEDDESK_SYNC_MAX_ITEMS", 500),
@@ -265,6 +300,36 @@ func (c *Config) Validate() error {
 
 // IsDev 返回是否为开发环境。
 func (c *Config) IsDev() bool { return c.Env == "dev" || c.Env == "development" }
+
+// AdminWarnings 返回管理后台的**非致命**配置告警。
+//
+// 之所以不塞进 Validate()：管理员白名单为空只是"后台没人能登录"，
+// 不足以让整个健康服务起不来——线上已经有用户在用主功能了。
+// 但也不能静默，否则排障时很难把"登不上后台"和"没配白名单"联系起来，
+// 所以由 main 在启动后逐条打 WARN。
+func (c *Config) AdminWarnings() []string {
+	var out []string
+	if len(c.Admin.Emails) == 0 {
+		out = append(out, "MEDDESK_ADMIN_EMAILS 未配置：管理后台 /admin 将无人可登录（如需启用请填入管理员邮箱，多个用逗号分隔）")
+	}
+	if c.Admin.PasswordHash == "" || c.Admin.Salt == "" {
+		out = append(out, "MEDDESK_ADMIN_PASSWORD_HASH / MEDDESK_ADMIN_SALT 未配置：管理后台无法完成口令校验")
+	}
+	return out
+}
+
+// splitEmails 解析逗号分隔的邮箱白名单，统一小写并去空。
+func splitEmails(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
 
 func envString(key, def string) string {
 	if v, ok := os.LookupEnv(key); ok && v != "" {

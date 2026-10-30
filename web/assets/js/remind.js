@@ -37,6 +37,35 @@
   /* ---------------------------------------------------------------- 状态 */
   var state = { supported: false, permission: 'default', running: false };
 
+  // 通知开关：与「系统权限」是两件事。
+  // 权限是浏览器层面的许可（给了就给了，不能由网页收回）；
+  // 开关是业务层面的意愿（不想被打扰时关掉，到点不再弹任何提醒）。
+  // 默认开启，保持升级前行为；显式关过的人才不再收到提醒。
+  var ENABLED_KEY = 'meddesk.remind.enabled';
+
+  function isEnabled() {
+    try {
+      var v = global.localStorage.getItem(ENABLED_KEY);
+      if (v === '0') return false;
+      if (v === '1') return true;
+    } catch (e) { /* 存储不可用时按默认开启 */ }
+    return true;
+  }
+
+  function setEnabled(on) {
+    var want = on !== false;
+    try { global.localStorage.setItem(ENABLED_KEY, want ? '1' : '0'); } catch (e) { /* 忽略 */ }
+    if (want) {
+      start();
+    } else {
+      stop();
+      doses = [];
+      doseMap = Object.create(null);
+    }
+    state.enabled = want;
+    return want;
+  }
+
   var doses = [];                        // 当前待提醒列表（DoseVM 副本）
   var doseMap = Object.create(null);     // occKey -> dose
   var fireLog = Object.create(null);     // occKey -> {count, nextAt, lastAt}
@@ -234,6 +263,8 @@
   /** 单次校准：遍历待提醒列表，决定是否触发 */
   function tickOnce() {
     if (!state.running) { return; }
+    // 关掉开关后即使定时器还在跑也不弹任何东西（stop() 之外的兜底）
+    if (!isEnabled()) { return; }
     var now = nowMs();
     for (var i = 0; i < doses.length; i++) {
       var dose = doses[i];
@@ -361,6 +392,8 @@
    */
   function schedule(list) {
     init();
+    // 关掉通知时不接排程：否则开关一开就会把积压的剂量全部补弹一遍
+    if (!isEnabled()) { doses = []; doseMap = Object.create(null); return; }
     var arr = isArr(list) ? list : [];
     doses = [];
     doseMap = Object.create(null);
@@ -450,6 +483,8 @@
     start: start,
     stop: stop,
     ensurePermission: ensurePermission,
+    isEnabled: isEnabled,
+    setEnabled: setEnabled,
     schedule: schedule,
     snooze: snooze,
     onFire: onFire,

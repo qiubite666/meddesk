@@ -118,6 +118,12 @@ type UserRepo interface {
 	// UpdateCredentials 更新口令哈希与密钥信封（改口令 / 重新包裹 DEK 时使用）。
 	// 用户不存在时返回 ErrNotFound。
 	UpdateCredentials(ctx context.Context, id, passwordHash string, kdfSalt, wrappedDEK, dekIV []byte) error
+	// UpdatePasswordKeepEnvelope 只改口令与盐，保留原信封并标记为待修复。
+	UpdatePasswordKeepEnvelope(ctx context.Context, id, passwordHash string, kdfSalt []byte) error
+	// RepairEnvelope 用客户端重包裹的信封替换旧的，并清除待修复标记。
+	RepairEnvelope(ctx context.Context, id string, wrappedDEK, dekIV []byte) error
+	// SetRecoveryEnvelope 写入或清除托管恢复信封（wrapped 为空即关闭）。
+	SetRecoveryEnvelope(ctx context.Context, id string, wrapped, iv []byte) error
 }
 
 // RefreshRepo 是 refresh_tokens 表的仓储接口。

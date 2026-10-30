@@ -38,6 +38,10 @@ func Mount(rg *gin.RouterGroup, svc *Service) {
 		auth.POST("/logout", h.logout)
 		auth.POST("/logout-all", RequireAuth(svc), h.logoutAll)
 		auth.POST("/change-password", RequireAuth(svc), h.changePassword)
+		// 托管恢复：公钥公开（客户端用它包裹 DEK），另外两条需要登录态。
+		auth.GET("/recovery-key", h.recoveryKey)
+		auth.POST("/recovery-envelope", RequireAuth(svc), h.setRecoveryEnvelope)
+		auth.POST("/repair-envelope", RequireAuth(svc), h.repairEnvelope)
 		auth.GET("/me", RequireAuth(svc), h.me)
 	}
 }
@@ -168,6 +172,61 @@ func (h *Handler) changePassword(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// recoveryKey 下发托管恢复公钥（base64 SPKI DER）。
+//
+// 公钥本就是公开材料；未启用托管时返回 enabled=false，前端据此隐藏开关。
+func (h *Handler) recoveryKey(c *gin.Context) {
+	if !h.svc.RecoveryEnabled() {
+		c.JSON(http.StatusOK, gin.H{"enabled": false, "publicKey": ""})
+		return
+	}
+	pub, err := h.svc.RecoveryPublicKey()
+	if err != nil {
+		writeError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "no-cache")
+	c.JSON(http.StatusOK, gin.H{"enabled": true, "publicKey": pub})
+}
+
+// setRecoveryEnvelope 开启/关闭账号的「托管恢复」。
+func (h *Handler) setRecoveryEnvelope(c *gin.Context) {
+	userID, ok := UserID(c)
+	if !ok {
+		writeError(c, apierr.New(apierr.CodeUnauthorized, msgSessionExpired))
+		return
+	}
+	var req model.EnvelopeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, apierr.Wrap(apierr.CodeBadRequest, err, "请求参数有误"))
+		return
+	}
+	if err := h.svc.SetRecoveryEnvelope(c.Request.Context(), userID, req.WrappedDEK, req.DEKIV); err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "enabled": req.WrappedDEK != ""})
+}
+
+// repairEnvelope 用本地 DEK 重新包裹后回填信封（管理员改口令后的自愈）。
+func (h *Handler) repairEnvelope(c *gin.Context) {
+	userID, ok := UserID(c)
+	if !ok {
+		writeError(c, apierr.New(apierr.CodeUnauthorized, msgSessionExpired))
+		return
+	}
+	var req model.EnvelopeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, apierr.Wrap(apierr.CodeBadRequest, err, "请求参数有误"))
+		return
+	}
+	if err := h.svc.RepairEnvelope(c.Request.Context(), userID, req.WrappedDEK, req.DEKIV); err != nil {
+		writeError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
 // me 返回当前用户信息。
 func (h *Handler) me(c *gin.Context) {
 	userID, ok := UserID(c)
@@ -187,6 +246,8 @@ func (h *Handler) me(c *gin.Context) {
 			CreatedAt: u.CreatedAt,
 		},
 		ServerTime: time.Now().UnixMilli(),
+		RecoveryEnabled: len(u.RecoveryWrappedDEK) > 0,
+		IsAdmin:         h.svc.IsAdminEmail(u.Email),
 	})
 }
 

@@ -100,7 +100,9 @@
       expiresAt: payload.expiresAt || payload.expires_at || previous.expiresAt || 0,
       kdfSalt: payload.kdfSalt || payload.kdf_salt || previous.kdfSalt || '',
       wrappedDek: payload.wrappedDek || payload.wrappedDEK || payload.wrapped_dek || previous.wrappedDek || '',
-      dekIv: payload.dekIv || payload.dekIV || payload.dek_iv || previous.dekIv || ''
+      dekIv: payload.dekIv || payload.dekIV || payload.dek_iv || previous.dekIv || '',
+      // 管理员用「保留数据」模式改过口令：信封还是旧口令包裹的，不能拿新口令去解。
+      envelopeStale: payload.envelopeStale === true || payload.envelope_stale === true
     };
   }
 
@@ -137,6 +139,44 @@
       storageSet('dek', null);
       return null;
     }
+  }
+
+  /**
+   * 修改口令（无损：数据不重置）。
+   *
+   * 【为什么必须由客户端做】
+   * 服务端只存 wrapped_dek（被 KEK 包裹的数据密钥），KEK 由「口令 → PBKDF2 → HKDF」得到。
+   * 换口令必然换 KEK，因此必须用旧口令解出 DEK，再用新口令重新包裹一次 ——
+   * 这一步只能在持有明文 DEK 的设备上完成，服务端和管理员都做不到。
+   *
+   * 成功后服务端会吊销全部会话（含本机），需要用户用新口令重新登录一次。
+   */
+  async function changePassword(oldPassword, newPassword) {
+    var session = getSession();
+    if (!session || !session.kdfSalt) throw new Error('登录状态异常，请重新登录后再改');
+    var dek = getDEK();
+    if (!dek) throw new Error('本机没有数据密钥，请用旧口令重新登录后再改');
+
+    var oldSalt = MD.crypto.b64ToBytes(session.kdfSalt);
+    var oldDerived = await MD.crypto.derive(oldPassword, oldSalt);
+
+    var newSalt = MD.crypto.generateSalt();
+    var newDerived = await MD.crypto.derive(newPassword, newSalt);
+    var wrapped = await MD.crypto.wrapDEK(dek, newPassword, newSalt);
+
+    // request() 直接把 body 交给 fetch，必须是字符串（否则会发出 [object Object]）
+    await request('/auth/change-password', {
+      method: 'POST',
+      skipUnauthorized: true,
+      body: JSON.stringify({
+        oldPasswordHash: oldDerived.hashB64,
+        newPasswordHash: newDerived.hashB64,
+        kdfSalt: MD.crypto.bytesToB64(newSalt),
+        wrappedDek: wrapped.wrappedB64,
+        dekIv: wrapped.ivB64
+      })
+    });
+    return true;
   }
 
   function clearSession() {
@@ -240,6 +280,7 @@
       var payload = await request('/auth/register', {
         method: 'POST',
         skipAuthRefresh: true,
+        skipUnauthorized: true,
         body: JSON.stringify({
           email: email,
           passwordHash: derived.hashB64,
@@ -284,10 +325,43 @@
       var payload = await request('/auth/login', {
         method: 'POST',
         skipAuthRefresh: true,
+        // 登录失败的 401 是业务结果（口令不对），必须作为普通错误抛给表单显示；
+        // 走全局未授权流程会 clearSession + 重渲染登录页，把错误提示吞掉。
+        skipUnauthorized: true,
         body: JSON.stringify({ email: email, passwordHash: derived.hashB64 })
       });
       var session = setSession(normalizeSession(payload, { kdfSalt: saltB64 }));
       rememberAccountSalt(email, session.kdfSalt || saltB64);
+
+      // 管理员用「保留数据」模式改过口令：服务端换了口令与盐，但信封仍是旧口令包裹的，
+      // 拿新口令去解必然失败（表现为"口令对了却进不去"）。此时改用本机缓存的 DEK，
+      // 并用新口令重新包裹一份回填 —— 数据一条不动，服务端全程拿不到 DEK。
+      if (session.envelopeStale) {
+        var localDek = getDEK();
+        if (!localDek) {
+          throw new Error('这个账号的口令已被管理员重置。数据没有丢：请先用一台曾经登录过该账号的设备打开一次以恢复密钥（那台设备会自动完成），再来这里登录。');
+        }
+        setDEK(localDek);
+        try {
+          var repairSalt = MD.crypto.b64ToBytes(session.kdfSalt || saltB64);
+          var rewrapped = await MD.crypto.wrapDEK(localDek, password, repairSalt);
+          await request('/auth/repair-envelope', {
+            method: 'POST',
+            skipAuthRefresh: true,
+            skipUnauthorized: true,
+            body: JSON.stringify({ wrappedDek: rewrapped.wrappedB64, dekIv: rewrapped.ivB64 })
+          });
+          session.envelopeStale = false;
+          session.wrappedDek = rewrapped.wrappedB64;
+          session.dekIv = rewrapped.ivB64;
+          setSession(session);
+        } catch (e) {
+          // 修复失败不影响本次使用：本机已有 DEK，能正常读写；
+          // 下次登录若仍是旧信封，会再试一次。
+        }
+        return session;
+      }
+
       return unlockSession(session, password);
     },
     refresh: refreshSession,
@@ -304,6 +378,7 @@
         clearSession();
       }
     },
+    // 当前账号信息：邮箱、是否开启托管恢复、是否管理员（isAdmin 决定「网站后台」入口）。
     me: function () { return request('/auth/me'); },
     push: function (changes) {
       return request('/sync/push', { method: 'POST', body: JSON.stringify({ changes: changes, items: changes }) });
@@ -313,7 +388,10 @@
       return request('/sync/pull?' + params.toString());
     },
     stats: function () { return request('/sync/stats'); },
-    reset: function () { return request('/sync/reset', { method: 'POST', body: '{}' }); },
+    // 服务端要求确认词 DELETE-ALL，缺了会 400（历史实现只发 {}，导致"清空云端"从未生效）。
+    reset: function () {
+      return request('/sync/reset', { method: 'POST', body: JSON.stringify({ confirm: 'DELETE-ALL' }) });
+    },
     uploadAttachment: function (options) {
       options = options || {};
       var form = new FormData();
@@ -357,6 +435,24 @@
     setSession: setSession,
     clearSession: clearSession,
     getDEK: getDEK,
+    changePassword: changePassword,
+
+    /** 取托管恢复公钥（未启用时 enabled=false）。 */
+    recoveryKey: function () { return request('/auth/recovery-key', { skipAuthRefresh: true }); },
+
+    /**
+     * 开启/关闭托管恢复。
+     *
+     * 开启后，服务端持有一份被恢复公钥包裹的 DEK —— 管理员可以直接改口令且数据无损，
+     * 任何设备都能立刻用新口令登录。代价是持有恢复私钥的一方可解密该账号数据，
+     * 因此这是用户自愿开启的开关，默认关闭。
+     */
+    setRecoveryEnvelope: function (wrappedB64, ivB64) {
+      return request('/auth/recovery-envelope', {
+        method: 'POST',
+        body: JSON.stringify({ wrappedDek: wrappedB64 || '', dekIv: ivB64 || '' })
+      });
+    },
     // 底层请求封装对外暴露：WebDAV 等扩展模块需要复用同一套 Bearer 鉴权与 401 refresh，
     // 否则各自裸 fetch 会丢掉自动续期。仅供本仓库内部模块使用。
     request: request,

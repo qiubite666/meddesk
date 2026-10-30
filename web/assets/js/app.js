@@ -74,13 +74,51 @@
     MD.ui.sheet({
       title: '账户',
       body: function (el) {
-        el.appendChild(MD.ui.el('div', { class: 'stack' }, [
-          MD.ui.el('div', { class: 'card card--flat' }, [
-            MD.ui.el('strong', { text: '当前账户' }),
-            MD.ui.el('div', { class: 'muted', text: session.userId || '未登录' })
-          ]),
+        var accountCard = MD.ui.el('div', { class: 'card card--flat' }, [
+          MD.ui.el('strong', { text: '当前账户' }),
+          MD.ui.el('div', { class: 'muted', text: session.userId || '未登录' })
+        ]);
+        var box = MD.ui.el('div', { class: 'stack' }, [
+          accountCard,
           MD.ui.el('p', { class: 'muted', text: '业务数据使用端到端加密保护，解密密钥不会发送到服务端。' })
-        ]));
+        ]);
+        el.appendChild(box);
+
+        // 管理员入口：是否显示由服务端判定（/auth/me 的 isAdmin），前端不硬编码邮箱 ——
+        // 换管理员只需改 MEDDESK_ADMIN_EMAILS，不用发前端。
+        (async function () {
+          var info = null;
+          try { info = await MD.api.me(); } catch (e) { return; }
+          if (!info || !info.user) return;
+
+          // 有邮箱就显示邮箱（比 userId 可读），没有再退回 userId。
+          if (info.user.email) {
+            MD.ui.clear(accountCard);
+            accountCard.appendChild(MD.ui.el('strong', { text: '当前账户' }));
+            accountCard.appendChild(MD.ui.el('div', { class: 'muted', text: info.user.email }));
+          }
+          if (!info.isAdmin) return;
+
+          var adminBtn = MD.ui.el('button', {
+            class: 'btn btn-ghost', type: 'button',
+            style: { gap: '8px', justifyContent: 'flex-start' },
+            onClick: function () {
+              // 新标签打开：后台是独立页面（自己的登录态、独立 scope 的令牌），
+              // 不能嵌在应用里，否则会和业务会话互相干扰。
+              try { window.open('/admin', '_blank', 'noopener'); } catch (e) { /* 被拦截时忽略 */ }
+              MD.ui.closeSheet();
+            }
+          }, [
+            MD.icon('user'),
+            MD.ui.el('span', { text: '网站后台' })
+          ]);
+          box.appendChild(adminBtn);
+          box.appendChild(MD.ui.el('p', {
+            class: 'muted',
+            style: { fontSize: '12px', margin: '0' },
+            text: '仅管理员可见：管理账号、重置口令、查看同步与授权概况。'
+          }));
+        })();
       },
       actions: [
         { label: '关闭', kind: 'ghost' },
@@ -117,8 +155,10 @@
 
     [
       // 「健康记录」已由「家庭健康」取代（家庭健康是真实功能，不再是占位）
-      { id: 'todo', title: '日程待办', subtitle: '家庭日程与任务', icon: 'calendar', order: 110 },
-      { id: 'ledger', title: '家庭账本', subtitle: '共同收支记录', icon: 'wallet', order: 120 }
+      // 「记账本」占位已删除：真实实现在 ledger.js，它在加载期自行注册
+      // 路由 id 'ledger'（order 105，排在日程待办 110 之上）。此处若再保留同 id
+      // 项，registerRoutes() 在 DOMContentLoaded 里执行时会把真模块覆盖成「即将上线」。
+      { id: 'todo', title: '日程待办', subtitle: '家庭日程与任务', icon: 'calendar', order: 110 }
     ].forEach(function (route) {
       MD.router.register({
         id: route.id,
@@ -226,6 +266,150 @@
     return { idle: '已同步', syncing: '同步中', offline: '离线', error: '同步失败' }[value] || '未知';
   }
 
+  // 修改口令（无损）：数据不重置。
+  // 原理：用旧口令解出 DEK，再用新口令重新包裹后提交；服务端只换凭据与信封。
+  // 注意：成功后服务端会吊销全部会话（含本机），需要重新登录一次。
+  function openChangePasswordSheet() {
+    if (!MD.api || typeof MD.api.changePassword !== 'function') {
+      MD.toast.show('当前版本不支持修改口令', 'error');
+      return;
+    }
+    var oldIn = MD.ui.el('input', { class: 'input', type: 'password', autocomplete: 'current-password', placeholder: '当前口令' });
+    var newIn = MD.ui.el('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '新口令（至少 8 位）' });
+    var repIn = MD.ui.el('input', { class: 'input', type: 'password', autocomplete: 'new-password', placeholder: '再输一次新口令' });
+    var errBox = MD.ui.el('p', { class: 'muted', style: { color: 'var(--danger)', fontSize: '13px', margin: '0', display: 'none' } });
+
+    MD.ui.sheet({
+      title: '修改口令',
+      body: function (host) {
+        host.appendChild(MD.ui.el('div', { class: 'stack', style: { gap: '10px' } }, [
+          MD.ui.el('p', {
+            class: 'muted',
+            style: { fontSize: '12px', margin: '0' },
+            text: '只更换登录口令，药物与档案数据全部保留。修改成功后所有设备（含本机）都需要用新口令重新登录一次。'
+          }),
+          MD.ui.el('div', { class: 'field' }, [MD.ui.el('span', { class: 'label', text: '当前口令' }), oldIn]),
+          MD.ui.el('div', { class: 'field' }, [MD.ui.el('span', { class: 'label', text: '新口令' }), newIn]),
+          MD.ui.el('div', { class: 'field' }, [MD.ui.el('span', { class: 'label', text: '确认新口令' }), repIn]),
+          errBox
+        ]));
+      },
+      actions: [
+        { label: '取消', kind: 'ghost', onClick: function () { MD.ui.closeSheet(); } },
+        {
+          label: '确认修改', kind: 'primary',
+          onClick: async function () {
+            var oldPwd = String(oldIn.value || '');
+            var newPwd = String(newIn.value || '');
+            var rep = String(repIn.value || '');
+            function fail(msg) {
+              errBox.textContent = msg;
+              errBox.style.display = '';
+              return false;
+            }
+            errBox.style.display = 'none';
+            if (!oldPwd) return fail('请输入当前口令');
+            if (newPwd.length < 8) return fail('新口令至少 8 位');
+            if (newPwd !== rep) return fail('两次输入的新口令不一致');
+            if (newPwd === oldPwd) return fail('新口令不能与当前口令相同');
+            try {
+              await MD.api.changePassword(oldPwd, newPwd);
+            } catch (e) {
+              var msg = (e && e.message) ? e.message : '修改失败';
+              return fail(msg);
+            }
+            MD.toast.show('口令已修改，请用新口令重新登录', 'success');
+            try { MD.api.clearSession(); } catch (e2) { /* 忽略 */ }
+            showAuth('login');
+            return true;
+          }
+        }
+      ]
+    });
+  }
+
+  // 托管恢复：把自己的数据密钥用服务端恢复公钥再包一份，换取「管理员能直接改口令而不丢数据」。
+  //
+  // 这是明确的安全权衡，所以必须把代价写清楚，由用户自己决定：
+  //   · 开启后，持有恢复私钥的一方（服务端/运维）具备解密本账号数据的能力；
+  //   · 不开启也能改口令，只是需要在一台曾登录过的设备上打开一次（设备自愈）。
+  // 重新渲染当前视图。
+  //
+  // 【为什么不能调 paint()】paint 是 family.js 内部的函数，app.js 作用域里没有它。
+  // 这里走路由层重渲染（go 会再次执行 route.render），与侧边栏切换是同一条路径。
+  function refreshCurrentView() {
+    try {
+      var id = MD.router && typeof MD.router.current === 'function' ? MD.router.current() : '';
+      if (id && MD.router && typeof MD.router.go === 'function') MD.router.go(id);
+    } catch (e) { /* 渲染失败不影响已经完成的写入 */ }
+  }
+
+  function openRecoverySheet(currentlyOn) {
+    if (!MD.api || typeof MD.api.setRecoveryEnvelope !== 'function') {
+      MD.toast.show('当前版本不支持托管恢复', 'error');
+      return;
+    }
+    var errBox = MD.ui.el('p', {
+      class: 'muted',
+      style: { color: 'var(--danger)', fontSize: '13px', margin: '0', display: 'none' }
+    });
+    MD.ui.sheet({
+      title: currentlyOn ? '关闭托管恢复' : '开启托管恢复',
+      body: function (host) {
+        host.appendChild(MD.ui.el('div', { class: 'stack', style: { gap: '10px' } }, [
+          MD.ui.el('p', {
+            class: 'muted',
+            style: { fontSize: '13px', margin: '0', lineHeight: '1.7' },
+            text: currentlyOn
+              ? '关闭后服务端会删除那份恢复信封。之后管理员改你的口令时数据不会丢，但需要你在曾登录过的设备上打开一次才能恢复访问。'
+              : '开启后，管理员可以直接修改你的登录口令，所有数据与档案完全保留，任何设备都能立刻用新口令登录。'
+          }),
+          currentlyOn ? null : MD.ui.el('p', {
+            class: 'muted',
+            style: { fontSize: '12px', margin: '0', lineHeight: '1.7', color: 'var(--danger)' },
+            text: '代价要说清：开启意味着服务器持有一份能解开你数据密钥的恢复信封——持有该私钥的一方可解密你的健康数据。如果你更在意隐私，请不要开启；不开启同样能改口令，只是需要一台旧设备配合。'
+          }),
+          errBox
+        ]));
+      },
+      actions: [
+        { label: '取消', kind: 'ghost', onClick: function () { MD.ui.closeSheet(); return true; } },
+        {
+          label: currentlyOn ? '确认关闭' : '确认开启',
+          kind: currentlyOn ? 'ghost' : 'primary',
+          onClick: async function () {
+            errBox.style.display = 'none';
+            try {
+              if (currentlyOn) {
+                await MD.api.setRecoveryEnvelope('', '');
+                MD.toast.show('已关闭托管恢复', 'success');
+                refreshCurrentView();
+                return true;
+              }
+              var dek = MD.api.getDEK();
+              if (!dek) throw new Error('本机没有数据密钥，请重新登录后再试');
+              var keyInfo = await MD.api.recoveryKey();
+              if (!keyInfo || !keyInfo.enabled || !keyInfo.publicKey) {
+                throw new Error('本部署未启用托管恢复（服务端未配置恢复密钥）');
+              }
+              var wrapped = await MD.crypto.wrapForRecovery(dek, keyInfo.publicKey);
+              await MD.api.setRecoveryEnvelope(wrapped, '');
+              MD.toast.show('已开启托管恢复', 'success');
+              refreshCurrentView();
+              return true;
+            } catch (e) {
+              // 注意：刷新视图失败不能算操作失败——写入已经生效了。
+              // refreshCurrentView 内部已吞掉渲染异常，能走到这里的基本都是真失败。
+              errBox.textContent = (e && e.message) || '操作失败';
+              errBox.style.display = '';
+              return false;
+            }
+          }
+        }
+      ]
+    });
+  }
+
   function renderSettings(view) {
     var syncDescription = MD.ui.el('span', { class: 'setting-item__desc', text: syncLabel(MD.sync.state) });
     var syncButton = buttonWithIcon('立即同步', 'sync', 'btn btn-ghost', async function () {
@@ -296,27 +480,54 @@
       if (!first) return;
       var second = await MD.ui.confirm({ title: '再次确认', message: '请再次确认：立即永久清空本机全部数据？', confirmText: '永久清空', danger: true });
       if (!second) return;
+      // 先清云端：端到端加密下"只清本机"没用——重新登录后 pull 会把服务器上的
+      // 旧记录（含用药历史）原样拉回来，看起来就是"删不掉"。
+      // 必须在 clearSession 之前调用（需要 access token）。
+      var cloudCleared = true;
+      try {
+        await MD.api.reset();
+      } catch (e) {
+        cloudCleared = false;
+      }
       await MD.data.wipeAll();
       MD.haptic.warn();
-      MD.toast.show('本机数据已清空', 'success');
+      MD.toast.show(cloudCleared ? '本机与云端数据均已清空' : '本机已清空；云端清空失败，重新登录后旧数据可能回来',
+        cloudCleared ? 'success' : 'warn');
       showAuth('login');
     });
 
     var passwordButton = buttonWithIcon('修改口令', 'lock', 'btn btn-ghost', function () {
-      MD.toast.show('即将上线', 'info');
+      openChangePasswordSheet();
     });
-    passwordButton.disabled = true;
-    passwordButton.title = '即将上线';
 
-    var remindButton = buttonWithIcon('开启提醒权限', 'clock', 'btn btn-ghost', async function () {
-      if (!MD.remind || typeof MD.remind.ensurePermission !== 'function') {
+    // 用药提醒开关：可开可关（与"通知权限"分开）。
+    // 权限只有第一次会弹窗，之后由用户在系统里控制；这里的开关是"我想不想被提醒"，
+    // 关掉之后既不再弹系统通知，也不再累积待提醒队列。
+    var remindToggleBtn = MD.ui.el('button', { class: 'btn btn-ghost', type: 'button' });
+    function paintRemindToggle() {
+      var on = true;
+      try { on = MD.remind && typeof MD.remind.isEnabled === 'function' ? MD.remind.isEnabled() : true; } catch (e) { on = true; }
+      remindToggleBtn.textContent = on ? '已开启 · 点击关闭' : '已关闭 · 点击开启';
+      remindToggleBtn.className = 'btn ' + (on ? 'btn-primary' : 'btn-ghost');
+    }
+    paintRemindToggle();
+    remindToggleBtn.addEventListener('click', async function () {
+      if (!MD.remind || typeof MD.remind.setEnabled !== 'function') {
         MD.toast.show('提醒模块未加载', 'error');
         return;
       }
-      remindButton.disabled = true;
+      var on = MD.remind.isEnabled();
+      if (on) {
+        MD.remind.setEnabled(false);
+        paintRemindToggle();
+        MD.toast.show('已关闭用药提醒（到点不会再弹）', 'success');
+        return;
+      }
+      remindToggleBtn.disabled = true;
       try {
         var permission = await MD.remind.ensurePermission();
         if (permission === 'granted') {
+          MD.remind.setEnabled(true);
           MD.toast.show('已开启用药提醒', 'success');
         } else if (permission === 'unsupported_pwa') {
           MD.toast.show('iPhone/iPad 请先用 Safari 打开本站 → 分享 → 「添加到主屏幕」，从主屏图标进入后再允许通知', 'warn');
@@ -330,7 +541,8 @@
       } catch (error) {
         MD.toast.show(error.message || '无法申请通知权限', 'error');
       } finally {
-        remindButton.disabled = false;
+        remindToggleBtn.disabled = false;
+        paintRemindToggle();
       }
     });
 
@@ -338,12 +550,33 @@
       MD.ui.el('h2', { class: 'section-title', text: '外观' }),
       settingRow('主题', '跟随系统或手动选择深浅色', themeControl())
     ]);
+    // 托管恢复开关的状态要问服务端（/auth/me）：先渲染占位再回填，避免整页等网络。
+    var recoveryBtn = MD.ui.el('button', { class: 'btn btn-ghost', type: 'button', text: '查询中…' });
+    recoveryBtn.disabled = true;
+    var recoveryOn = false;
+    (async function () {
+      try {
+        var info = await MD.api.me();
+        recoveryOn = Boolean(info && info.recoveryEnabled);
+      } catch (e) { /* 离线时按未开启显示 */ }
+      recoveryBtn.textContent = recoveryOn ? '已开启 · 点击关闭' : '未开启 · 点击开启';
+      recoveryBtn.className = 'btn ' + (recoveryOn ? 'btn-primary' : 'btn-ghost');
+      recoveryBtn.disabled = false;
+    })();
+    recoveryBtn.addEventListener('click', function () {
+      if (recoveryBtn.disabled) return;
+      openRecoverySheet(recoveryOn);
+    });
+    var recoveryRow = settingRow('托管恢复',
+      '开启后管理员可直接改你的口令而数据不丢；代价是服务端持有一份可解密的恢复信封', recoveryBtn);
+
     var syncCard = MD.ui.el('section', { class: 'card stack' }, [
       MD.ui.el('h2', { class: 'section-title', text: '云端同步' }),
       syncRow,
       settingRow('通知能力', remindDiagText(), MD.icon('clock')),
-      settingRow('用药提醒', '系统通知需要一次性授权；浏览器不支持时，页面内横幅提醒仍会生效', remindButton),
-      settingRow('修改口令', '即将上线', passwordButton)
+      settingRow('用药提醒', '可随时开关；关闭后到点不再弹任何提醒（系统权限需首次授权）', remindToggleBtn),
+      settingRow('修改口令', '只换登录口令，数据全部保留（改完需重新登录一次）', passwordButton),
+      recoveryRow
     ]);
     var backupControls = MD.ui.el('div', { class: 'row row--wrap' }, [exportButton, importButton, importInput]);
     var dataCard = MD.ui.el('section', { class: 'card stack' }, [

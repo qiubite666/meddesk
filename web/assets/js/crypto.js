@@ -97,6 +97,16 @@
       var wrapped = await subtle.encrypt({ name: 'AES-GCM', iv: iv }, kek, toBytes(dek));
       return { wrappedB64: bytesToB64(wrapped), ivB64: bytesToB64(iv) };
     },
+    // 托管恢复：用服务端恢复公钥（RSA-OAEP-SHA256）把 DEK 再包一份。
+    // 与口令无关，因此换口令后这份信封仍然有效 —— 这正是管理员能"直接改口令
+    // 而不动数据"的前提。
+    wrapForRecovery: async function (dek, publicKeyB64) {
+      requireCrypto();
+      var der = b64ToBytes(publicKeyB64);
+      var key = await subtle.importKey('spki', der, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+      var ciphertext = await subtle.encrypt({ name: 'RSA-OAEP' }, key, toBytes(dek));
+      return bytesToB64(new Uint8Array(ciphertext));
+    },
     unwrapDEK: async function (wrappedB64, ivB64, password, salt) {
       var kek = await deriveKEK(password, salt);
       var plain = await subtle.decrypt({ name: 'AES-GCM', iv: b64ToBytes(ivB64) }, kek, b64ToBytes(wrappedB64));

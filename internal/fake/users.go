@@ -92,6 +92,50 @@ func (u userRepo) UpdateCredentials(_ context.Context, id, passwordHash string, 
 	return nil
 }
 
+// UpdatePasswordKeepEnvelope 只改口令与盐，保留原信封并标记待修复。
+func (u userRepo) UpdatePasswordKeepEnvelope(_ context.Context, id, passwordHash string, kdfSalt []byte) error {
+	u.r.mu.Lock()
+	defer u.r.mu.Unlock()
+	got, ok := u.r.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	got.PasswordHash = passwordHash
+	got.KDFSalt = cloneBytes(kdfSalt)
+	got.EnvelopeStale = true
+	got.UpdatedAt = time.Now()
+	return nil
+}
+
+// RepairEnvelope 用客户端重包裹的信封替换旧的，并清除待修复标记。
+func (u userRepo) RepairEnvelope(_ context.Context, id string, wrappedDEK, dekIV []byte) error {
+	u.r.mu.Lock()
+	defer u.r.mu.Unlock()
+	got, ok := u.r.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	got.WrappedDEK = cloneBytes(wrappedDEK)
+	got.DEKIV = cloneBytes(dekIV)
+	got.EnvelopeStale = false
+	got.UpdatedAt = time.Now()
+	return nil
+}
+
+// SetRecoveryEnvelope 写入或清除托管恢复信封。
+func (u userRepo) SetRecoveryEnvelope(_ context.Context, id string, wrapped, iv []byte) error {
+	u.r.mu.Lock()
+	defer u.r.mu.Unlock()
+	got, ok := u.r.users[id]
+	if !ok {
+		return store.ErrNotFound
+	}
+	got.RecoveryWrappedDEK = cloneBytes(wrapped)
+	got.RecoveryIV = cloneBytes(iv)
+	got.UpdatedAt = time.Now()
+	return nil
+}
+
 // normalizeKey 邮箱归一化：去空白 + 转小写，等价于 PG 的 citext 比较语义。
 func normalizeKey(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))

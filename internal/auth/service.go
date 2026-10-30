@@ -28,11 +28,131 @@ type Service struct {
 	refresh store.RefreshRepo
 	cache   cache.Cache
 	cfg     config.AuthConfig
+	// recovery 是托管恢复私钥；nil 表示本部署未启用托管恢复。
+	recovery *RecoveryKey
+	// adminEmails 是后台白名单（小写）。仅用于前端决定是否显示「网站后台」入口；
+	// 真正的权限校验在 /api/v1/admin/* 的 RequireAdmin 中间件里，二者互不影响。
+	adminEmails map[string]bool
+}
+
+// SetAdminEmails 注入后台白名单，供 /auth/me 返回 isAdmin 标记。
+//
+// 【为什么放在认证服务里】前端不该硬编码管理员邮箱（换人就要改前端、也容易泄露）；
+// 让它向服务端问一句"我是不是管理员"，判断依据始终只有配置一处。
+func (s *Service) SetAdminEmails(emails []string) {
+	s.adminEmails = make(map[string]bool, len(emails))
+	for _, e := range emails {
+		e = strings.ToLower(strings.TrimSpace(e))
+		if e != "" {
+			s.adminEmails[e] = true
+		}
+	}
+}
+
+// IsAdminEmail 判断某个邮箱是否在后台白名单内。
+func (s *Service) IsAdminEmail(email string) bool {
+	if s.adminEmails == nil {
+		return false
+	}
+	return s.adminEmails[strings.ToLower(strings.TrimSpace(email))]
 }
 
 // NewService 构造认证服务。users/refresh 由 A1 提供，c 由 A2 提供。
 func NewService(users store.UserRepo, refresh store.RefreshRepo, c cache.Cache, cfg config.AuthConfig) *Service {
-	return &Service{users: users, refresh: refresh, cache: c, cfg: normalizeConfig(cfg)}
+	normalized := normalizeConfig(cfg)
+	recovery, err := ParseRecoveryKey(normalized.RecoveryKey)
+	if err != nil {
+		// 配置坏了不能让整个服务起不来：降级为「不支持托管恢复」，
+		// 管理员改口令仍走设备自愈路径。
+		slog.Warn("托管恢复密钥不可用，已禁用该能力", "error", err)
+		recovery = nil
+	}
+	return &Service{users: users, refresh: refresh, cache: c, cfg: normalized, recovery: recovery}
+}
+
+// RecoveryEnabled 报告本部署是否启用了托管恢复。
+func (s *Service) RecoveryEnabled() bool { return s.recovery != nil }
+
+// RecoveryPublicKey 返回 base64(SPKI DER) 公钥，供客户端包裹 DEK。
+func (s *Service) RecoveryPublicKey() (string, error) {
+	if s.recovery == nil {
+		return "", apierr.New(apierr.CodeNotFound, "本部署未启用托管恢复")
+	}
+	return s.recovery.PublicKeyB64()
+}
+
+// RepairEnvelope 用客户端重新包裹的信封替换「待修复」的旧信封。
+//
+// 【触发条件】管理员用「直接改口令」模式改过口令：password_hash/kdf_salt 已换新，
+// 但 wrapped_dek 仍是旧口令包裹的。持有本地 DEK 的设备登录后重包裹上传即可。
+//
+// 【为什么可以接受】调用方已通过新口令认证，只影响自己的账号；服务端没有 DEK，
+// 无法校验信封内容，所以旧信封保留在 *_prev 列，传坏了还能回滚一次。
+func (s *Service) RepairEnvelope(ctx context.Context, userID, wrappedB64, ivB64 string) error {
+	if userID == "" {
+		return apierr.New(apierr.CodeUnauthorized, msgSessionExpired)
+	}
+	u, err := s.users.GetByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return apierr.New(apierr.CodeUnauthorized, msgSessionExpired)
+		}
+		return apierr.Wrap(apierr.CodeInternal, err, "修复密钥信封失败，请稍后重试")
+	}
+	if !u.EnvelopeStale {
+		return apierr.New(apierr.CodeConflict, "当前密钥信封无需修复")
+	}
+	wrapped, err := base64.StdEncoding.DecodeString(strings.TrimSpace(wrappedB64))
+	if err != nil {
+		return apierr.New(apierr.CodeBadRequest, "信封格式有误")
+	}
+	iv, err := base64.StdEncoding.DecodeString(strings.TrimSpace(ivB64))
+	if err != nil {
+		return apierr.New(apierr.CodeBadRequest, "信封 IV 格式有误")
+	}
+	// AES-GCM 密文 = 明文(32) + tag(16)；长度不符必然不是合法信封。
+	if len(wrapped) != credentialDEKLen+16 || len(iv) != credentialIVLen {
+		return apierr.New(apierr.CodeBadRequest, "信封长度异常")
+	}
+	if err := s.users.RepairEnvelope(ctx, userID, wrapped, iv); err != nil {
+		return apierr.Wrap(apierr.CodeInternal, err, "修复密钥信封失败，请稍后重试")
+	}
+	return nil
+}
+
+// SetRecoveryEnvelope 开启/关闭「托管恢复」。
+//
+// 开启：客户端用服务端恢复公钥（RSA-OAEP）包裹当前 DEK 后上传，长度必须等于模长。
+// 关闭：wrapped 传空，服务端清空两列 —— 之后管理员改口令只能走设备自愈。
+func (s *Service) SetRecoveryEnvelope(ctx context.Context, userID, wrappedB64, ivB64 string) error {
+	if userID == "" {
+		return apierr.New(apierr.CodeUnauthorized, msgSessionExpired)
+	}
+	wrappedB64 = strings.TrimSpace(wrappedB64)
+	if wrappedB64 == "" {
+		if err := s.users.SetRecoveryEnvelope(ctx, userID, nil, nil); err != nil {
+			return apierr.Wrap(apierr.CodeInternal, err, "关闭托管恢复失败，请稍后重试")
+		}
+		return nil
+	}
+	if s.recovery == nil {
+		return apierr.New(apierr.CodeBadRequest, "本部署未启用托管恢复")
+	}
+	wrapped, err := base64.StdEncoding.DecodeString(wrappedB64)
+	if err != nil {
+		return apierr.New(apierr.CodeBadRequest, "托管信封格式有误")
+	}
+	if len(wrapped) != recoveryCipherLen {
+		return apierr.New(apierr.CodeBadRequest, "托管信封长度异常")
+	}
+	var iv []byte
+	if strings.TrimSpace(ivB64) != "" {
+		iv, _ = base64.StdEncoding.DecodeString(strings.TrimSpace(ivB64))
+	}
+	if err := s.users.SetRecoveryEnvelope(ctx, userID, wrapped, iv); err != nil {
+		return apierr.Wrap(apierr.CodeInternal, err, "开启托管恢复失败，请稍后重试")
+	}
+	return nil
 }
 
 // Register 注册新用户并直接返回令牌对。注册未开放返回 CodeForbidden，邮箱重复返回 CodeConflict。
@@ -319,6 +439,9 @@ func (s *Service) issue(ctx context.Context, u *model.User, meta RequestMeta) (*
 		KDFSalt:      base64.StdEncoding.EncodeToString(u.KDFSalt),
 		WrappedDEK:   base64.StdEncoding.EncodeToString(u.WrappedDEK),
 		DEKIV:        base64.StdEncoding.EncodeToString(u.DEKIV),
+		// 管理员改过口令但信封仍是旧口令包裹时，客户端必须改走「用本地 DEK 重包裹」，
+		// 否则会拿新口令解旧信封必然失败，看起来像"口令对了却进不去"。
+		EnvelopeStale: u.EnvelopeStale,
 	}, id, nil
 }
 
