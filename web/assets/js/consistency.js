@@ -103,6 +103,47 @@
     return changed;
   }
 
+  /**
+   * 彻底清空某档案名下的全部业务数据（「删档案 = 删这个人的数据」）。
+   *
+   * 【与 retireMedsOfProfile 的区别】
+   * retireMedsOfProfile 只软删药物与排程，会留下该档案的用药历史（intake）成为孤儿；
+   * 本函数把历史一并清掉，语义与用户在确认框里看到的「删除该档案的全部数据」一致。
+   *
+   * 【为什么不会误删别人的药】
+   * medication.profileId 是**单值**字段，一条药只归属一个档案，"两个人吃同一种药"
+   * 在数据上是两条独立记录。这里按 profileId 精确匹配，别人的记录（profileId 不同）
+   * 与未归类药物（profileId 为空）都不会命中。
+   *
+   * 全部为软删（deleted=true + updatedAt），会进同步队列，其他设备能感知到，
+   * 不是本地硬删。
+   */
+  async function purgeProfileData(profileId) {
+    var out = { meds: 0, schedules: 0, intakes: 0 };
+    if (profileId == null || profileId === '') return out;
+
+    async function softDelete(table, items, counter) {
+      for (var i = 0; i < items.length; i++) {
+        if (!items[i] || items[i].deleted === true) continue;
+        items[i].deleted = true;
+        items[i].updatedAt = Date.now();
+        await table.save(items[i]);
+        out[counter]++;
+      }
+    }
+
+    // 先清历史再清药物：历史是"发生过的事实"，先落软删能让中途失败时
+    // 至少不留下"药没了但历史还在"的半截状态。
+    await softDelete(MD.data.intakes,
+      await listSafe(MD.data.intakes, function (x) { return x.profileId === profileId; }), 'intakes');
+    await softDelete(MD.data.schedules,
+      await listSafe(MD.data.schedules, function (x) { return x.profileId === profileId; }), 'schedules');
+    await softDelete(MD.data.meds,
+      await listSafe(MD.data.meds, function (x) { return x.profileId === profileId; }), 'meds');
+
+    return out;
+  }
+
   async function medById(id) {
     try {
       var list = await MD.data.meds.list();
@@ -181,6 +222,7 @@
     propagateProfile: propagateProfile,
     retireSchedules: retireSchedules,
     retireMedsOfProfile: retireMedsOfProfile,
+    purgeProfileData: purgeProfileData,
     repairAll: repairAll,
     _isStarted: function () { return started; }
   };

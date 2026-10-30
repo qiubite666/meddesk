@@ -621,7 +621,12 @@ func (r ledgerRepo) MarkReimbursement(ctx context.Context, userID string, ids []
 		return 0, nil
 	}
 	// 只更新该账号名下、且确实是支出的记录：收入不允许进入报销流程。
-	const q = `UPDATE ledger_records SET reimbursement_status = $3
+	//
+	// updated_at 必须一起刷新：其他所有写操作都会更新它，唯独这里漏了，导致
+	// ① 任何"按 updatedAt 取变更"的增量逻辑看不到报销状态变化；
+	// ② 数据库里查不出这笔是什么时候被标记为已报销的；
+	// ③ 按修改时间排序的列表里，改了状态的行不会上浮。
+	const q = `UPDATE ledger_records SET reimbursement_status = $3, updated_at = now()
 WHERE user_id = $1 AND id::text = ANY($2) AND type = 'expense'`
 	tag, err := r.s.pool.Exec(ctx, q, uid, ids, status)
 	if err != nil {

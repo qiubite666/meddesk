@@ -268,15 +268,18 @@
     });
   }
 
-  /** 首次打开且本地无任何用药记录时写入示例数据（含 1 条逾期） */
+  /**
+   * 示例数据播种——**已按用户要求关闭**。
+   *
+   * 原逻辑：首次打开且无任何用药记录时，自动写入 2 个示例档案 + 若干药物/排程/记录。
+   * 现改为：任何账号（含新建账号）首次进入都是空账本，不再自动写入。
+   *
+   * 为什么保留 seedSamples() 函数本身而不删：老账号里可能已经存在 sample:true 的
+   * 历史示例数据，设置页的「清空示例数据」仍要靠它来识别与清理。
+   * 这里只切断「自动调用」这一条路径。
+   */
   function ensureSamples(d) {
-    if (d.meds.length) return Promise.resolve(d);
-    var seeded = false;
-    try { seeded = global.localStorage.getItem(LS_SAMPLE) === '1'; } catch (e) { seeded = false; }
-    if (seeded) return Promise.resolve(d);
-    return seedSamples()
-      .then(function () { try { global.localStorage.setItem(LS_SAMPLE, '1'); } catch (e) { /* 忽略 */ } })
-      .then(loadData);
+    return Promise.resolve(d);
   }
 
   function seedSamples() {

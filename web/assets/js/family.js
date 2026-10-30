@@ -1125,16 +1125,18 @@
 
   /* ============================ 5.9 删除档案 ============================ */
 
-  // 删除档案：只动**本账号**的三样东西，绝不触碰关联人的任何数据。
+  // 删除档案：只动**本账号**的数据，绝不触碰关联人的任何数据。
   //
   // 允许操作的范围（全部属于本账号）：
-  //   1. family 表里的这一条档案（软删，进本地同步队列）
-  //   2. 本地快照 blobs（family:<id>，仅本机，不入同步）
-  //   3. 内存里缓存的对方 DEK（forgetDek）
+  //   1. family / profile 表里的这一条档案（软删，进本地同步队列）
+  //   2. 该档案名下的 medication / schedule / intake
+  //      （B 方案「删档案 = 删这个人的数据」，2026-10-30 用户确认）
+  //   3. 本地快照 blobs（family:<id>，仅本机，不入同步）
+  //   4. 内存里缓存的对方 DEK（forgetDek）
   //
   // 明确不做的事：
-  //   - 不删除、不修改任何 medication / schedule / intake 记录
-  //     （对方的数据在你这里只是内存里的视图，从未写入本地表）
+  //   - 对 linked（对方授权的关联副本）**不删**任何 medication / schedule / intake：
+  //     那些药归属对方账号，本地只是内存里的视图，从未写入本地表
   //   - 不调用撤销接口：DELETE /family/grants/:id 按 owner_id 限权，
   //     只有数据所有方能撤销；查看方删掉本地档案后服务端那条授权仍 active，
   //     但不影响对方数据，也不该由查看方替对方做决定。
@@ -1145,19 +1147,26 @@
     if (!member) return false;
     // 先数一下这个档案下挂了多少药：删档案不会连带删药（删人 ≠ 删药），
     // 必须在这里说清楚，否则用户会看到"药都在，但哪个档案里都没有"。
-    var medCount = 0;
+    var medCount = 0, intakeCount = 0;
     if (member.source !== 'linked') {
       try {
         var meds = (await MD.data.meds.list()) || [];
         meds.forEach(function (m) {
           if (m && m.deleted !== true && String(m.profileId || '') === String(member.id)) medCount++;
         });
-      } catch (e) { medCount = 0; }
+        var intakes = (await MD.data.intakes.list()) || [];
+        intakes.forEach(function (r) {
+          if (r && r.deleted !== true && String(r.profileId || '') === String(member.id)) intakeCount++;
+        });
+      } catch (e) { medCount = 0; intakeCount = 0; }
     }
 
-    var tail = medCount > 0
-      ? ('该档案下有 ' + medCount + ' 味药。删除档案不会删掉这些药，它们会变成「未归类」，'
-        + '在「全部」里还能看到，随后可在「家庭关联 → 存储诊断」里一键归位或恢复档案。')
+    // 【B 方案：删档案 = 删这个人的数据】用户确认后改为此语义。
+    // 确认框必须把"要删什么"说清楚：此前文案写的是"药不会删、会变成未归类"，
+    // 与用户"删档案就该删掉档案里所有数据"的预期相反。
+    var tail = (medCount > 0 || intakeCount > 0)
+      ? ('删除后，该档案下的 ' + medCount + ' 味药、' + intakeCount
+        + ' 条用药历史及它们的提醒排程会一并删除，且无法恢复。')
       : '删除后「用药提醒」里也会一起消失。';
 
     var ok = await MD.ui.confirm({
@@ -1192,6 +1201,15 @@
         try { await MD.data.family.remove(member.id); } catch (e) { /* 下面统一校验 */ }
       } else {
         await MD.data.profiles.remove(member.id);
+      }
+
+      // 1.5) 【B 方案】级联清空该档案名下的药物、排程与用药历史。
+      //      只对【本账号档案】生效：linked（对方授权的关联副本）名下的药属于对方账号，
+      //      本地只是内存里的视图，绝不能在这里删。
+      //      安全性依据：medication.profileId 是单值字段，"两个人吃同一种药"在数据上是
+      //      两条独立记录，按 id 精确匹配不会命中别人的药；未归类药（profileId 为空）也不受影响。
+      if (!isLinked && MD.consistency && typeof MD.consistency.purgeProfileData === 'function') {
+        try { await MD.consistency.purgeProfileData(member.id); } catch (e) { /* 单表失败不阻断档案删除 */ }
       }
 
       // 2) 同一档案可能还挂着别的 family 记录（旧式关联、重复投影），一并清掉，

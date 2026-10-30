@@ -1309,12 +1309,18 @@
       '<form id="ldg-bk-form" class="stack">' +
       '<div class="ldg-row2">' +
       '<div class="field"><span class="ldg-flabel">WebDAV 地址</span>' +
-      '<input class="input" name="url" type="url" placeholder="https://dav.example.com/meddesk" autocomplete="off"></div>' +
+      '<input class="input" name="url" type="url" placeholder="https://webdav.example.com/meddesk" autocomplete="off"></div>' +
       '<div class="field"><span class="ldg-flabel">用户名</span>' +
       '<input class="input" name="user" type="text" autocomplete="off"></div>' +
       '</div>' +
+      '<div class="ldg-row2">' +
       '<div class="field"><span class="ldg-flabel">密码 / 应用口令</span>' +
       '<input class="input" name="pass" type="password" autocomplete="new-password" placeholder="留空表示不修改"></div>' +
+      // 备份目录：地址只填到账号根，文件统一落到这个子目录，
+      // 避免 ledger-backup-*.zip 与网盘里其它文件混在同一层。
+      '<div class="field"><span class="ldg-flabel">备份目录</span>' +
+      '<input class="input" name="dir" type="text" value="backup" placeholder="backup" autocomplete="off"></div>' +
+      '</div>' +
       '<div class="ldg-strip">' +
       '<button class="btn btn-primary" type="submit">保存凭据</button>' +
       '<button class="btn btn-danger" type="button" data-act="bk-cred-del">删除凭据</button>' +
@@ -1531,6 +1537,8 @@
     var url = String((form.elements.url && form.elements.url.value) || '').trim();
     var user = String((form.elements.user && form.elements.user.value) || '').trim();
     var pass = String((form.elements.pass && form.elements.pass.value) || '');
+    // 目录留空时回落到 backup：备份文件不该散落在账号根目录。
+    var dir = String((form.elements.dir && form.elements.dir.value) || '').trim() || 'backup';
     if (!url) { toast('请填写 WebDAV 地址', 'warn'); return; }
     if (!/^https?:\/\//i.test(url)) { toast('WebDAV 地址需以 http(s):// 开头', 'warn'); return; }
     if (!user) { toast('请填写用户名', 'warn'); return; }
@@ -1539,7 +1547,7 @@
         method: 'PUT',
         // 字段名必须与后端 CredentialsInput 的 json tag 一致（baseURL/username/password）。
         // 曾经这里写成 url，后端解析到空字符串，于是无论填什么都报「请填写 WebDAV 服务地址」。
-        body: { baseURL: url, username: user, password: pass }
+        body: { baseURL: url, username: user, password: pass, pathPrefix: dir }
       }).then(function () {
         form.reset();
         return loadBackup().then(function () { return '凭据已保存'; });

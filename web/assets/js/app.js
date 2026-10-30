@@ -731,9 +731,9 @@
   }
 
   async function afterAuthenticated() {
-    // 示例数据（含 1 条逾期、2 个档案、多种频次）由用药模块 med.js 统一预置；
-    // 平台层的 MD.data.seedExamples() 仅在其缺失时兜底，避免两套示例数据重复叠加。
-    if (!(MD.med && typeof MD.med.seedSamples === 'function')) await MD.data.seedExamples();
+    // 示例数据已按用户要求全局关闭：不再调用 med.seedSamples 或 data.seedExamples。
+    // 两条播种路径都必须断开——只断一条会在模块加载顺序变化时“复活”示例数据。
+    // 老账号里已存在的示例记录可在「设置 · 清空示例数据」里清理（该功能保留）。
     MD.sync.run().catch(function (error) {
       if (MD.sync.state !== 'offline') MD.toast.show(error.message || '同步失败', 'error');
     });
