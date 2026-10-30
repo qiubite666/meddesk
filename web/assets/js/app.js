@@ -148,10 +148,10 @@
       subtitle: '同步、备份与隐私',
       icon: 'settings',
       group: '系统',
-      // 侧栏最后一位（低频入口放末尾）；底部栏仍保持在「家庭健康」之后，
+      // 侧栏最后一位（低频入口放末尾）；底部栏则在最右侧（第 4 位），
       // 由 tabOrder 单独指定，二者互不影响。
       order: 6,
-      tabOrder: 3,
+      tabOrder: 4,
       comingSoon: false,
       render: renderSettings
     });
