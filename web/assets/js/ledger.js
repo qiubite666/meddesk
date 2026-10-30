@@ -277,7 +277,7 @@
    * @param {string} path 以 /ledger/... 开头
    * @param {Object} opts {method, body, raw}
    */
-  function ledgerApi(path, opts) {
+  function ledgerApi(path, opts, retried) {
     opts = opts || {};
     var session = MD.api && MD.api.getSession ? MD.api.getSession() : null;
     var access = session && session.access;
@@ -307,8 +307,29 @@
     }
     return Promise.resolve(pending).then(function (res) {
       if (res.status === 401) {
-        toast('登录已失效，请重新登录', 'warn');
-        throw new Error('登录已失效，请重新登录');
+        // 账本不走 MD.api.request（需区分 404 与 500 做降级），续期只能自己做。
+        // 旧实现直接弹「登录已失效」：access 过期后只要点一下账本就要求重登，
+        // 而其他模块会静默刷新——同一个会话里出现两种表现。
+        if (retried) {
+          toast('登录已失效，请重新登录', 'warn');
+          var expired = new Error('登录已失效，请重新登录');
+          expired.authInvalid = true;
+          throw expired;
+        }
+        var refreshed = (MD.api && typeof MD.api.refresh === 'function')
+          ? MD.api.refresh()
+          : Promise.reject(new Error('登录已失效'));
+        // 用 then(onOk, onErr) 而非 then().catch()：避免把重试分支里的业务错误
+        // （如 400 参数不合法）也当成登录失效吞掉。
+        return Promise.resolve(refreshed).then(function () {
+          return ledgerApi(path, opts, true);
+        }, function (error) {
+          if (error && error.transient) throw error;   // 限流/网络：不清登录态，交上层提示
+          toast('登录已失效，请重新登录', 'warn');
+          var bad = new Error('登录已失效，请重新登录');
+          bad.authInvalid = true;
+          throw bad;
+        });
       }
       if (opts.raw) {
         if (!res.ok) return readText(res).then(function (t) { throw failOf(res, null, t); });

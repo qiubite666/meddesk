@@ -48,6 +48,7 @@
   var unauthorizedHandlers = [];
   var memoryDEK = null;
   var refreshPromise = null;
+  var unauthorizedNotified = false;
 
   // 「保持登录」：refresh token 与 DEK 双写 localStorage——
   // 添加到主屏（PWA）后重新打开时自动恢复登录态，无需重新登录/解锁。
@@ -118,6 +119,8 @@
   function setSession(payload) {
     var session = normalizeSession(payload, getSession());
     sessionFields.forEach(function (field) { storageSet(field, session[field]); });
+    // 新会话建立：重新武装登出通知，否则重新登录后再次失效会静默无提示。
+    unauthorizedNotified = false;
     MD.bus.emit('auth:changed', session);
     return session;
   }
@@ -182,10 +185,18 @@
   function clearSession() {
     sessionFields.concat(['dek']).forEach(function (field) { storageSet(field, null); });
     memoryDEK = null;
+    // 会话结束：共享的刷新结果与锁一并作废。否则登出后其他标签页刷新时
+    // 会命中这份已失效的 access，白白多发一轮 401 才回到正常。
+    lsSet(REFRESH_SHARE, null);
+    lsSet(REFRESH_LOCK, null);
     MD.bus.emit('auth:changed', null);
   }
 
   function notifyUnauthorized() {
+    // 幂等：request / 附件下载 / 记账本三条路径可能同时发现令牌失效，
+    // 重复清 session 与重复触发登出回调会让登录页闪两次、抛出双份 toast。
+    if (unauthorizedNotified) return;
+    unauthorizedNotified = true;
     clearSession();
     unauthorizedHandlers.slice().forEach(function (fn) {
       try { fn(); } catch (error) { window.setTimeout(function () { throw error; }, 0); }
@@ -208,21 +219,245 @@
     return error;
   }
 
-  async function refreshSession() {
-    if (refreshPromise) return refreshPromise;
-    var refreshToken = storageGet('refresh');
-    if (!refreshToken) throw new Error('登录已失效');
-    refreshPromise = window.fetch(BASE + '/auth/refresh', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-      body: JSON.stringify({ refresh: refreshToken, refreshToken: refreshToken })
-    }).then(async function (response) {
-      var payload = await parseResponse(response);
-      if (!response.ok) throw apiError(response, payload);
-      return setSession(payload);
-    }).finally(function () {
-      refreshPromise = null;
+  // ---------------------------------------------------------------------------
+  // 令牌刷新的跨标签页协调
+  //
+  // 背景：access 只存 sessionStorage（每个标签页独立），refresh 存 localStorage（跨标签页共享）。
+  // 多个标签页同时收到 401 时，会各自拿同一个 refresh token 去打 /auth/refresh：
+  //   · 服务端把并行刷新视为令牌重放风险（虽有 REFRESH_REUSE_GRACE 宽限）
+  //   · nginx 对 /auth/refresh 有独立限流，多标签页会把额度成倍消耗
+  // 做法：Web Locks（原子、无死锁）+ localStorage 租约锁（兜底）+ 短期共享刷新结果。
+  // 最坏情况退化为「各刷各的」，与改造前一致，不会更差。
+  // ---------------------------------------------------------------------------
+  var REFRESH_LOCK = 'refresh.lock';
+  var REFRESH_SHARE = 'refresh.share';
+  var LOCK_TTL = 5000;            // 锁租约：持有者崩溃后最多 5s 自动失效
+  var SHARE_TTL = 5 * 60 * 1000;  // 共享结果有效期：5 分钟内其他标签页可直接采用
+  var tabId = Math.random().toString(36).slice(2) + '-' + Date.now().toString(36);
+
+  function lsGet(key) {
+    try { return window.localStorage.getItem(PREFIX + key); } catch (_) { return null; }
+  }
+
+  function lsSet(key, value) {
+    try {
+      if (value == null) window.localStorage.removeItem(PREFIX + key);
+      else window.localStorage.setItem(PREFIX + key, String(value));
+    } catch (_) { /* 隐私模式禁用存储：协调退化为各刷各的 */ }
+  }
+
+  function lsJson(key) {
+    var raw = lsGet(key);
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (_) { return null; }
+  }
+
+  function sleep(ms) {
+    return new Promise(function (resolve) { window.setTimeout(resolve, ms); });
+  }
+
+  // refresh token 以 localStorage 为准：sessionStorage 里可能是本标签页登录时的旧副本，
+  // 别的标签页轮换后本地仍读到过期值，服务端会判定为重放并吊销全部会话。
+  function currentRefreshToken() {
+    var shared = lsGet('refresh');
+    if (shared) return shared;
+    return storageGet('refresh');
+  }
+
+  function readShare(since) {
+    var share = lsJson(REFRESH_SHARE);
+    if (!share || !share.access) return null;
+    if (since && Number(share.at) <= since) return null;   // 早于本次等待，无用
+    if (Date.now() - Number(share.at) > SHARE_TTL) return null;
+    var mine = storageGet('userId');
+    // 未登录（登录页）或不同账号的标签页不得采纳别人的令牌
+    if (mine && share.userId && String(mine) !== String(share.userId)) return null;
+    return share;
+  }
+
+  // 采用其他标签页的刷新结果：只覆盖 access/expiresAt，不整体 setSession——
+  // 避免把本标签页的 DEK、refresh 等内存态一并替换掉。
+  function adoptShared(share) {
+    storageSet('access', share.access);
+    if (share.expiresAt) storageSet('expiresAt', share.expiresAt);
+    var session = getSession();
+    MD.bus.emit('auth:changed', session);
+    return session;
+  }
+
+  function publishSession(session) {
+    if (!session || !session.access) return;
+    var share = {
+      access: session.access,
+      expiresAt: session.expiresAt || 0,
+      userId: session.userId || storageGet('userId') || '',
+      at: Date.now()
+    };
+    lsSet(REFRESH_SHARE, JSON.stringify(share));
+    try {
+      if (authChannel) {
+        authChannel.postMessage({
+          type: 'session', access: share.access,
+          expiresAt: share.expiresAt, userId: share.userId
+        });
+      }
+    } catch (_) { /* 广播失败不影响本次刷新结果 */ }
+  }
+
+  var authChannel = null;
+  try {
+    if (typeof window.BroadcastChannel === 'function') authChannel = new window.BroadcastChannel('meddesk-auth');
+  } catch (_) { authChannel = null; }
+  if (authChannel) {
+    authChannel.onmessage = function (event) {
+      var data = event && event.data;
+      if (!data || data.type !== 'session' || !data.access) return;
+      var mine = storageGet('userId');
+      if (!mine) return;                                   // 登录页不采纳
+      if (data.userId && String(mine) !== String(data.userId)) return;  // 不同账号
+      if (data.access === storageGet('access')) return;
+      // 提前换上新 access：本标签页下次请求就不会再吃一个 401
+      storageSet('access', data.access);
+      if (data.expiresAt) storageSet('expiresAt', data.expiresAt);
+    };
+  }
+
+  function lockOwnerAlive() {
+    var lock = lsJson(REFRESH_LOCK);
+    if (!lock || !lock.id || !lock.at) return false;
+    if (Date.now() - Number(lock.at) > LOCK_TTL) return false;   // 过期视为无主
+    return String(lock.id) !== tabId;
+  }
+
+  function tryLock() {
+    if (lockOwnerAlive()) return false;
+    lsSet(REFRESH_LOCK, JSON.stringify({ id: tabId, at: Date.now() }));
+    var check = lsJson(REFRESH_LOCK);
+    return !!(check && String(check.id) === tabId);
+  }
+
+  function unlockRefresh() {
+    var lock = lsJson(REFRESH_LOCK);
+    if (lock && String(lock.id) === tabId) lsSet(REFRESH_LOCK, null);
+  }
+
+  async function withRefreshLock(task) {
+    var locks = window.navigator && window.navigator.locks;
+    if (locks && typeof locks.request === 'function') {
+      var ran = false;
+      try {
+        return await locks.request('meddesk:token-refresh', async function () {
+          ran = true;
+          return await task();
+        });
+      } catch (error) {
+        // task 自身抛出的错误（401/429）必须原样上抛；只有锁 API 异常才降级重跑，
+        // 否则会把一次刷新请求打成两次。
+        if (ran) throw error;
+      }
+    }
+    var deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      if (tryLock()) {
+        try { return await task(); } finally { unlockRefresh(); }
+      }
+      await sleep(120);
+    }
+    // 等不到锁也不能让用户卡住：自己刷一次，最坏多打一个 /auth/refresh。
+    return task();
+  }
+
+  // 刷新失败的分类，决定「要不要把用户踢下线」：
+  //   401/403        → refresh token 真的失效，必须重新登录
+  //   429 / 5xx / 网络 → 服务端暂时不可用（含 nginx 限流），退避重试即可
+  // 旧实现把任何失败都当登录失效，于是「被限流」表现为「被踢出登录」。
+  function refreshRetryable(error) {
+    if (!error) return false;
+    if (error.network) return true;
+    var status = Number(error.status || 0);
+    return status === 0 || status === 429 || status >= 500;
+  }
+
+  var REFRESH_BACKOFF = [800, 1800, 3600];   // 合计约 6.2s，足够跨过一个限流窗口
+
+  async function postRefresh(refreshToken) {
+    var response;
+    try {
+      response = await window.fetch(BASE + '/auth/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({ refresh: refreshToken, refreshToken: refreshToken })
+      });
+    } catch (error) {
+      error.network = true;
+      throw error;
+    }
+    var payload = await parseResponse(response);
+    if (!response.ok) throw apiError(response, payload);
+    return setSession(payload);
+  }
+
+  async function performRefresh() {
+    var startedAt = Date.now();
+
+    // 1) 别的标签页可能刚刷新过：先看共享结果，命中就完全不必发请求。
+    var cached = readShare(0);
+    if (cached) return adoptShared(cached);
+
+    if (!currentRefreshToken()) {
+      var missing = new Error('登录已失效');
+      missing.authInvalid = true;
+      throw missing;
+    }
+
+    // 2) 加锁后再看一次：等锁期间别的标签页可能已完成刷新。
+    return withRefreshLock(async function () {
+      var fresh = readShare(startedAt);
+      if (fresh) return adoptShared(fresh);
+
+      // 锁内重读：refresh token 可能已被别的标签页轮换，旧值服务端会判重放。
+      var tokenNow = currentRefreshToken();
+      if (!tokenNow) {
+        // 等锁期间用户可能已经在别的标签页登出：这是「会话结束」而不是「暂时故障」。
+        var gone = new Error('登录已失效');
+        gone.authInvalid = true;
+        notifyUnauthorized();
+        throw gone;
+      }
+      var lastError = null;
+
+      for (var attempt = 0; attempt <= REFRESH_BACKOFF.length; attempt++) {
+        try {
+          var session = await postRefresh(tokenNow);
+          publishSession(session);   // 广播出去，其他标签页不必再刷
+          return session;
+        } catch (error) {
+          lastError = error;
+          if (!refreshRetryable(error) || attempt === REFRESH_BACKOFF.length) break;
+          await sleep(REFRESH_BACKOFF[attempt] + Math.floor(Math.random() * 300));
+          // 退避期间别的标签页成功了就直接采用，不再重复打接口
+          var shared = readShare(startedAt);
+          if (shared) return adoptShared(shared);
+          tokenNow = currentRefreshToken() || tokenNow;
+        }
+      }
+
+      if (refreshRetryable(lastError)) {
+        // 明确标记「暂时不可用」：调用方不得据此清登录态。
+        lastError.transient = true;
+      } else {
+        // refresh token 真的失效 = 会话已终止。无论从哪条路径发现（普通请求 / 附件 /
+        // 记账本），都在这里统一登出，避免「提示登录已失效但 session 还在」的半死状态。
+        lastError.authInvalid = true;
+        notifyUnauthorized();
+      }
+      throw lastError;
     });
+  }
+
+  function refreshSession() {
+    if (refreshPromise) return refreshPromise;
+    refreshPromise = performRefresh().finally(function () { refreshPromise = null; });
     return refreshPromise;
   }
 
@@ -246,9 +481,19 @@
       try {
         await refreshSession();
         return request(path, options, true);
-      } catch (_) {
-        notifyUnauthorized();
+      } catch (error) {
+        // 只有「refresh token 真的失效」才登出。限流(429)/网络/5xx 属于暂时故障，
+        // 清 session 会让用户以为账号被踢下线，实际等几秒就恢复。
+        if (!error || !error.transient) notifyUnauthorized();
+        throw error;
       }
+    }
+
+    // 网关或应用层限流：幂等请求（GET）自动退避重试一次。
+    // 不重试写请求——无法判断服务端是否已经执行，重放可能造成重复入账。
+    if (response.status === 429 && !retried && String(options.method || 'GET').toUpperCase() === 'GET') {
+      await sleep(1200 + Math.floor(Math.random() * 600));
+      return request(path, options, true);
     }
 
     var payload = await parseResponse(response, options.responseType);
@@ -409,8 +654,9 @@
         try {
           await refreshSession();
           return MD.api.getAttachment(id);
-        } catch (_) {
-          notifyUnauthorized();
+        } catch (error) {
+          if (!error || !error.transient) notifyUnauthorized();
+          throw error;
         }
       }
       if (!response.ok) throw apiError(response, await parseResponse(response));

@@ -44,7 +44,7 @@ Authorization: Bearer <accessToken>
 ```
 
 - 令牌类型 claim `typ="access"`，`sub` 为用户 UUID HS256 签名。
-- 有效期 `MEDDESK_ACCESS_TTL`（默认 `15m`）。
+- 有效期 `MEDDESK_ACCESS_TTL`（默认 `60m`）。
 - 过期 / 无效 / 已吊销 → `401 unauthorized`，客户端应静默调用 `/api/v1/auth/refresh` 换新后重试一次。
 - 中间件会把用户 ID 写入 gin 上下文键 `user_id`，业务 handler 据此做**数据隔离**：所有查询都带 `user_id` 条件，跨用户访问必然 `404`。
 

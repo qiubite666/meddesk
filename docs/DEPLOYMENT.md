@@ -202,7 +202,7 @@ sudo chmod 640 /home/ops/service/meddesk/.meddesk.env
 | 变量 | 默认值 | 用途与生产建议 | 敏感 |
 |---|---|---|---|
 | `MEDDESK_JWT_SECRET` | 空（**必填**） | 签名密钥，长度 ≥ 32 字节，生成 `openssl rand -base64 48`。**改它 = 所有用户令牌立即失效需重新登录** | **是（最高级）** |
-| `MEDDESK_ACCESS_TTL` | `15m` | 访问令牌有效期，建议保持 15m | 否 |
+| `MEDDESK_ACCESS_TTL` | `60m` | 访问令牌有效期。日常使用下前端每小时才刷新一次（15m 时是每 15 分钟），多设备/多标签页同时刷新的概率显著下降；令牌泄露窗口变长为代价，但有 refresh 轮换与重放检测兜底 | 否 |
 | `MEDDESK_REFRESH_TTL` | `720h`（30 天） | 刷新令牌有效期，每次使用都会轮换并做重放检测 | 否 |
 | `MEDDESK_REFRESH_REUSE_GRACE` | `30s` | 并发刷新宽限期，超过则视为重放攻击 | 否 |
 | `MEDDESK_ARGON2_MEMORY` | `65536`（64MiB） | 弱机降到 32768，强机升到 131072；参数写在哈希串里，改了不影响老用户验证 | 否 |
@@ -350,7 +350,7 @@ MEDDESK_REDIS_ENABLED=false
 # 启用时：MEDDESK_REDIS_URL=redis://:<password>@127.0.0.1:6379/0
 
 MEDDESK_JWT_SECRET=<openssl rand -base64 48 的输出>
-MEDDESK_ACCESS_TTL=15m
+MEDDESK_ACCESS_TTL=60m
 MEDDESK_REFRESH_TTL=720h
 MEDDESK_REFRESH_REUSE_GRACE=30s
 MEDDESK_ARGON2_MEMORY=65536

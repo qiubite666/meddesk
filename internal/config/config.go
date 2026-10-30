@@ -137,7 +137,7 @@ func Load() (*Config, error) {
 		},
 		Auth: AuthConfig{
 			JWTSecret:         envString("MEDDESK_JWT_SECRET", ""),
-			AccessTTL:         envDuration("MEDDESK_ACCESS_TTL", 15*time.Minute),
+			AccessTTL:         envDuration("MEDDESK_ACCESS_TTL", 60*time.Minute),
 			RefreshTTL:        envDuration("MEDDESK_REFRESH_TTL", 30*24*time.Hour),
 			Argon2Memory:      uint32(envInt("MEDDESK_ARGON2_MEMORY", 65536)),
 			Argon2Time:        uint32(envInt("MEDDESK_ARGON2_ITERATIONS", 3)),
