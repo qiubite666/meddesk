@@ -2,7 +2,7 @@
 
 > 本文是 [`CONTRACTS.md`](../CONTRACTS.md) 第 3 节的展开说明，字段以 [`internal/model/model.go`](../internal/model/model.go) 为准。
 >
-> - **Base URL**：`https://med.example.com`（本地开发：`http://localhost:8080`）
+> - **Base URL**：`https://med.example.com`（本地开发：`http://localhost:8089`）
 > - **所有接口路径前缀**：`/api/v1`
 > - **字符编码**：UTF-8；请求与响应均为 `application/json`（附件上传除外，用 `multipart/form-data`）
 > - **契约总则**：成功**直接返回业务对象**；失败返回 `{"code","message","details"}`，HTTP 状态码由错误码映射。
@@ -166,7 +166,7 @@ Authorization: Bearer <accessToken>
 | `serverTime` | int64 | 服务端当前 Unix 毫秒时间戳 |
 
 ```bash
-curl -fsS http://127.0.0.1:8080/api/v1/health
+curl -fsS http://127.0.0.1:8089/api/v1/health
 ```
 
 ```json
@@ -186,7 +186,7 @@ curl -fsS http://127.0.0.1:8080/api/v1/health
 响应字段与 `/health` 完全一致。
 
 ```bash
-curl -fsS http://127.0.0.1:8080/api/v1/ready
+curl -fsS http://127.0.0.1:8089/api/v1/ready
 ```
 
 ---
@@ -1040,7 +1040,7 @@ curl -fsS -X POST https://med.example.com/api/v1/export/pdf \
 > **适用环境**：开发 / 测试 / 生产均可。v0.3.50 已于 **2026-10-30 在生产环境（阿里云 ECS，`https://meddesk.qiubite.fun`，Nginx 反代至 `127.0.0.1:8089`）实测通过**，
 > 本章 26 个接口全部逐个验证。
 > **适用版本**：`v0.3.50`（`server.Version`，见 `/api/v1/health` 的 `version` 字段）。
-> 本文示例中的 `$HOST` 取 `https://meddesk.qiubite.fun`（本地开发 `http://localhost:8080`），`$TOKEN` 为业务 access token。
+> 本文示例中的 `$HOST` 取 `https://meddesk.qiubite.fun`（本地开发 `http://localhost:8089`），`$TOKEN` 为业务 access token。
 
 ### 9.0 记账本的通用约定
 

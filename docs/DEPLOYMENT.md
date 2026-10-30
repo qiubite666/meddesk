@@ -29,8 +29,8 @@
 
 | 环境 | 用途 | 部署方式 | 访问入口 | 适用版本 |
 |---|---|---|---|---|
-| 开发 | 本地开发、改前端不重编 Go | 源码运行：`MEDDESK_WEB_DIR=./web go run ./cmd/meddesk` | `http://localhost:8080` | v0.3.50 |
-| 测试 / 预发 | 集成验证、迁移试跑 | Docker Compose（路径 B，见附录） | `http://127.0.0.1:8080` | v0.3.50 |
+| 开发 | 本地开发、改前端不重编 Go | 源码运行：`MEDDESK_WEB_DIR=./web go run ./cmd/meddesk` | `http://localhost:8089` | v0.3.50 |
+| 测试 / 预发 | 集成验证、迁移试跑 | Docker Compose（路径 B，见附录） | `http://127.0.0.1:8089` | v0.3.50 |
 | 生产 | 对外服务 | systemd 单二进制 + nginx（路径 A，本文档主线） | `https://meddesk.qiubite.fun` | v0.3.50 |
 
 ### 1.2 组件版本矩阵
@@ -42,9 +42,11 @@
 | Redis | 可选（默认关闭） | 可选（默认关闭，走进程内降级） | 仅多副本需跨进程共享限流/吊销名单时开启 |
 | nginx | — | nginx + acme.sh（ECC 证书，DNS-01 验证） | TLS 终止在 nginx，应用只听 127.0.0.1 |
 | 操作系统 | 任意 | Debian 12 / Ubuntu 22.04 | 阿里云 ECS |
-| 应用端口 | `:8080`（默认） | **`:8089`**（本环境口径） | 仓库模板默认 `:8080`；改端口必须同步 nginx upstream |
+| 应用端口 | `:8089`（默认） | `:8089`（与默认一致） | 改端口必须同步 nginx upstream |
 
-> 文档正文统一使用生产口径 **`:8089`**。若沿用模板的 `:8080`，请把下文所有 `8089` 一并替换。
+> **端口已全仓统一为 `:8089`**（2026-10-30）：代码默认值、`meddesk.env.example`、nginx `upstream`、
+> systemd 注释、Compose 端口映射、`install.sh` 与全部文档均为 `:8089`，不再存在「模板 8080 / 现网 8089」的错位。
+> 8089 为非特权端口，仍满足 systemd 安全基线（无需 CAP_NET_BIND_SERVICE）。
 
 ---
 
@@ -173,8 +175,8 @@ sudo chmod 640 /home/ops/service/meddesk/.meddesk.env
 | 变量 | 默认值 | 用途与生产建议 | 敏感 |
 |---|---|---|---|
 | `MEDDESK_ENV` | `prod` | `dev`/`development` 会有更宽松的 CORS 与日志；生产必须 `prod` | 否 |
-| `MEDDESK_HTTP_ADDR` | `:8080` | 监听地址。生产本环境为 `:8089`；前面有 nginx 时**不要**改成对外网卡地址 | 否 |
-| `MEDDESK_BASE_URL` | `http://localhost:8080` | 站点外链基址（邮件/导出/分享链接），生产 `https://meddesk.qiubite.fun`，结尾不带斜杠 | 否 |
+| `MEDDESK_HTTP_ADDR` | `:8089` | 监听地址。生产本环境为 `:8089`；前面有 nginx 时**不要**改成对外网卡地址 | 否 |
+| `MEDDESK_BASE_URL` | `http://localhost:8089` | 站点外链基址（邮件/导出/分享链接），生产 `https://meddesk.qiubite.fun`，结尾不带斜杠 | 否 |
 | `MEDDESK_TRUST_PROXY` | `false` | 前面有 nginx 时必须 `true`，否则客户端 IP 全是 127.0.0.1，限流与登录失败计数会「一损俱损」 | 否 |
 | `MEDDESK_WEB_DIR` | 空 | 空 = 用二进制内嵌的前端（生产必须留空）；开发设 `./web` 可改前端不重编 | 否 |
 
@@ -406,7 +408,7 @@ sudo systemctl status meddesk --no-pager | head -12
 apt -y install nginx
 cp deploy/nginx/meddesk.conf /etc/nginx/sites-available/meddesk.conf
 sed -i 's/med\.example\.com/meddesk.qiubite.fun/g' /etc/nginx/sites-available/meddesk.conf
-sed -i 's|server 127\.0\.0\.1:8080;|server 127.0.0.1:8089;|' /etc/nginx/sites-available/meddesk.conf
+grep -n 'server 127.0.0.1:8089;' /etc/nginx/sites-available/meddesk.conf  # 确认 upstream 端口为 8089
 ln -sf /etc/nginx/sites-available/meddesk.conf /etc/nginx/sites-enabled/
 rm -f /etc/nginx/sites-enabled/default
 nginx -t
@@ -653,7 +655,15 @@ EOF
 
 ### v0.3.51（2026-10-30 02:17 生产部署并验证通过）
 
-**部署信息**：`https://meddesk.qiubite.fun` · 应用端口 `8089` · 二进制 sha256 `069c735cc138eadf0c62393164e8042607a9997e3d446c883aee82e8bb697829` · 回滚备份 `meddesk.bak-20261030-021034`（= v0.3.50）。
+**部署信息**：`https://meddesk.qiubite.fun` · 应用端口 `:8089`（代码默认值 = 现网口径）· 二进制 sha256 `30f89a920b28cfccfa88e1bfb6aaae426aa82d7c2c7e652d2c6cc2703bfd8742` · 回滚备份 `meddesk.bak-20261030-122238`（= 上一版 v0.3.51 初版）、`meddesk.bak-20261030-021034`（= v0.3.50）。
+
+**端口统一（2026-10-30 12:22）**
+
+- 代码默认值 `MEDDESK_HTTP_ADDR` 由 `:8080` 改为 **`:8089`**，`MEDDESK_BASE_URL` 默认同步改为 `http://localhost:8089`。
+- 同步统一 51 处：nginx `upstream`、systemd 单元注释、Compose 端口映射与 healthcheck、`install.sh` 的内联 env 与验证命令、`meddesk.env.example`、`README` / `CONTRACTS` / `API` / `DEPLOYMENT` / `DEVELOPMENT`。
+- 目的：消除「模板 8080 / 现网 8089」错位——尤其避免 `.meddesk.env` 丢失时二进制回落到 8080、与 nginx upstream 不匹配导致 502。
+- 生产验证：启动日志 `addr: ":8089"`、`ss` 显示 meddesk 监听 `8089`、`/api/v1/health` 返回 200。
+- 保留未改：`internal/middleware/cors_test.go` 中的 `localhost:8080` 是 CORS 白名单测试字符串，与端口约定无关。
 
 **缺陷修复（均为代码级，无接口破坏性变更）**
 
@@ -691,7 +701,7 @@ EOF
 - 记账本备份调度仍为进程内 ticker，多实例会重复上传（同名覆盖）。
 - 分页 `size` 上限 200。
 - ZIP 导出的 `images/` 暂不能被导入还原。
-- `meddesk.env.example` 之外的模板（nginx `upstream`、systemd 注释）仍有 `8080` 字样，现网实际为 `8089`（待统一）。
+- ~~模板端口与现网不一致（8080 / 8089）~~ → **已统一为 `:8089`**（代码默认值、样例、nginx、systemd、Compose、安装脚本、文档）。
 
 ### v0.3.50（2026-10-30 01:32 生产部署并验证通过）
 
@@ -742,10 +752,10 @@ docker compose -f deploy/docker-compose.middleware.yml ps
 # 4. 全容器方案（app 也在容器内）
 docker compose -f deploy/docker-compose.yml up -d --build
 
-# 5. 宿主机 nginx 仍按 4.8 反代到 127.0.0.1:8080（TLS 终止在 nginx）
+# 5. 宿主机 nginx 仍按 4.8 反代到 127.0.0.1:8089（TLS 终止在 nginx）
 
 # 6. 冒烟
-curl -fsS --noproxy '*' http://127.0.0.1:8080/api/v1/health
+curl -fsS --noproxy '*' http://127.0.0.1:8089/api/v1/health
 ```
 
 中间件 compose 变量（写在 compose 同目录 `.env`）：`POSTGRES_USER` / `POSTGRES_PASSWORD`（必填）/ `POSTGRES_DB` / `PG_PORT` / `REDIS_PASSWORD`（必填）/ `REDIS_PORT` / `REDIS_MAXMEMORY` / `TZ`。
@@ -760,8 +770,8 @@ curl -fsS --noproxy '*' http://127.0.0.1:8080/api/v1/health
 
 ---
 
-> **文档与实现不一致清单（待代码侧修，本文档不改代码）：**
-> 1. `meddesk.env.example` 未收录 `MEDDESK_SECRETBOX_KEY` 与 `MEDDESK_LEDGER_BACKUP_*` 四项。
-> 2. `meddesk.env.example` 未收录 `MEDDESK_ADMIN_*` 与 `MEDDESK_RECOVERY_KEY`。
-> 3. 仓库模板（nginx conf、unit 注释）默认端口为 `8080`，生产实际为 `8089`。
-> 4. `config.go` 中 `MEDDESK_ADMIN_EMAILS` 与 `MEDDESK_SIGNUP_ENABLED` 的代码默认值不适合生产（前者内置个人邮箱，后者为 `true`）。
+> **文档与实现不一致清单（v0.3.51 已全部处理，留档备查）：**
+> 1. ✅ `meddesk.env.example` 已补 `MEDDESK_SECRETBOX_KEY` 与 `MEDDESK_LEDGER_BACKUP_{ENABLED,TIME,TZ}`。
+> 2. ✅ `meddesk.env.example` 已补 `MEDDESK_ADMIN_{EMAILS,SALT,PASSWORD_HASH,TTL}` 与 `MEDDESK_RECOVERY_KEY`。
+> 3. ✅ 端口已全仓统一为 `:8089`（代码默认值、样例、nginx、systemd、Compose、install.sh、文档）。
+> 4. ✅ `config.go`：`MEDDESK_ADMIN_EMAILS` 默认值改为**空名单**（原内置个人邮箱）、`MEDDESK_SIGNUP_ENABLED` 默认改为 `false`；空名单时启动打 WARN 但不阻断。

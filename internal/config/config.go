@@ -117,8 +117,8 @@ func Load() (*Config, error) {
 
 	c := &Config{
 		Env:        envString("MEDDESK_ENV", "prod"),
-		HTTPAddr:   envString("MEDDESK_HTTP_ADDR", ":8080"),
-		BaseURL:    envString("MEDDESK_BASE_URL", "http://localhost:8080"),
+		HTTPAddr:   envString("MEDDESK_HTTP_ADDR", ":8089"),
+		BaseURL:    envString("MEDDESK_BASE_URL", "http://localhost:8089"),
 		TrustProxy: envBool("MEDDESK_TRUST_PROXY", false),
 		WebDir:     envString("MEDDESK_WEB_DIR", ""),
 

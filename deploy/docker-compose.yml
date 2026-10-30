@@ -136,14 +136,14 @@ services:
       redis:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:8089:8089"
     # 仓库根目录的 .env（内容同 deploy/env.example）。注意：里面的 <...> 占位符必须先替换。
     env_file:
       - ../.env
     environment:
       # 容器网络内用服务名互访，**不能再写 127.0.0.1**
       MEDDESK_ENV: prod
-      MEDDESK_HTTP_ADDR: ":8080"
+      MEDDESK_HTTP_ADDR: ":8089"
       MEDDESK_TRUST_PROXY: "true"
       MEDDESK_DB_URL: "postgres://meddesk:<PG_PASSWORD_请替换为随机串>@postgres:5432/meddesk?sslmode=disable"
       MEDDESK_REDIS_ENABLED: "true"
@@ -162,7 +162,7 @@ services:
     cpus: 1.00
     pids_limit: 200
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/api/v1/health || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8089/api/v1/health || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5

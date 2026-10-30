@@ -196,7 +196,7 @@ gen_env() {
   cat <<EOF
 # MedDesk 运行环境 —— 由 install.sh 生成于 $(date -Is)
 # 权限必须是 600：文件中含 JWT 密钥与数据库口令
-MEDDESK_HTTP_ADDR=:8080
+MEDDESK_HTTP_ADDR=:8089
 MEDDESK_BASE_URL=https://$DOMAIN
 MEDDESK_TRUST_PROXY=true
 MEDDESK_WEB_DIR=
@@ -418,11 +418,11 @@ else
   请按序执行：
 
     sudo systemctl start meddesk
-    sudo journalctl -u meddesk -n 100 --no-pager        # 应看到迁移完成、监听 :8080
+    sudo journalctl -u meddesk -n 100 --no-pager        # 应看到迁移完成、监听 :8089
 
     # 健康检查（期望 status=ok）
-    curl -fsS http://127.0.0.1:8080/api/v1/health | head -c 400; echo
-    curl -fsS http://127.0.0.1:8080/api/v1/ready  | head -c 400; echo
+    curl -fsS http://127.0.0.1:8089/api/v1/health | head -c 400; echo
+    curl -fsS http://127.0.0.1:8089/api/v1/ready  | head -c 400; echo
 
     # 域名侧检查
     curl -fsS https://$DOMAIN/api/v1/health

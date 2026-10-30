@@ -151,12 +151,12 @@ MedDesk 是一个**自托管（self-hosted）**的个人 / 家庭数字工作台
                               ▼             │
 ┌──────────────────────────────────────────────────────────────────────────┐
 │                    Nginx（TLS 终止 · 限流 · 安全头 · 静态）                │
-│                      监听 443/80，反代到 127.0.0.1:8080                    │
+│                      监听 443/80，反代到 127.0.0.1:8089                    │
 └─────────────────────────────┬────────────────────────────────────────────┘
                               │ proxy_pass http://meddesk_app
                               ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│                    meddesk（Go 单二进制，监听 :8080）                      │
+│                    meddesk（Go 单二进制，监听 :8089）                      │
 │  ┌───────────────────────────────────────────────────────────────────┐   │
 │  │ 中间件链：RequestID → Recovery → Logger → SecurityHeaders →        │   │
 │  │            CORS → BodyLimit →（/api/v1 组）RateLimit               │   │
@@ -409,7 +409,7 @@ openssl rand -base64 48          # 把输出填进 MEDDESK_JWT_SECRET
 
 ```bash
 MEDDESK_ENV=dev
-MEDDESK_HTTP_ADDR=:8080
+MEDDESK_HTTP_ADDR=:8089
 MEDDESK_JWT_SECRET=<openssl rand -base64 48 的输出>
 MEDDESK_DB_URL=postgres://meddesk:meddesk@127.0.0.1:5432/meddesk?sslmode=disable
 MEDDESK_REDIS_ENABLED=false
@@ -435,11 +435,11 @@ make dev
 > 改 JS/CSS **不用重新编译** Go 二进制，刷新浏览器即可。
 > 生产环境请**留空**，使用二进制内嵌的前端（`//go:embed all:web`）。
 
-启动后打开 <http://localhost:8080> ，验证：
+启动后打开 <http://localhost:8089> ，验证：
 
 ```bash
-curl -fsS http://127.0.0.1:8080/api/v1/health | head -c 300; echo
-curl -fsS http://127.0.0.1:8080/api/v1/ready  | head -c 300; echo
+curl -fsS http://127.0.0.1:8089/api/v1/health | head -c 300; echo
+curl -fsS http://127.0.0.1:8089/api/v1/ready  | head -c 300; echo
 ```
 
 > **首次使用**：如果 `MEDDESK_SIGNUP_ENABLED=true`，直接在页面上注册即可；
@@ -536,8 +536,8 @@ curl -fsS https://med.example.com/api/v1/health
 | 变量 | 默认值 | 说明 |
 |---|---|---|
 | `MEDDESK_ENV` | `prod` | `dev`/`development`/`prod` |
-| `MEDDESK_HTTP_ADDR` | `:8080` | 监听地址，Nginx 反代时保持默认 |
-| `MEDDESK_BASE_URL` | `http://localhost:8080` | 站点外链基址 |
+| `MEDDESK_HTTP_ADDR` | `:8089` | 监听地址，Nginx 反代时保持默认 |
+| `MEDDESK_BASE_URL` | `http://localhost:8089` | 站点外链基址 |
 | `MEDDESK_TRUST_PROXY` | `false` | 前面有 Nginx 时必须 `true` |
 | `MEDDESK_WEB_DIR` | 空 | 非空则从磁盘读静态资源（开发用） |
 | `MEDDESK_DB_URL` | `postgres://meddesk:meddesk@127.0.0.1:5432/meddesk?sslmode=disable` | PG 连接串 |

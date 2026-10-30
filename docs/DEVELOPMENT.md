@@ -135,7 +135,7 @@ meddesk/
 | **PWA（Service Worker）** | 离线打开、可安装到桌面/Android（Capacitor 复用同一套 web 资源） | 缓存失效是踩坑重灾区，见第 5 章 `SHELL_REV` 与 `buildID` |
 | **Docker Compose** | 本机一条命令起 PG/Redis，避免污染宿主机；生产可只用它跑中间件 | 生产中间件容器与 systemd 应用进程混管，排障要两边看（`docker compose logs` + `journalctl`） |
 | **systemd** | 自带重启、日志（journald）、安全加固（`ProtectSystem=strict` 等），无需容器守护 | 单元文件需随部署同步；`EnvironmentFile` 权限必须 0640 |
-| **nginx** | TLS 终止、安全头、`X-Forwarded-For` 传递、静态长缓存；应用只监听 `127.0.0.1:8080` | 必须设 `MEDDESK_TRUST_PROXY=true` 才能拿到真实客户端 IP；应用只信任 `127.0.0.1`/`::1` 作为代理 |
+| **nginx** | TLS 终止、安全头、`X-Forwarded-For` 传递、静态长缓存；应用只监听 `127.0.0.1:8089` | 必须设 `MEDDESK_TRUST_PROXY=true` 才能拿到真实客户端 IP；应用只信任 `127.0.0.1`/`::1` 作为代理 |
 
 ### 3.1 为什么健康数据必须 E2E，而记账本不用
 
@@ -203,7 +203,7 @@ make dev-init
 | `MEDDESK_DB_URL` | PG 连接串 | `postgres://meddesk:<开发口令>@127.0.0.1:5432/meddesk?sslmode=disable` |
 | `MEDDESK_REDIS_ENABLED` | 默认 `false`（进程内降级） | `false` |
 | `MEDDESK_SIGNUP_ENABLED` | 是否开放注册；公网必须 `false` | `true`（本机） |
-| `MEDDESK_HTTP_ADDR` | 监听地址 | `:8080` |
+| `MEDDESK_HTTP_ADDR` | 监听地址 | `:8089` |
 | `MEDDESK_UPLOAD_DIR` | 附件落盘目录，不能为空 | `./data` |
 | `MEDDESK_ADMIN_EMAILS` | 后台白名单邮箱，**未配置则后台不挂载** | `<你的开发邮箱>` |
 | `MEDDESK_WEB_DIR` | 非空则从磁盘读前端（改 JS 免重编 Go） | `./web` |
@@ -234,10 +234,10 @@ go run ./cmd/meddesk -version
 
 | 地址 | 用途 |
 | --- | --- |
-| `http://127.0.0.1:8080/` | 主应用（PWA） |
-| `http://127.0.0.1:8080/api/v1/health` | 存活探针，返回版本/DB/缓存状态 |
-| `http://127.0.0.1:8080/api/v1/ready` | 就绪探针（DB 挂 = 503；缓存挂 = degraded） |
-| `http://127.0.0.1:8080/admin` | 管理后台页面 |
+| `http://127.0.0.1:8089/` | 主应用（PWA） |
+| `http://127.0.0.1:8089/api/v1/health` | 存活探针，返回版本/DB/缓存状态 |
+| `http://127.0.0.1:8089/api/v1/ready` | 就绪探针（DB 挂 = 503；缓存挂 = degraded） |
+| `http://127.0.0.1:8089/admin` | 管理后台页面 |
 | `http://127.0.0.1:5432` | PG（容器映射） |
 | `http://127.0.0.1:6379` | Redis（容器映射） |
 
@@ -362,7 +362,7 @@ make check      # vet + test
 
 | 手法 | 说明 |
 | --- | --- |
-| 健康探针 | `curl -s http://127.0.0.1:8080/api/v1/health`、`/api/v1/ready` 看版本与 DB/缓存状态 |
+| 健康探针 | `curl -s http://127.0.0.1:8089/api/v1/health`、`/api/v1/ready` 看版本与 DB/缓存状态 |
 | 结构化日志 | `MEDDESK_LOG_LEVEL=debug MEDDESK_LOG_FORMAT=text` 输出人类可读的单行日志 |
 | 前端语法自检 | `make check-js`（`node --check` 逐个校验 `web/assets/js/*.js` 与 `web/sw.js`） |
 | Shell / YAML 自检 | `make check-shell`、`make check-yaml` |
@@ -455,7 +455,7 @@ make check      # vet + test
 
 1. 读 `README.md` + 本文第 1、2 章（约 40 分钟）
 2. `make deps-up` → `cp meddesk.env.example .env` → 替换占位符 → `make dev`（约 20 分钟）
-3. 打开 `http://127.0.0.1:8080/` 注册账号，`curl /api/v1/health` 确认版本（约 10 分钟）
+3. 打开 `http://127.0.0.1:8089/` 注册账号，`curl /api/v1/health` 确认版本（约 10 分钟）
 4. `go test ./... -count=1` 跑通全量测试（约 10 分钟）
 5. 改 `web/assets/js/core.js` 一行 → 刷新页面看效果 → 再 `make build` 验证内嵌路径（约 30 分钟）
 6. 读 `CONTRACTS.md` 了解 E2E 与同步契约，再动手改业务代码（约 60 分钟）

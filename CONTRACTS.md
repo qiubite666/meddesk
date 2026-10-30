@@ -520,8 +520,8 @@ MD.export.csv(rows) / MD.export.pdf(rows)     // csv 纯前端 Blob 下载；pdf
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | `MEDDESK_ENV` | `prod` | dev/prod |
-| `MEDDESK_HTTP_ADDR` | `:8080` | 监听地址 |
-| `MEDDESK_BASE_URL` | `http://localhost:8080` | 站点外链基址 |
+| `MEDDESK_HTTP_ADDR` | `:8089` | 监听地址 |
+| `MEDDESK_BASE_URL` | `http://localhost:8089` | 站点外链基址 |
 | `MEDDESK_TRUST_PROXY` | `false` | 信任 Nginx 的 X-Forwarded-For |
 | `MEDDESK_WEB_DIR` | 空 | 非空则从磁盘读静态资源（开发用） |
 | `MEDDESK_DB_URL` | `postgres://meddesk:meddesk@127.0.0.1:5432/meddesk?sslmode=disable` | PG 连接串 |
