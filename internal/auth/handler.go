@@ -68,7 +68,10 @@ func (h *Handler) register(c *gin.Context) {
 	// 验证码在业务逻辑之前校验：注册的任何失败路径（邮箱已存在、未开放注册、
 	// 内部错误）都会让这张码失效。取舍是「用户需重新取图」换「一码只许试一次」，
 	// 否则攻击者可以用一张图反复探测邮箱是否已注册。
-	if ok, err := h.captcha.verify(c.Request.Context(), req.CaptchaID, req.CaptchaCode, c.ClientIP()); err != nil {
+	// 【必须与 MetaFromRequest 用同一个归一化函数】否则验证码限流与登录限流
+	// 会按两种不同的字符串给同一个客户端计数（IPv6 zone / v4-mapped），
+	// 变成两条互不相干的桶。
+	if ok, err := h.captcha.verify(c.Request.Context(), req.CaptchaID, req.CaptchaCode, clientIP(c)); err != nil {
 		// 目前只有 IP 维度限流会走到这里，需要如实回 429 而不是"验证码错误"。
 		writeError(c, err)
 		return
@@ -282,6 +285,11 @@ func writeError(c *gin.Context, err error) {
 	}
 	if e.Code != apierr.CodeBadRequest {
 		e.Details = nil
+	}
+	if e.Code == apierr.CodeUnavailable {
+		// 注释里承诺"让客户端退避"，就必须真的给出退避信号；
+		// 否则调用方的通用重试逻辑会立刻重打，把排队越堆越长。
+		c.Header("Retry-After", "3")
 	}
 	slog.Default().Warn("auth: 请求失败", "code", string(e.Code), "err", err)
 	c.JSON(apierr.HTTPStatus(e.Code), e)

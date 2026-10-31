@@ -3,10 +3,15 @@ package auth
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 	"unicode/utf8"
+
+	"github.com/gin-gonic/gin"
 
 	"github.com/qiubite666/meddesk/internal/apierr"
 	"github.com/qiubite666/meddesk/internal/cache"
@@ -205,5 +210,94 @@ func TestCaptchaIPThrottle(t *testing.T) {
 	}
 	if ok, err := s.verify(ctx, id2, code2, "198.51.100.12"); !ok || err != nil {
 		t.Fatalf("其他 IP 不应被牵连: ok=%v err=%v", ok, err)
+	}
+}
+
+// TestClientIPNormalized 覆盖「IP 归一化缺失导致限流被稀释/失效」。
+//
+// 三个真实场景：
+//   - 带 zone 的 IPv6（fe80::1%eth0）：gin 原样返回，net.ParseIP 解析失败；
+//     若不处理，限流键非法或为空，同一广播域内的机器可以无限尝试。
+//   - v4-mapped（::ffff:1.2.3.4）：与 1.2.3.4 是同一个客户端，
+//     字符串不同则被拆成两个计数桶，阈值实际翻倍。
+//   - 非法/空地址：应返回空串，交由调用方按「无法归因」处理。
+func TestClientIPNormalized(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	cases := []struct{ remote, want string }{
+		{"1.2.3.4:5678", "1.2.3.4"},
+		{"[::ffff:1.2.3.4]:80", "1.2.3.4"},
+		{"[fe80::1%eth0]:41600", "fe80::1"},
+		{"[2001:db8::1]:443", "2001:db8::1"},
+		{"[::1]:80", "::1"},
+		{"", ""},
+		{"not-an-ip:80", ""},
+	}
+	for _, tc := range cases {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPost, "/auth/login", nil)
+		c.Request.RemoteAddr = tc.remote
+		if got := clientIP(c); got != tc.want {
+			t.Errorf("RemoteAddr=%q 归一化后 %q，期望 %q", tc.remote, got, tc.want)
+		}
+	}
+
+	// 同一条链路：归一化结果必须能当限流键用（非空且稳定）。
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/auth/login", nil)
+	c.Request.RemoteAddr = "[::ffff:203.0.113.9]:1234"
+	first := clientIP(c)
+	c.Request.RemoteAddr = "203.0.113.9:9999"
+	if second := clientIP(c); first != second || first == "" {
+		t.Fatalf("v4-mapped 与点分地址应归一到同一键: %q vs %q", first, second)
+	}
+}
+
+// TestArgon2GateBusyReturnsError 锁住"排队超时必须失败关闭"。
+//
+// 【为什么这条不能省】闸门刚加进来时，两个包装函数曾写成 `key, _ := argon2InSlot(...)`：
+// 一旦排队超时，它会返回 (nil, nil) —— 调用方拿到空 key 继续走，
+// HashClientHash 会把**空哈希**写进库，账号从此无法登录（不可逆）。
+// 这类"错误被静默吞掉"的缺陷只能靠测试钉住：占满闸门 → 断言必须返回错误，
+// 且**绝不能**返回可用哈希。
+func TestArgon2GateBusyReturnsError(t *testing.T) {
+	oldTimeout := argon2QueueTimeout
+	argon2QueueTimeout = 20 * time.Millisecond
+	defer func() { argon2QueueTimeout = oldTimeout }()
+
+	// 占满全部槽位，模拟重载。
+	for i := 0; i < argon2MaxConcurrent; i++ {
+		argon2Slots <- struct{}{}
+	}
+	defer func() {
+		for i := 0; i < argon2MaxConcurrent; i++ {
+			<-argon2Slots
+		}
+	}()
+
+	hash, err := HashClientHash("client-value", 8, 1, 1)
+	if !errors.Is(err, ErrArgon2Busy) {
+		t.Fatalf("排队超时应返回 ErrArgon2Busy，实际 %v", err)
+	}
+	if hash != "" {
+		t.Fatalf("失败时不得返回哈希（空哈希落库会永久毁掉账号），实际 %q", hash)
+	}
+
+	ok, err := VerifyClientHash(fakePasswordHash, "client-value")
+	if !errors.Is(err, ErrArgon2Busy) {
+		t.Fatalf("校验排队超时应返回 ErrArgon2Busy，实际 %v", err)
+	}
+	if ok {
+		t.Fatalf("超时时不得返回 ok=true（会被当成口令正确）")
+	}
+
+	// 对外必须是 503 而不是 500：500 会让客户端立即重试，加剧排队。
+	if code := apierr.FromError(argon2Err(ErrArgon2Busy)).Code; code != apierr.CodeUnavailable {
+		t.Fatalf("过载应映射为 unavailable(503)，实际 %s", code)
+	}
+	if code := apierr.FromError(argon2Err(errors.New("boom"))).Code; code != apierr.CodeInternal {
+		t.Fatalf("其它 argon2 错误仍应为 internal，实际 %s", code)
 	}
 }

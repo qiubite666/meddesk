@@ -54,6 +54,13 @@ type ImportRequest struct {
 	// （凭证元数据会被账单的级联删除带走，而导入的 payload 不含凭证字节，删了就回不来）。
 	// 只有用户先导出过 ZIP 备份、明确要求继续时才允许置 true。
 	Force bool `json:"force"`
+	// IncomingAttachmentRecords 是**本次导入携带的图片**覆盖到的账单 id 集合（仅 ZIP 路径填充，
+	// JSON 覆盖为 nil）。它不是给客户端填的，故意标 json:"-"。
+	//
+	// 【为什么需要它】只判断"有没有图"挡不住"只带 1 张图的压缩包"：那 1 张图照样能让
+	// force 成立，而其余账单的凭证会被级联删除。改成按**集合包含**判定后，
+	// 只有当导入包覆盖了"当前所有带凭证的账单"时才算完整还原，半份备份拿不到豁免。
+	IncomingAttachmentRecords []string `json:"-"`
 }
 
 // ImportResult 是导入统计。
@@ -135,7 +142,7 @@ func (s *ExportService) Import(ctx context.Context, userID string, req ImportReq
 			return nil, err
 		}
 	} else {
-		if err := s.importOverwrite(ctx, userID, cats, recs, req.Force, res); err != nil {
+		if err := s.importOverwrite(ctx, userID, cats, recs, req.Force, req.IncomingAttachmentRecords, res); err != nil {
 			return nil, err
 		}
 	}
@@ -479,12 +486,12 @@ func (s *ExportService) collectAttachments(ctx context.Context, userID string, r
 //
 // 快照回滚不是原子操作：如果回滚自身也失败，账本会停在中间状态（会返回明确错误让
 // 用户核对）。要做到真正的原子性，需要 store 层提供 WithTx 或一个"整账本替换"的事务方法。
-func (s *ExportService) importOverwrite(ctx context.Context, userID string, cats []model.LedgerCategory, recs []model.LedgerRecord, force bool, res *ImportResult) error {
+func (s *ExportService) importOverwrite(ctx context.Context, userID string, cats []model.LedgerCategory, recs []model.LedgerRecord, force bool, coveredRecordIDs []string, res *ImportResult) error {
 	snap, err := s.snapshot(ctx, userID)
 	if err != nil {
 		return err
 	}
-	if err := guardAttachments(snap, force); err != nil {
+	if err := guardAttachments(snap, force, coveredRecordIDs); err != nil {
 		return err
 	}
 	// 1) 清空：账单先删（分类被引用时不允许删除），分类后删。
@@ -542,13 +549,42 @@ func (s *ExportService) importOverwrite(ctx context.Context, userID string, cats
 // 一旦账单被删，外键 CASCADE 会连带删掉 ledger_attachments 元数据；磁盘文件虽然还在，
 // 但没有元数据就再也没有任何接口能定位到它们——用户看到的就是"凭证全没了"。
 // 这种不可逆操作只能靠"先挡住"来兜底，回滚快照只能覆盖"执行到一半失败"的场景。
-func guardAttachments(snap *ledgerSnapshot, force bool) error {
-	if force || snap == nil || len(snap.attachments) == 0 {
+func guardAttachments(snap *ledgerSnapshot, force bool, coveredRecordIDs []string) error {
+	if snap == nil || len(snap.attachments) == 0 {
 		return nil
 	}
-	return apierr.Newf(apierr.CodeConflict,
-		"该账本含 %d 张凭证，覆盖导入会导致凭证不可恢复（备份里只有凭证清单、没有图片字节）。"+
-			"请先导出 ZIP 备份（含图片），确认后重新发起导入并显式传 force=true", len(snap.attachments))
+	if !force {
+		return apierr.Newf(apierr.CodeConflict,
+			"该账本含 %d 张凭证，覆盖导入会导致凭证不可恢复（备份里只有凭证清单、没有图片字节）。"+
+				"请先导出 ZIP 备份（含图片），确认后重新发起导入并显式传 force=true", len(snap.attachments))
+	}
+	// force 已成立，但 ZIP 路径还要过"集合包含"这一关：导入包必须覆盖**当前所有
+	// 带凭证的账单**。否则一个只含 1 张图的压缩包就能让整个账本的凭证被删掉，
+	// 而它看起来"带图、可还原"。
+	//
+	// coveredRecordIDs 为 nil 表示这是 JSON 覆盖：payload 本身不带任何图片字节，
+	// 但 force 是用户逐字确认过的显式意图，按原契约放行（这种情况由前端二次确认兜底）。
+	if coveredRecordIDs == nil {
+		return nil
+	}
+	covered := make(map[string]struct{}, len(coveredRecordIDs))
+	for _, id := range coveredRecordIDs {
+		if id = strings.TrimSpace(id); id != "" {
+			covered[id] = struct{}{}
+		}
+	}
+	missing := 0
+	for _, a := range snap.attachments {
+		if _, ok := covered[a.RecordID]; !ok {
+			missing++
+		}
+	}
+	if missing > 0 {
+		return apierr.Newf(apierr.CodeConflict,
+			"导入包只覆盖了部分凭证：账本里还有 %d 张凭证所在的账单不在该备份中，"+
+				"覆盖后这些图片将无法恢复。请使用完整的 ZIP 备份，或先单独导出缺失的凭证", missing)
+	}
+	return nil
 }
 
 // rollbackOverwrite 覆盖导入失败时的统一回滚入口。
@@ -780,6 +816,13 @@ type zipManifest struct {
 	Checksum     string          `json:"checksum"`
 	ChecksumAlgo string          `json:"checksumAlgo"`
 	Files        json.RawMessage `json:"files"`
+	// AttachmentFailed 是备份时**读取失败**的凭证数量（见 backup.go 的 manifest）。
+	//
+	// 导入端必须读它：这类备份"成功"但不完整，若默默允许覆盖，等于用一份缺图的
+	// 备份替换掉现有账本——丢的正是备份本该保护的东西。因此：
+	//  1. 计数 > 0 时给用户明确告警；
+	//  2. 不再自动获得覆盖豁免（force 不成立），必须显式确认。
+	AttachmentFailed int `json:"attachmentFailed"`
 }
 
 // manifestFileNames 解析 manifest.files。
@@ -925,6 +968,16 @@ func (s *ExportService) ImportZIP(ctx context.Context, userID string, body []byt
 	}
 	images := imageEntries(names, declared)
 
+	// 备份时就有凭证读不出来：这份包"成功但不完整"。
+	// 必须显式告诉用户，并取消它的覆盖豁免（见下面的 Force 计算）——
+	// 否则一次「用缺图备份覆盖」会把现存凭证连同备份里本来就没有的那些一起丢掉。
+	incomplete := manifest.AttachmentFailed > 0
+	if incomplete {
+		warnings = append(warnings, fmt.Sprintf(
+			"该备份生成时有 %d 张凭证读取失败，压缩包内并不完整；覆盖导入前请确认这些图片已另行保存",
+			manifest.AttachmentFailed))
+	}
+
 	// merge 模式下"本地已存在"的账单不会重写，其凭证也不重复恢复（否则会越导越多）。
 	// 必须在 Import 之前取快照：导入之后就分不清哪些是本地原有的了。
 	existing := map[string]bool{}
@@ -942,13 +995,15 @@ func (s *ExportService) ImportZIP(ctx context.Context, userID string, body []byt
 	//    这是"我确认清空账本"的明确表达；
 	// ② 只有真的带图片的 ZIP 才算"完整还原"，此时放行才不会把用户逼向不带凭证的
 	//    JSON 覆盖（那才会真正丢图）；
-	// ③ 不含 images/ 的 ZIP 等价于 JSON 覆盖，必须继续受 guardAttachments 保护，
+	// ③ 不含 images/ 的 ZIP 等价于 JSON 覆盖，必须继续受 guardAttachments 保护。
+	// ④ 备份自身缺图（manifest.attachmentFailed > 0）时也不豁免：这份包不完整，
+	//    用它覆盖会让「备份没保住的东西」彻底消失，必须走显式 force。
 	//    否则「用 ZIP 外壳绕过 409」就成了新的丢图入口。
 	res, err := s.Import(ctx, userID, ImportRequest{
 		Mode:    mode,
 		Payload: &payload,
 		Confirm: confirm,
-		Force:   confirm && len(images) > 0,
+		Force:   confirm && len(images) > 0 && !incomplete,
 	})
 	if err != nil {
 		return nil, err

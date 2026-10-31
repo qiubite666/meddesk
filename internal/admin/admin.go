@@ -169,6 +169,10 @@ func (s *Service) Login(c *gin.Context) {
 	verified := false
 	if u != nil {
 		ok, err := auth.VerifyClientHash(u.PasswordHash, req.PasswordHash)
+		if errors.Is(err, auth.ErrArgon2Busy) {
+			writeErr(c, apierr.New(apierr.CodeUnavailable, "服务繁忙，请稍后再试"))
+			return
+		}
 		if err != nil {
 			writeErr(c, apierr.Wrap(apierr.CodeInternal, err, "登录失败，请稍后重试"))
 			return
@@ -177,6 +181,12 @@ func (s *Service) Login(c *gin.Context) {
 	}
 	if !verified && s.cfg.Admin.PasswordHash != "" {
 		ok, err := auth.VerifyClientHash(s.cfg.Admin.PasswordHash, req.PasswordHash)
+		if errors.Is(err, auth.ErrArgon2Busy) {
+			// 过载不是"口令错误"：既不能算一次失败尝试（会把管理员锁在门外），
+			// 也不能静默落到 401（让人误以为是密码问题而反复重试，加剧排队）。
+			writeErr(c, apierr.New(apierr.CodeUnavailable, "服务繁忙，请稍后再试"))
+			return
+		}
 		if err == nil && ok {
 			verified = true
 		}
@@ -649,5 +659,9 @@ func atoiDefault(s string, def int) int {
 
 func writeErr(c *gin.Context, err error) {
 	e := apierr.FromError(err)
+	if e.Code == apierr.CodeUnavailable {
+		// 与 auth 侧保持一致：过载时明确告知重试时机，避免调用方立刻重打。
+		c.Header("Retry-After", "3")
+	}
 	c.AbortWithStatusJSON(apierr.HTTPStatus(e.Code), e)
 }

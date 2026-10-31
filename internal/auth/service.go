@@ -188,6 +188,11 @@ func (s *Service) Register(ctx context.Context, req model.RegisterRequest, meta 
 	if !s.cfg.SignupEnabled {
 		return nil, apierr.New(apierr.CodeForbidden, "当前未开放注册")
 	}
+	// 计数放在「已通过验证码」之后（验证码在 handler 层校验）：
+	// 失败计数留给验证码，这里只统计真正到达注册逻辑的尝试，成功与 409 都算。
+	if err := s.noteRegisterAttempt(ctx, meta.IP); err != nil {
+		return nil, err
+	}
 	email := normalizeEmail(req.Email)
 	if email == "" || req.PasswordHash == "" {
 		return nil, apierr.New(apierr.CodeBadRequest, "邮箱与口令派生值不能为空")
@@ -198,7 +203,7 @@ func (s *Service) Register(ctx context.Context, req model.RegisterRequest, meta 
 	}
 	passwordHash, err := HashClientHash(req.PasswordHash, s.cfg.Argon2Memory, s.cfg.Argon2Time, s.cfg.Argon2Threads)
 	if err != nil {
-		return nil, apierr.Wrap(apierr.CodeInternal, err, msgInternal)
+		return nil, argon2Err(err)
 	}
 	u := &model.User{
 		ID:           uuid.NewString(),
@@ -254,7 +259,7 @@ func (s *Service) Login(ctx context.Context, req model.LoginRequest, meta Reques
 	}
 	ok, err := VerifyClientHash(u.PasswordHash, req.PasswordHash)
 	if err != nil {
-		return nil, apierr.Wrap(apierr.CodeInternal, err, "登录失败，请稍后重试")
+		return nil, argon2Err(err)
 	}
 	if !ok {
 		s.bumpFailure(ctx, failKey)
@@ -286,6 +291,29 @@ func (s *Service) loginBlocked(ctx context.Context, failKey, ip string) bool {
 		return true
 	}
 	return false
+}
+
+// noteRegisterAttempt 记录一次到达注册逻辑的尝试，并对同一 IP 施加独立配额。
+//
+// 【为什么不能只靠验证码】验证码的答案以明文点位写在 SVG 里（前端要渲染，藏不住），
+// 脚本解析后即可 100% 答对；而验证码失败计数在"答对"时会清零，于是攻击者可以
+// 无限「取图 → 解析 → 答对 → 试一个邮箱」，注册接口的 409 就成了稳定的
+// 账号存在性预言机。这个计数器与验证码完全解耦、成功也计数，才能真正压住吞吐。
+func (s *Service) noteRegisterAttempt(ctx context.Context, ip string) error {
+	if ip == "" {
+		// 无法归因时不计数：把所有"没有 IP"的请求塞进同一个桶，等于让一次攻击
+		// 锁死全部用户。空 IP 的成因已在 clientIP() 里收敛到最小。
+		return nil
+	}
+	n, err := s.cache.Incr(ctx, cacheKeyRegisterIP+hashKey(ip), registerAttemptTTL)
+	if err != nil {
+		// 缓存故障不阻断注册：注册是低频、非批量的操作，宁可用可观测性换可用性。
+		return nil
+	}
+	if n > maxRegisterAttemptsPerIP {
+		return apierr.New(apierr.CodeRateLimited, "注册尝试过于频繁，请稍后再试")
+	}
+	return nil
 }
 
 // Refresh 用刷新令牌换取新的令牌对，并轮换刷新令牌。
@@ -407,7 +435,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID string, req model.C
 	}
 	ok, err := VerifyClientHash(u.PasswordHash, req.OldPasswordHash)
 	if err != nil {
-		return apierr.Wrap(apierr.CodeInternal, err, "修改口令失败，请稍后重试")
+		return argon2Err(err)
 	}
 	if !ok {
 		return apierr.New(apierr.CodeUnauthorized, "当前口令不正确")
@@ -418,7 +446,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID string, req model.C
 	}
 	passwordHash, err := HashClientHash(req.NewPasswordHash, s.cfg.Argon2Memory, s.cfg.Argon2Time, s.cfg.Argon2Threads)
 	if err != nil {
-		return apierr.Wrap(apierr.CodeInternal, err, msgInternal)
+		return argon2Err(err)
 	}
 	if err := s.users.UpdateCredentials(ctx, userID, passwordHash, kdfSalt, wrappedDEK, dekIV); err != nil {
 		return apierr.Wrap(apierr.CodeInternal, err, "修改口令失败，请稍后重试")

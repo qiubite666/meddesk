@@ -21,6 +21,14 @@ const (
 	cacheKeyIPEmails = "meddesk:auth:fail:ip-emails:"
 	// cacheKeyIPEmailSeen 标记「该 IP 已尝试过该邮箱」，保证每对只计一次。
 	cacheKeyIPEmailSeen = "meddesk:auth:fail:ip-email:"
+	// cacheKeyRegisterIP 是注册尝试的 IP 计数键前缀。
+	//
+	// 【为什么注册也需要独立计数】注册接口对已存在的邮箱返回 409、对新邮箱返回 200，
+	// 这本身就是账号存在性预言机。验证码挡不住它：SVG 里的每一行都带 data-index，
+	// 脚本直接读点位就能答对，答对又会重置验证码失败计数（见 Verify 的成功分支），
+	// 于是「解题 → 试一个邮箱 → 换下一张图」可以无限循环。
+	// 这个计数与验证码失败计数相互独立，且**成功也计数**，才能真正压住吞吐。
+	cacheKeyRegisterIP = "meddesk:auth:register:ip:"
 	// cacheKeyRefreshRevoked 刷新令牌吊销名单键前缀，后接刷新令牌 ID。
 	cacheKeyRefreshRevoked = "meddesk:auth:revoked:"
 	// cacheKeyGrace 刷新令牌重用宽限标记键前缀，后接被替换的旧令牌 ID。
@@ -44,6 +52,20 @@ const (
 	// 出口 IP，10 会让「一家三口 + 两台设备切换账号」就触顶，把正常用户锁在门外。
 	// 20 仍远低于撞库所需量级（每目标试 9 次的策略在 20 个邮箱内最多覆盖 180 次尝试）。
 	maxEmailsPerIP = 20
+	// maxRegisterAttemptsPerIP 是同一 IP 每小时允许的注册尝试次数（成功与 409 都计）。
+	//
+	// 注册接口对「已存在邮箱」返回 409、对「新邮箱」返回 200/201，天然是账号存在性
+	// 预言机。验证码挡不住它：SVG 里每个亮格是组内局部坐标的 <rect x=col*4 y=row*4>，
+	// 脚本用 querySelectorAll('rect') 读 x/4、y/4 就能还原 5×7 点阵并 100% 答对；
+	// 而答对又会重置验证码失败计数（见 Verify 的成功分支），于是可以无限循环。
+	// 这个计数与验证码失败计数完全解耦、成功也计数，才能真正压住吞吐：
+	// 10 次/小时把小时级探测从 7 万次压到 10 次，枚举 500 个邮箱要 50 小时。
+	// 取 10 而非更小：一个家庭/小团队在同一出口注册 2–3 个账号是正常量级。
+	// 该阈值刻意不做成 config 项：属实现细节，暴露出去只会被误调成 0；
+	// 校园/企业 NAT 若出现误伤，按部署评估后再上调，不要为了"能注册"直接删掉。
+	maxRegisterAttemptsPerIP = 10
+	// registerAttemptTTL 是注册尝试计数的窗口（1 小时，注册比登录低频得多）。
+	registerAttemptTTL = time.Hour
 	// loginFailTTL 登录失败计数的保留时长。
 	loginFailTTL = 15 * time.Minute
 
