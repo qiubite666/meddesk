@@ -182,8 +182,23 @@
 
   /* ============================ 3. CSV（纯前端生成） ============================ */
 
+  // CSV 公式注入防护：Excel/WPS 会把 = + - @ 以及 TAB/CR 开头的单元格当公式执行，
+  // 备注、药名等字段来自用户输入，必须净化。规则与后端一致：
+  // 前置单引号降级为文本；但 "-" 后紧跟数字时不处理，否则负数金额会被改成文本。
+  function csvGuard(s) {
+    if (!s) return s;
+    // 「纯数字」判定必须覆盖整串：旧写法 /^-\d/ 只看前两位，
+    // -1+2+cmd|... 这类负数表达式会被误判成金额而绕过防护。
+    // 正负号同一套规则，与后端 export/service.go 的 needsFormulaGuard 保持一致。
+    if (s.charAt(0) === '-' || s.charAt(0) === '+') {
+      return /^[+-]\d+(\.\d+)?$/.test(s) ? s : "'" + s;
+    }
+    if (/^[=@\t\r]/.test(s)) return "'" + s;
+    return s;
+  }
+
   function csvCell(v) {
-    var s = (v == null ? '' : String(v));
+    var s = csvGuard(v == null ? '' : String(v));
     if (/[",\r\n]/.test(s)) s = '"' + s.replace(/"/g, '""') + '"';
     return s;
   }

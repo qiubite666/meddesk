@@ -1016,7 +1016,7 @@
       '<button class="btn btn-primary" type="button" data-act="exp-csv">' + ICON.download + '导出 CSV</button>' +
       '<button class="btn btn-ghost" type="button" data-act="exp-pdf">' + ICON.download + '导出 PDF</button>' +
       '</div>' +
-      '<div class="md-hint" style="margin-top:8px">导出的明文数据仅在本机生成，不会写入服务端日志。</div>' +
+      '<div class="md-hint" style="margin-top:8px">CSV 在本机生成；PDF 由服务端渲染，仅用于生成文件，不落盘、不写入日志。</div>' +
       '</div>');
   }
 

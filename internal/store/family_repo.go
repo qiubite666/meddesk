@@ -107,8 +107,14 @@ func (r *familyRepo) GetByID(ctx context.Context, id string) (*FamilyGrant, erro
 	if r == nil || r.s == nil || r.s.pool == nil {
 		return nil, wrap("查询授权失败", errNoPool)
 	}
+	// 非法 UUID 直接按"未找到"处理：把 string 当 uuid 参数交给 PG 会抛 22P02，
+	// 仓储层再包一层就变成 500；对调用方而言它与"不存在的授权"没有区别。
+	gid, err := uuidParam(id)
+	if err != nil {
+		return nil, ErrNotFound
+	}
 	return scanFamilyGrant(r.s.pool.QueryRow(ctx,
-		`SELECT `+familyColumns+` FROM family_grants WHERE id = $1`, id))
+		`SELECT `+familyColumns+` FROM family_grants WHERE id = $1`, gid))
 }
 
 func (r *familyRepo) GetByLookup(ctx context.Context, lookup []byte) (*FamilyGrant, error) {
@@ -154,13 +160,17 @@ func (r *familyRepo) Redeem(ctx context.Context, lookup []byte, viewerID string)
 	if r == nil || r.s == nil || r.s.pool == nil {
 		return nil, wrap("兑换授权失败", errNoPool)
 	}
+	viewer, err := uuidParam(viewerID)
+	if err != nil {
+		return nil, ErrNotFound
+	}
 	g, err := scanFamilyGrant(r.s.pool.QueryRow(ctx, `
 UPDATE family_grants
    SET status = $2, viewer_id = $3, redeemed_at = now(), expires_at = NULL
  WHERE code_lookup = $1
    AND status = $4
    AND (expires_at IS NULL OR expires_at > now())
-RETURNING `+familyColumns, lookup, FamilyGrantActive, viewerID, FamilyGrantPending))
+RETURNING `+familyColumns, lookup, FamilyGrantActive, viewer, FamilyGrantPending))
 
 	if err == nil {
 		return g, nil
@@ -187,7 +197,7 @@ UPDATE family_grants
  WHERE code_lookup = $1
    AND status = $4
    AND (expires_at IS NULL OR expires_at > now())
-RETURNING `+familyColumns, lookup, FamilyGrantActive, viewerID, FamilyGrantPending))
+RETURNING `+familyColumns, lookup, FamilyGrantActive, viewer, FamilyGrantPending))
 		if err != nil {
 			if errors.Is(err, ErrNotFound) {
 				return nil, ErrNotFound
@@ -219,8 +229,12 @@ func (r *familyRepo) ListByOwner(ctx context.Context, ownerID string) ([]FamilyG
 	if r == nil || r.s == nil || r.s.pool == nil {
 		return nil, wrap("查询授权列表失败", errNoPool)
 	}
+	owner, err := uuidParam(ownerID)
+	if err != nil {
+		return nil, ErrNotFound
+	}
 	rows, err := r.s.pool.Query(ctx,
-		`SELECT `+familyColumns+` FROM family_grants WHERE owner_id = $1 ORDER BY created_at DESC`, ownerID)
+		`SELECT `+familyColumns+` FROM family_grants WHERE owner_id = $1 ORDER BY created_at DESC`, owner)
 	if err != nil {
 		return nil, wrap("查询授权列表失败", err)
 	}
@@ -242,10 +256,14 @@ func (r *familyRepo) ListActiveForViewer(ctx context.Context, viewerID string) (
 	if r == nil || r.s == nil || r.s.pool == nil {
 		return nil, wrap("查询授权列表失败", errNoPool)
 	}
+	viewer, err := uuidParam(viewerID)
+	if err != nil {
+		return nil, ErrNotFound
+	}
 	rows, err := r.s.pool.Query(ctx, `
 SELECT `+familyColumns+` FROM family_grants
  WHERE viewer_id = $1 AND status = $2 AND (expires_at IS NULL OR expires_at > now())
- ORDER BY redeemed_at DESC`, viewerID, FamilyGrantActive)
+ ORDER BY redeemed_at DESC`, viewer, FamilyGrantActive)
 	if err != nil {
 		return nil, wrap("查询授权列表失败", err)
 	}
@@ -268,10 +286,18 @@ func (r *familyRepo) Revoke(ctx context.Context, id, ownerID string) error {
 	if r == nil || r.s == nil || r.s.pool == nil {
 		return wrap("撤销授权失败", errNoPool)
 	}
+	gid, err := uuidParam(id)
+	if err != nil {
+		return ErrNotFound
+	}
+	owner, err := uuidParam(ownerID)
+	if err != nil {
+		return ErrNotFound
+	}
 	tag, err := r.s.pool.Exec(ctx, `
 UPDATE family_grants
    SET status = $3, revoked_at = now()
- WHERE id = $1 AND owner_id = $2 AND status <> $3`, id, ownerID, FamilyGrantRevoked)
+ WHERE id = $1 AND owner_id = $2 AND status <> $3`, gid, owner, FamilyGrantRevoked)
 	if err != nil {
 		return wrap("撤销授权失败", err)
 	}

@@ -5,8 +5,10 @@ package ledger
 // 【安全底线】
 //  1. 每条记录的 user_id 一律改写成当前会话账号——payload 里的归属字段完全不信任，
 //     否则一份"别人导出的备份"就能把数据写进他人账号（越权写入）。
-//  2. 覆盖导入是破坏性操作，必须 confirm=true 才执行；执行前先把当前数据快照到内存，
-//     中途失败就整体回滚，绝不留下"删了一半"的账本。
+//  2. 覆盖导入是破坏性操作，必须 confirm=true 才执行；执行前先把当前数据（分类、账单、
+//     凭证元数据）快照到内存，中途失败就整体回滚，绝不留下"删了一半"的账本。
+//     账本里一旦已有凭证，覆盖导入默认 409 拒绝：凭证字节不在 payload 里，
+//     删掉元数据后图片就再也定位不到，只能靠 force=true 显式确认丢弃（见 guardAttachments）。
 //  3. JSON 导入只登记附件：AttachmentSource 只有读取能力，导入方无法凭它写回文件，
 //     因此明细里明确报告"有多少凭证未被恢复"，不让用户误以为恢复完整。
 //     例外是每日备份 ZIP（ImportZIP）：它自带原图字节，附件服务若支持写入
@@ -48,6 +50,10 @@ type ImportRequest struct {
 	Mode    string         `json:"mode"`    // merge | overwrite
 	Payload *BackupPayload `json:"payload"` // 与导出格式一致
 	Confirm bool           `json:"confirm"` // 覆盖导入必须显式确认
+	// Force 表示"我确认连凭证一起丢弃"：账本里存在凭证时，覆盖导入默认直接 409 拒绝
+	// （凭证元数据会被账单的级联删除带走，而导入的 payload 不含凭证字节，删了就回不来）。
+	// 只有用户先导出过 ZIP 备份、明确要求继续时才允许置 true。
+	Force bool `json:"force"`
 }
 
 // ImportResult 是导入统计。
@@ -129,7 +135,7 @@ func (s *ExportService) Import(ctx context.Context, userID string, req ImportReq
 			return nil, err
 		}
 	} else {
-		if err := s.importOverwrite(ctx, userID, cats, recs, res); err != nil {
+		if err := s.importOverwrite(ctx, userID, cats, recs, req.Force, res); err != nil {
 			return nil, err
 		}
 	}
@@ -367,12 +373,45 @@ func (r *ImportResult) addWarning(msg string) {
 // ------------------------------------------------------------------ 覆盖导入
 
 // ledgerSnapshot 是覆盖导入前的内存快照，用于失败回滚。
+//
+// attachments 保存凭证**元数据**（record_id / rel_path / mime / bytes / width / height）：
+// 覆盖导入靠 DeleteRecord 清空账单，而 ledger_attachments 对账单是 ON DELETE CASCADE，
+// 元数据行会随之消失；磁盘上的文件本模块删不到（没有上传根目录），
+// 因此只要把元数据行原样写回，凭证就还能正常读出来。
 type ledgerSnapshot struct {
-	categories []model.LedgerCategory
-	records    []model.LedgerRecord
+	categories  []model.LedgerCategory
+	records     []model.LedgerRecord
+	attachments []model.LedgerAttachment
 }
 
-// snapshot 读出当前账号的全部分类与账单。
+// attachmentRegistry 是覆盖导入所需的凭证元数据读写能力。
+//
+// 用包内接口做类型断言（而不是给 store.LedgerRepo 加方法）有两个原因：
+//   - store.LedgerRepo 不属本次可改范围，无法给它加 ListByRecord/Create；
+//   - store.LedgerAttachmentRepo 在生产环境就是同一个 ledgerRepo 值实现的，
+//     运行期断言必然成功；而测试里的最小替身（只实现账本方法）不会因为缺方法
+//     就编译不过——断言失败时降级成"不做凭证快照"，不阻断账单导入本身。
+type attachmentRegistry interface {
+	ListByRecord(ctx context.Context, userID, recordID string) ([]model.LedgerAttachment, error)
+	Create(ctx context.Context, a *model.LedgerAttachment) error
+}
+
+// attachmentByUser 是「一次取回账号全部凭证」的可选能力。
+//
+// 做成可选接口而不是直接加进 attachmentRegistry：后者被测试替身与历史实现复用，
+// 强加方法会让所有实现被迫升级；这里能断言到就走快路径，断言不到退回逐条查，
+// 行为一致、只是 N+1。
+type attachmentByUser interface {
+	ListByUser(ctx context.Context, userID string) ([]model.LedgerAttachment, error)
+}
+
+// attachmentRegistryOf 取出凭证仓储；底层实现不支持时返回 nil（调用方需判空）。
+func (s *ExportService) attachmentRegistryOf() attachmentRegistry {
+	reg, _ := s.repo.(attachmentRegistry)
+	return reg
+}
+
+// snapshot 读出当前账号的全部分类、账单与凭证元数据。
 func (s *ExportService) snapshot(ctx context.Context, userID string) (*ledgerSnapshot, error) {
 	cats, err := s.repo.ListCategories(ctx, userID, "", true)
 	if err != nil {
@@ -382,13 +421,70 @@ func (s *ExportService) snapshot(ctx context.Context, userID string) (*ledgerSna
 	if err != nil {
 		return nil, err
 	}
-	return &ledgerSnapshot{categories: cats, records: recs}, nil
+	atts, err := s.snapshotAttachments(ctx, userID, recs)
+	if err != nil {
+		return nil, err
+	}
+	return &ledgerSnapshot{categories: cats, records: recs, attachments: atts}, nil
+}
+
+// snapshotAttachments 取回该账号的全部凭证元数据。
+//
+// 【一次查询，不要逐条查】早先按账单循环 ListByRecord：N 条账单 = N 次查询，
+// 2 万条账本（maxImportRecords 上限）就是 2 万次往返，且发生在「清空账本之前」，
+// 一旦超时用户就被卡在覆盖导入的入口。现在用 ListByUser 单次取全。
+func (s *ExportService) snapshotAttachments(ctx context.Context, userID string, recs []model.LedgerRecord) ([]model.LedgerAttachment, error) {
+	reg := s.attachmentRegistryOf()
+	if reg == nil {
+		// 仓储不支持凭证（测试替身 / 未接入附件模块的部署）：账单仍可快照与回滚。
+		return nil, nil
+	}
+	out, err := s.collectAttachments(ctx, userID, recs, reg)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// collectAttachments 优先用 ListByUser 一次取全；实现不支持时退回逐条查。
+//
+// 退回分支必须保留：attachmentRegistry 是本地窄接口，测试替身或未实现新方法的
+// 部署仍可能只提供 ListByRecord。宁可慢，也不能因为缺方法而让覆盖导入不可用。
+func (s *ExportService) collectAttachments(ctx context.Context, userID string, recs []model.LedgerRecord, reg attachmentRegistry) ([]model.LedgerAttachment, error) {
+	if byUser, ok := reg.(attachmentByUser); ok {
+		out, err := byUser.ListByUser(ctx, userID)
+		if err != nil {
+			return nil, apierr.Wrap(apierr.CodeInternal, err, "读取凭证清单失败")
+		}
+		return out, nil
+	}
+	out := make([]model.LedgerAttachment, 0, len(recs))
+	for _, r := range recs {
+		list, err := reg.ListByRecord(ctx, userID, r.ID)
+		if err != nil {
+			return nil, apierr.Wrap(apierr.CodeInternal, err, "读取凭证清单失败")
+		}
+		out = append(out, list...)
+	}
+	return out, nil
 }
 
 // importOverwrite 清空当前账本后整批写入备份内容；中途失败则回滚到快照。
-func (s *ExportService) importOverwrite(ctx context.Context, userID string, cats []model.LedgerCategory, recs []model.LedgerRecord, res *ImportResult) error {
+//
+// 【没有数据库事务，这一点必须一直记住】清空、建分类、建账单、回滚全部是多次独立的
+// 仓储调用（store 层不暴露 pgx.Tx，本次不可改），因此"原子性"只由两件事保证：
+//  1. 前置保护（guardAttachments）：账本里一旦已有凭证就默认拒绝，绝不静默删
+//     —— 这是消除"不可逆丢失"的核心手段，因为凭证字节不在 payload 里，删了就回不来；
+//  2. 内存快照 + restore()：中途失败时把分类/账单/凭证元数据按原 id 写回。
+//
+// 快照回滚不是原子操作：如果回滚自身也失败，账本会停在中间状态（会返回明确错误让
+// 用户核对）。要做到真正的原子性，需要 store 层提供 WithTx 或一个"整账本替换"的事务方法。
+func (s *ExportService) importOverwrite(ctx context.Context, userID string, cats []model.LedgerCategory, recs []model.LedgerRecord, force bool, res *ImportResult) error {
 	snap, err := s.snapshot(ctx, userID)
 	if err != nil {
+		return err
+	}
+	if err := guardAttachments(snap, force); err != nil {
 		return err
 	}
 	// 1) 清空：账单先删（分类被引用时不允许删除），分类后删。
@@ -439,6 +535,22 @@ func (s *ExportService) importOverwrite(ctx context.Context, userID string, cats
 	return nil
 }
 
+// guardAttachments 是覆盖导入的前置保护：账本里已有凭证且调用方没有显式 force 时，
+// 直接 409 拒绝，而不是"先删了再说"。
+//
+// 为什么是拒绝而不是尽力恢复：JSON 备份里只有凭证清单、没有凭证字节（见文件头注释），
+// 一旦账单被删，外键 CASCADE 会连带删掉 ledger_attachments 元数据；磁盘文件虽然还在，
+// 但没有元数据就再也没有任何接口能定位到它们——用户看到的就是"凭证全没了"。
+// 这种不可逆操作只能靠"先挡住"来兜底，回滚快照只能覆盖"执行到一半失败"的场景。
+func guardAttachments(snap *ledgerSnapshot, force bool) error {
+	if force || snap == nil || len(snap.attachments) == 0 {
+		return nil
+	}
+	return apierr.Newf(apierr.CodeConflict,
+		"该账本含 %d 张凭证，覆盖导入会导致凭证不可恢复（备份里只有凭证清单、没有图片字节）。"+
+			"请先导出 ZIP 备份（含图片），确认后重新发起导入并显式传 force=true", len(snap.attachments))
+}
+
 // rollbackOverwrite 覆盖导入失败时的统一回滚入口。
 func (s *ExportService) rollbackOverwrite(ctx context.Context, userID string, snap *ledgerSnapshot, cause error) error {
 	if rbErr := s.restore(ctx, userID, snap); rbErr != nil {
@@ -457,6 +569,11 @@ func errText(err error) string {
 }
 
 // clearAll 删除快照中登记的全部账单与分类。
+//
+// 【注意】这里只删数据库行：账单的 ledger_attachments 元数据由外键 CASCADE 一并删除，
+// 磁盘上的凭证文件不归本模块管（没有上传根目录），因此删除后无法从文件反推归属。
+// 这就是覆盖导入必须先过 guardAttachments 的原因——本函数本身不可逆。
+// 也无法用事务包住：store 层不暴露 pgx.Tx（见 importOverwrite 的说明）。
 func (s *ExportService) clearAll(ctx context.Context, userID string, snap *ledgerSnapshot) error {
 	for _, r := range snap.records {
 		if err := s.repo.DeleteRecord(ctx, userID, r.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
@@ -473,7 +590,7 @@ func (s *ExportService) clearAll(ctx context.Context, userID string, snap *ledge
 	return nil
 }
 
-// restore 把快照原样写回（先清空当前状态，再按原 id 重建）。
+// restore 把快照原样写回（先清空当前状态，再按原 id 重建账单与凭证元数据）。
 func (s *ExportService) restore(ctx context.Context, userID string, snap *ledgerSnapshot) error {
 	cur, err := s.snapshot(ctx, userID)
 	if err != nil {
@@ -494,6 +611,18 @@ func (s *ExportService) restore(ctx context.Context, userID string, snap *ledger
 		rec.UserID = userID
 		if err := s.repo.CreateRecord(ctx, &rec); err != nil {
 			return apierr.Wrap(apierr.CodeInternal, err, "恢复原账单失败")
+		}
+	}
+	// 凭证元数据必须在账单之后重建（record_id 有外键）。
+	// 元数据里的 rel_path 指向的磁盘文件从未被删除，因此重建后凭证即可正常读取；
+	// created_at 由仓储回填为当前时间，只影响同一账单内的展示顺序，不影响可读性。
+	if reg := s.attachmentRegistryOf(); reg != nil {
+		for _, a := range snap.attachments {
+			att := a
+			att.UserID = userID
+			if err := reg.Create(ctx, &att); err != nil && !isConflict(err) {
+				return apierr.Wrap(apierr.CodeInternal, err, "恢复原凭证记录失败")
+			}
 		}
 	}
 	return nil
@@ -808,7 +937,19 @@ func (s *ExportService) ImportZIP(ctx context.Context, userID string, body []byt
 	}
 
 	// 账单与分类走与 JSON 导入完全相同的路径（校验、强制归属、覆盖回滚都在里面）。
-	res, err := s.Import(ctx, userID, ImportRequest{Mode: mode, Payload: &payload, Confirm: confirm})
+	// Force 传 confirm && 压缩包内确实带 images/：
+	// ① ZIP 覆盖本来就必须显式 confirm=true（见 export_http.go 的 importConfirm），
+	//    这是"我确认清空账本"的明确表达；
+	// ② 只有真的带图片的 ZIP 才算"完整还原"，此时放行才不会把用户逼向不带凭证的
+	//    JSON 覆盖（那才会真正丢图）；
+	// ③ 不含 images/ 的 ZIP 等价于 JSON 覆盖，必须继续受 guardAttachments 保护，
+	//    否则「用 ZIP 外壳绕过 409」就成了新的丢图入口。
+	res, err := s.Import(ctx, userID, ImportRequest{
+		Mode:    mode,
+		Payload: &payload,
+		Confirm: confirm,
+		Force:   confirm && len(images) > 0,
+	})
 	if err != nil {
 		return nil, err
 	}

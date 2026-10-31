@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -32,6 +33,10 @@ type fakeDav struct {
 	dirs     map[string]bool
 	files    map[string][]byte
 	modified time.Time
+	// lastPutLen / lastPutChunked 记录最近一次 PUT 的请求体长度与是否使用 chunked，
+	// 用于验证上传是「带确定 Content-Length 的流式转发」而非整份缓冲的 chunked。
+	lastPutLen     int64
+	lastPutChunked bool
 }
 
 // fakeEntry 是 PROPFIND 的返回条目。
@@ -91,6 +96,8 @@ func (d *fakeDav) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		buf := new(bytes.Buffer)
 		_, _ = buf.ReadFrom(r.Body)
 		d.files[rel] = buf.Bytes()
+		d.lastPutLen = r.ContentLength
+		d.lastPutChunked = len(r.TransferEncoding) > 0
 		w.WriteHeader(http.StatusCreated)
 	case "MKCOL":
 		if d.dirs[rel] || d.fileExists(rel) {
@@ -322,6 +329,16 @@ func TestUploadDownloadDelete(t *testing.T) {
 	if !e.dav.dirs["x"] || !e.dav.dirs["x/y"] {
 		t.Fatalf("父目录未自动创建: dirs=%v", e.dav.dirs)
 	}
+	// C-05：上传应以确定的 Content-Length 流式转发（非 chunked、非整份缓冲）。
+	e.dav.mu.Lock()
+	putLen, putChunked := e.dav.lastPutLen, e.dav.lastPutChunked
+	e.dav.mu.Unlock()
+	if putLen != int64(len(content)) {
+		t.Fatalf("PUT Content-Length = %d，期望 %d", putLen, len(content))
+	}
+	if putChunked {
+		t.Fatal("PUT 不应使用 chunked 编码")
+	}
 
 	rec = e.postJSON("/download", pathRequest{Credentials: e.creds, Path: "x/y/z.txt"})
 	if rec.Code != http.StatusOK || !bytes.Equal(rec.Body.Bytes(), content) {
@@ -436,6 +453,11 @@ func TestSSRF(t *testing.T) {
 		{"私有 192.168/16", "https://192.168.1.10/dav/", http.StatusForbidden},
 		{"链路本地 169.254", "https://169.254.169.254/latest/", http.StatusForbidden},
 		{"未指定 0.0.0.0", "https://0.0.0.0/dav/", http.StatusForbidden},
+		{"CGNAT 100.64/10", "https://100.64.0.1/dav/", http.StatusForbidden},
+		{"多播 224/4", "https://224.0.0.1/dav/", http.StatusForbidden},
+		{"保留 240/4", "https://240.0.0.1/dav/", http.StatusForbidden},
+		{"基准测试 198.18/15", "https://198.18.0.1/dav/", http.StatusForbidden},
+		{"IPv6 多播 ff02::1", "https://[ff02::1]/dav/", http.StatusForbidden},
 		{"http scheme", "http://example.com/dav/", http.StatusBadRequest},
 		{"地址内嵌凭据", "https://user:pw@example.com/dav/", http.StatusBadRequest},
 	}
@@ -459,18 +481,27 @@ func TestSSRF(t *testing.T) {
 
 // TestDenyIP 直接覆盖 IP 黑名单本身。
 func TestDenyIP(t *testing.T) {
-	blocked := []string{"127.0.0.1", "127.255.255.254", "::1", "10.1.2.3", "172.16.0.1", "172.31.255.255",
-		"192.168.0.1", "169.254.169.254", "fe80::1", "0.0.0.0", "::", "fc00::1", "fd12:3456::1", "::ffff:127.0.0.1"}
+	blocked := []string{
+		"127.0.0.1", "127.255.255.254", "::1", "10.1.2.3", "172.16.0.1", "172.31.255.255",
+		"192.168.0.1", "169.254.169.254", "fe80::1", "0.0.0.0", "::", "fc00::1", "fd12:3456::1", "::ffff:127.0.0.1",
+		// C-09 新增网段：CGNAT / IETF 协议分配 / TEST-NET / 基准测试 / 多播 / 保留
+		"100.64.0.1", "100.127.255.254", "192.0.0.8", "192.0.2.10", "198.18.0.1", "198.19.255.254",
+		"198.51.100.7", "203.0.113.10", "224.0.0.1", "239.255.255.250", "240.0.0.1", "255.255.255.255",
+		"ff02::1", "ff00::abcd",
+	}
 	for _, s := range blocked {
 		if !defaultDenyIP(net.ParseIP(s)) {
 			t.Fatalf("%s 应被拦截", s)
 		}
 	}
-	// 203.0.113.0/24 是 RFC 5737 文档保留地址（非真实主机），用于表示公网地址。
-	for _, s := range []string{"203.0.113.10", "198.51.100.7", "2400:cb00::1"} {
+	// 真实公网地址必须放行（8.8.8.8 / 1.1.1.1 / Cloudflare v6）。
+	for _, s := range []string{"8.8.8.8", "1.1.1.1", "2400:cb00::1", "2606:4700:4700::1111"} {
 		if defaultDenyIP(net.ParseIP(s)) {
 			t.Fatalf("%s 不应被拦截", s)
 		}
+	}
+	if !defaultDenyIP(nil) {
+		t.Fatal("nil IP 应被拦截")
 	}
 }
 
@@ -517,6 +548,126 @@ func TestLimits(t *testing.T) {
 	rec = e.postJSON("/list", pathRequest{Credentials: e.creds})
 	if rec.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("条目超限应返回 413，实际 %d", rec.Code)
+	}
+}
+
+// TestListBodyLimit 校验 C-03：207 响应体超过 maxListBodyBytes 时返回 413，
+// 而不是先把整份 XML 反序列化进内存。
+func TestListBodyLimit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var b strings.Builder
+	b.WriteString(`<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:">`)
+	b.WriteString(`<D:response><D:href>/dav/</D:href><D:propstat><D:prop>`)
+	b.WriteString(`<D:resourcetype><D:collection/></D:resourcetype>`)
+	b.WriteString(`</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>`)
+	b.WriteString(`</D:multistatus>`)
+	b.WriteString(strings.Repeat("x", maxListBodyBytes+1)) // 根元素之后的填充，模拟超大响应
+
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/xml; charset=utf-8")
+		w.WriteHeader(http.StatusMultiStatus)
+		_, _ = io.WriteString(w, b.String())
+	}))
+	defer srv.Close()
+
+	c := newClient()
+	c.denyIP = func(net.IP) bool { return false }
+	c.http.Transport = srv.Client().Transport
+	r := gin.New()
+	mount(r.Group("/api/v1/webdav"), c)
+
+	body, _ := json.Marshal(pathRequest{
+		Credentials: Credentials{BaseURL: srv.URL + "/dav/", User: testUser, Pass: testPass},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webdav/list", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超大 207 响应应返回 413，实际 %d body=%.200s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestDownloadChunkedTruncated 校验 C-04 的已知局限：长度未知（chunked）时
+// 无法预先返回 413，只能在 maxDownload+1 字节处截断。
+func TestDownloadChunkedOverLimitAborts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 10; i++ {
+			_, _ = w.Write([]byte("0123456789"[i : i+1]))
+			w.(http.Flusher).Flush() // 强制 chunked，使客户端拿不到 Content-Length
+		}
+	}))
+	defer srv.Close()
+
+	c := newClient()
+	c.denyIP = func(net.IP) bool { return false }
+	c.http.Transport = srv.Client().Transport
+	c.maxDownload = 4
+	r := gin.New()
+	mount(r.Group("/api/v1/webdav"), c)
+
+	body, _ := json.Marshal(pathRequest{
+		Credentials: Credentials{BaseURL: srv.URL + "/dav/", User: testUser, Pass: testPass},
+		Path:        "chunked.bin",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webdav/download", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	// 超限时必须**中断**而不是静默截断：客户端宁可见到传输失败，也不能拿到
+	// 「HTTP 200 + 长度不足」的损坏文件。Recorder 不支持 Hijack，因此走
+	// panic(http.ErrAbortHandler) 分支；生产环境（HTTP/1.1）会先尝试 hijack 关连接。
+	func() {
+		defer func() {
+			if got := recover(); got != http.ErrAbortHandler {
+				t.Fatalf("超限应 panic(http.ErrAbortHandler) 中断响应，实际 panic=%v", got)
+			}
+		}()
+		r.ServeHTTP(rec, req)
+	}()
+
+	// 已写出的字节不应超过 maxDownload+1（多读的那 1 字节用来判定"确实超了"）。
+	if n := rec.Body.Len(); n > int(c.maxDownload)+1 {
+		t.Fatalf("已写出 %d 字节，超过 maxDownload+1=%d", n, c.maxDownload+1)
+	}
+}
+
+func TestDownloadChunkedWithinLimitOK(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/octet-stream")
+		w.WriteHeader(http.StatusOK)
+		for i := 0; i < 4; i++ {
+			_, _ = w.Write([]byte("0123456789"[i : i+1]))
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer srv.Close()
+
+	c := newClient()
+	c.denyIP = func(net.IP) bool { return false }
+	c.http.Transport = srv.Client().Transport
+	c.maxDownload = 64 // 上限大于实际长度
+	r := gin.New()
+	mount(r.Group("/api/v1/webdav"), c)
+
+	body, _ := json.Marshal(pathRequest{
+		Credentials: Credentials{BaseURL: srv.URL + "/dav/", User: testUser, Pass: testPass},
+		Path:        "small.bin",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/webdav/download", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("未超限应 200，实际 %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != "0123" {
+		t.Fatalf("响应体被改动：%q", got)
 	}
 }
 

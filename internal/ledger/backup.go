@@ -53,6 +53,25 @@ const (
 	backupRunTimeout = 10 * time.Minute
 	// backupStatusLimit 是状态接口默认返回的运行记录条数。
 	backupStatusLimit = 10
+
+	// maxBackupTotalAttachmentBytes 是一次备份里凭证图片的**总字节预算**（1 GiB）。
+	//
+	// 【为什么必须有】打包是"全量攒进内存再上传"（见 buildArchive 的说明），
+	// 没有总预算时，一个存了几百条带图账单的账号会在打包阶段把进程内存吃光——
+	// 单张 2 MiB 的上限只管一张，管不了"两千张"。超预算时直接失败并说明原因，
+	// 绝不静默丢掉部分凭证（那样备份看起来成功、恢复时才发现少图）。
+	//
+	// 【为什么是 1 GiB 而不是 256 MiB】按单张 2 MiB 折算，256 MiB 只够 128 张；
+	// 记账本允许每单 9 张、凭证通常几十 KB 到几百 KB，正常重度用户很快就会触顶。
+	// 一旦触顶，每日自动备份会**持续失败**且用户无从下手（既不能删历史，也改不了配置）。
+	// 1 GiB 与部署机 2C4G 的内存余量匹配，也能覆盖约 500 张满额图片的实际占用。
+	// 【后续】真正彻底的做法是改成流式打包（边读边写 zip 到临时文件/对象存储），
+	// 这样预算就只是磁盘配额而非内存约束，留待下一轮重构。
+	maxBackupTotalAttachmentBytes = 1 << 30
+
+	// maxBackupAttachmentBytes 是单张凭证的读取上限，与附件模块的上传上限一致（2 MiB）。
+	// 复用同一个常量而不是另写一个数字：两个模块对"一张凭证多大算合法"必须同口径。
+	maxBackupAttachmentBytes = maxAttachmentBytes
 )
 
 // RemoteStore 是备份所需的远端能力（*webdav.Client 天然实现它）。
@@ -490,11 +509,18 @@ func (s *BackupService) buildArchive(ctx context.Context, userID string) (*backu
 	}
 
 	// 图片按顺序收集：先算好清单（决定 manifest），再写 ZIP。
+	//
+	// 【内存模型】这里仍是"先把凭证字节全部读进内存，再统一写 ZIP"：
+	// manifest 需要每张图的条目路径与字节数，而 ledger.json 又要带同样的清单，
+	// 两者都必须在打包前就确定，改成"边写边计数"会牵动 manifest/checklist 的两次装配。
+	// 因此改为用预算兜住上限：单张 ≤ maxBackupAttachmentBytes、累计 ≤
+	// maxBackupTotalAttachmentBytes，超限即中止（不静默截断）。
 	images := []struct {
 		path string
 		data []byte
 	}{}
 	var missing int
+	var used int64 // 已收集的凭证字节总量（预算记账）
 	if s.attach != nil {
 		for _, rec := range records {
 			if rec.AttachmentCount <= 0 {
@@ -514,13 +540,29 @@ func (s *BackupService) buildArchive(ctx context.Context, userID string) (*backu
 					s.log.Warn("读取凭证附件失败", "attachmentId", ref.ID, "error", err)
 					continue
 				}
-				data, err := io.ReadAll(rc)
+				// 多读 1 字节用于判定单张超限：既能把超大文件挡在内存之外，也能区分"正好达上限"。
+				data, err := io.ReadAll(io.LimitReader(rc, maxBackupAttachmentBytes+1))
 				_ = rc.Close()
 				if err != nil {
 					missing++
 					s.log.Warn("读取凭证附件内容失败", "attachmentId", ref.ID, "error", err)
 					continue
 				}
+				if len(data) > maxBackupAttachmentBytes {
+					// 单张超限按"读取失败"处理：计入 manifest.attachmentFailed 并告警，
+					// 与历史行为一致——不因一张异常文件让整个账号当天没有备份。
+					missing++
+					s.log.Warn("凭证超过单张上限，本次备份跳过",
+						"attachmentId", ref.ID, "limit", int64(maxBackupAttachmentBytes))
+					continue
+				}
+				if used+int64(len(data)) > maxBackupTotalAttachmentBytes {
+					// 总预算超限必须中止：静默跳过会让备份"看起来成功、恢复时少图"。
+					return nil, apierr.Newf(apierr.CodeInternal,
+						"凭证图片总量已超出单次备份上限（%d 字节），本次备份中止；请清理过大的凭证后重试",
+						int64(maxBackupTotalAttachmentBytes))
+				}
+				used += int64(len(data))
 				file := imagePath(rec.ID, ref)
 				images = append(images, struct {
 					path string

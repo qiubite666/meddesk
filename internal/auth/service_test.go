@@ -28,13 +28,15 @@ func newTestService() (*Service, *fakeRefresh, *fakeCache) {
 	return NewService(newFakeUsers(), fr, fc, cfg), fr, fc
 }
 
+// registerReq 返回一份长度合规的注册请求（键材长度受 decodeKeyMaterial 校验：
+// salt 16B / wrappedDek 48B / dekIv 12B）。
 func registerReq() model.RegisterRequest {
 	return model.RegisterRequest{
 		Email:        " Alice@Example.COM ",
 		PasswordHash: "cGFzc3dvcmQtaGFzLWJhc2U2NC12YWx1ZS0xMjM0NTY3ODkw",
-		KDFSalt:      "c2FsdHNhbHRzYWx0c2FsdA==",
-		WrappedDEK:   "d3JhcHBlZC1kZWstdmFsdWUtMTIz",
-		DEKIV:        "aXZpdml2aXY=",
+		KDFSalt:      "c2FsdHNhbHRzYWx0c2FsdA==",                                         // 16B
+		WrappedDEK:   "d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3", // 48B
+		DEKIV:        "aWlpaWlpaWlpaWlp",                                                 // 12B
 	}
 }
 

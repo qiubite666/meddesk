@@ -5,15 +5,20 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 
 	"github.com/qiubite666/meddesk/internal/apierr"
 	"github.com/qiubite666/meddesk/internal/model"
 )
 
-// ctxUserIDKey 与鉴权中间件写入 gin 上下文的键保持一致（见契约 2.7）。
+// ctxUserIDKey 与鉴权中间件写入 gin 上下文的 key 保持一致（见契约 2.7）。
 const ctxUserIDKey = "user_id"
+
+// maxTrendDays 是 /ledger/trend 允许的最大天数（含闰年在内的整年）。
+const maxTrendDays = 366
 
 // Handler 承载记账本的 HTTP 处理函数。
 type Handler struct{ svc *Service }
@@ -107,13 +112,35 @@ func (h *Handler) deleteCategory(c *gin.Context) {
 // ------------------------------------------------------------------ 账单
 
 // filterFromQuery 解析筛选参数。区间缺省为"本月"。
-func filterFromQuery(c *gin.Context) model.LedgerFilter {
+//
+// 【为什么这里必须校验日期】from/to 会被仓储拼进 SQL 的 ::date 表达式，
+// 非法值交给 PostgreSQL 只会得到 22007（invalid input syntax for type date），
+// 再被包成 500；用户看到的不是"日期写错了"而是"服务器内部错误"。
+// 因此统一按 2006-01-02 严格解析（time.Parse 会连带校验 2 月 30 日这类假日期），
+// 并保证 from <= to。
+//
+// 【为什么 id 也在这里校验】分类/账单 id 会变成 uuid[] 参数；非法 UUID 在仓储层
+// 报 22P02 同样会变成 500。在入口就转成 400，错误信息也更明确。
+func filterFromQuery(c *gin.Context) (model.LedgerFilter, error) {
 	f := model.LedgerFilter{
 		Type:        strings.TrimSpace(c.Query("type")),
 		Keyword:     strings.TrimSpace(c.Query("keyword")),
 		ReimbStatus: strings.TrimSpace(c.Query("reimbStatus")),
 		From:        strings.TrimSpace(c.Query("from")),
 		To:          strings.TrimSpace(c.Query("to")),
+	}
+	if f.From != "" {
+		if _, err := time.Parse("2006-01-02", f.From); err != nil {
+			return model.LedgerFilter{}, apierr.Newf(apierr.CodeBadRequest, "from 应为 YYYY-MM-DD，收到 %q", f.From)
+		}
+	}
+	if f.To != "" {
+		if _, err := time.Parse("2006-01-02", f.To); err != nil {
+			return model.LedgerFilter{}, apierr.Newf(apierr.CodeBadRequest, "to 应为 YYYY-MM-DD，收到 %q", f.To)
+		}
+	}
+	if f.From != "" && f.To != "" && f.From > f.To {
+		return model.LedgerFilter{}, apierr.New(apierr.CodeBadRequest, "开始日期不能晚于结束日期")
 	}
 	// 分类多选同时支持 categoryId=a,b,c 与 categoryIds=a,b,c（后者语义更明确）。
 	for _, key := range []string{"categoryId", "categoryIds"} {
@@ -130,6 +157,22 @@ func filterFromQuery(c *gin.Context) model.LedgerFilter {
 			}
 		}
 	}
+	// 校验后顺手规范化成标准 36 位形式：google/uuid 也接受 urn:{...} 等变体，
+	// 而仓储侧的 uuid 解析只认标准写法，规范化后两边的判断一定一致。
+	for i, id := range f.CategoryIDs {
+		u, err := uuid.Parse(id)
+		if err != nil {
+			return model.LedgerFilter{}, apierr.Newf(apierr.CodeBadRequest, "分类 id %q 不是合法 UUID", id)
+		}
+		f.CategoryIDs[i] = u.String()
+	}
+	for i, id := range f.IDs {
+		u, err := uuid.Parse(id)
+		if err != nil {
+			return model.LedgerFilter{}, apierr.Newf(apierr.CodeBadRequest, "账单 id %q 不是合法 UUID", id)
+		}
+		f.IDs[i] = u.String()
+	}
 	f.Page, _ = strconv.Atoi(c.Query("page"))
 	if f.Page < 1 {
 		f.Page = 1
@@ -141,23 +184,32 @@ func filterFromQuery(c *gin.Context) model.LedgerFilter {
 	if f.Size > 200 {
 		f.Size = 200
 	}
-	return f
+	return f, nil
 }
 
 // rangeFromQuery 返回统计区间：默认本月；传了 from/to 则以它们为准。
-func rangeFromQuery(c *gin.Context) (from, to string) {
-	f := filterFromQuery(c)
+func rangeFromQuery(c *gin.Context) (from, to string, err error) {
+	f, err := filterFromQuery(c)
+	if err != nil {
+		return "", "", err
+	}
 	if f.From != "" && f.To != "" {
-		return f.From, f.To
+		return f.From, f.To, nil
 	}
 	if m := strings.TrimSpace(c.Query("month")); m != "" {
-		return MonthRange(m)
+		from, to = MonthRange(m)
+		return from, to, nil
 	}
-	return MonthRange("")
+	from, to = MonthRange("")
+	return from, to, nil
 }
 
 func (h *Handler) listRecords(c *gin.Context) {
-	f := filterFromQuery(c)
+	f, err := filterFromQuery(c)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
 	list, total, err := h.svc.ListRecords(c.Request.Context(), userIDOf(c), f)
 	if err != nil {
 		writeErr(c, err)
@@ -214,8 +266,17 @@ func (h *Handler) deleteRecord(c *gin.Context) {
 // ------------------------------------------------------------------ 统计
 
 func (h *Handler) summary(c *gin.Context) {
-	from, to := rangeFromQuery(c)
-	out, err := h.svc.Summary(c.Request.Context(), userIDOf(c), filterFromQuery(c), from, to)
+	from, to, err := rangeFromQuery(c)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	f, err := filterFromQuery(c)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	out, err := h.svc.Summary(c.Request.Context(), userIDOf(c), f, from, to)
 	if err != nil {
 		writeErr(c, err)
 		return
@@ -225,12 +286,23 @@ func (h *Handler) summary(c *gin.Context) {
 
 func (h *Handler) trend(c *gin.Context) {
 	// 趋势固定"最近 7 个自然日（含今天）"，与需求一致；也允许显式传 days。
+	//
+	// days 必须夹取上限：一个 GET 就能让 generate_series 展开上百万行，
+	// 属于无需登录成本的低成本资源耗尽。366 天（含闰年整年）足够业务使用。
 	days, _ := strconv.Atoi(c.Query("days"))
 	if days <= 0 {
 		days = 7
 	}
+	if days > maxTrendDays {
+		days = maxTrendDays
+	}
+	f, err := filterFromQuery(c)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
 	from, to := RecentDaysRange(days)
-	out, err := h.svc.Trend(c.Request.Context(), userIDOf(c), filterFromQuery(c), from, to)
+	out, err := h.svc.Trend(c.Request.Context(), userIDOf(c), f, from, to)
 	if err != nil {
 		writeErr(c, err)
 		return
@@ -239,8 +311,17 @@ func (h *Handler) trend(c *gin.Context) {
 }
 
 func (h *Handler) breakdown(c *gin.Context) {
-	from, to := rangeFromQuery(c)
-	income, expense, err := h.svc.Breakdown(c.Request.Context(), userIDOf(c), filterFromQuery(c), from, to)
+	from, to, err := rangeFromQuery(c)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	f, err := filterFromQuery(c)
+	if err != nil {
+		writeErr(c, err)
+		return
+	}
+	income, expense, err := h.svc.Breakdown(c.Request.Context(), userIDOf(c), f, from, to)
 	if err != nil {
 		writeErr(c, err)
 		return

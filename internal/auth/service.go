@@ -218,20 +218,36 @@ func (s *Service) Register(ctx context.Context, req model.RegisterRequest, meta 
 	return resp, err
 }
 
-// Login 校验凭据并签发令牌对。同一邮箱连续失败超过阈值返回 CodeRateLimited。
+// fakePasswordHash 是「账号不存在」时用来烧掉同等 CPU 的固定假哈希。
+//
+// 【为什么需要】直接 return 会让「账号不存在」比「口令错误」少跑一次 argon2
+// （默认配置下约几十毫秒），攻击者据此可批量枚举已注册邮箱。这里拿一份永不
+// 命中的常量串跑一遍 VerifyClientHash，把两条路径的耗时拉回同量级。
+//
+// 【为什么可以是常量】它只提供「耗时基准」，不参与鉴权，也永远不可能匹配任何
+// 客户端派生值；参数与默认部署一致（m=64MiB,t=3,p=2）。该常量不写日志。
+const fakePasswordHash = "$argon2id$v=19$m=65536,t=3,p=2$YWFhYWFhYWFhYWFhYWFhYQ$YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI"
+
+// Login 校验凭据并签发令牌对。
+// 同一邮箱、同一 IP、以及「同一 IP 尝试过的不同邮箱数」任一超限都返回 CodeRateLimited。
 func (s *Service) Login(ctx context.Context, req model.LoginRequest, meta RequestMeta) (*model.TokenResponse, error) {
 	email := normalizeEmail(req.Email)
 	if email == "" || req.PasswordHash == "" {
 		return nil, apierr.New(apierr.CodeUnauthorized, msgInvalidCredential)
 	}
 	failKey := cacheKeyFail + hashKey(email)
-	if n, err := s.cache.GetInt(ctx, failKey); err == nil && n >= maxLoginFailures {
+	ip := strings.TrimSpace(meta.IP)
+	if s.loginBlocked(ctx, failKey, ip) {
 		return nil, apierr.New(apierr.CodeRateLimited, msgRateLimited)
 	}
 	u, err := s.users.GetByEmail(ctx, email)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
+			// 先跑假哈希再返回，抹平与「账号存在但口令错」的时序差；
+			// 返回值恒为 false/err，故意忽略——这里不产生任何鉴权结论。
+			_, _ = VerifyClientHash(fakePasswordHash, req.PasswordHash)
 			s.bumpFailure(ctx, failKey)
+			s.noteIPFailure(ctx, ip, email)
 			return nil, apierr.New(apierr.CodeUnauthorized, msgInvalidCredential)
 		}
 		return nil, apierr.Wrap(apierr.CodeInternal, err, "登录失败，请稍后重试")
@@ -242,11 +258,34 @@ func (s *Service) Login(ctx context.Context, req model.LoginRequest, meta Reques
 	}
 	if !ok {
 		s.bumpFailure(ctx, failKey)
+		s.noteIPFailure(ctx, ip, email)
 		return nil, apierr.New(apierr.CodeUnauthorized, msgInvalidCredential)
 	}
-	_ = s.cache.Del(ctx, failKey) // 登录成功清零失败计数
+	// 成功只清邮箱维度：IP 维度保留，否则攻击者只要掌握一个有效账号，
+	// 就能在每次撞库后登录一次把自己的 IP 计数洗白。
+	_ = s.cache.Del(ctx, failKey)
 	resp, _, err := s.issue(ctx, u, meta)
 	return resp, err
+}
+
+// loginBlocked 检查登录是否已超限：邮箱阈值、IP 阈值、同 IP 多邮箱。
+func (s *Service) loginBlocked(ctx context.Context, failKey, ip string) bool {
+	if n, err := s.cache.GetInt(ctx, failKey); err == nil && n >= maxLoginFailures {
+		return true
+	}
+	if ip == "" {
+		return false
+	}
+	ipHash := hashKey(ip)
+	if n, err := s.cache.GetInt(ctx, cacheKeyFailIP+ipHash); err == nil && n >= maxLoginFailuresPerIP {
+		return true
+	}
+	// 用 > 而不是 >=：第 maxEmailsPerIP+1 个新邮箱出现时才认定撞库，
+	// 阈值本身允许正好 maxEmailsPerIP 个邮箱。
+	if n, err := s.cache.GetInt(ctx, cacheKeyIPEmails+ipHash); err == nil && n > maxEmailsPerIP {
+		return true
+	}
+	return false
 }
 
 // Refresh 用刷新令牌换取新的令牌对，并轮换刷新令牌。
@@ -298,12 +337,20 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, meta Request
 	if err != nil {
 		return nil, err
 	}
+	if graced {
+		// 【宽限路径必须与首次轮换分开】旧行的 replaced_by 已由首次轮换写入、
+		// revoked_at 也已置位，再调 MarkReplaced 会命中 0 行返回 ErrNotFound
+		// （对外 500），且刚签发的新令牌会成为没有前驱的孤立行。
+		// 宽限券的意义只是「再签一次」，不改变旧行的轮换状态，因此直接返回；
+		// 也不重新发券（上面 !graced 的分支才写 grace 键），保证只能用一次。
+		return resp, nil
+	}
 	if err := s.refresh.MarkReplaced(ctx, old.ID, newID); err != nil {
 		return nil, apierr.Wrap(apierr.CodeInternal, err, "刷新失败，请稍后重试")
 	}
 	// 旧令牌进吊销名单；仅在首次轮换时保留一次宽限重用机会。
 	s.markRevoked(ctx, old.ID)
-	if !graced && s.cfg.RefreshReuseGrace > 0 {
+	if s.cfg.RefreshReuseGrace > 0 {
 		_ = s.cache.Set(ctx, cacheKeyGrace+old.ID, "1", s.cfg.RefreshReuseGrace)
 	}
 	return resp, nil
@@ -517,6 +564,28 @@ func (s *Service) bumpFailure(ctx context.Context, key string) {
 	}
 }
 
+// noteIPFailure 记录一次 IP 维度的登录失败，并维护「同 IP 不同邮箱数」。
+//
+// 【为什么要 (ip,email) 去重】只按失败次数计的话，一个账号被反复试错就会把
+// 「多邮箱」计数打满，误伤同一出口 IP 的正常用户；只有出现**新的**邮箱才说明
+// 是横向撒网，才计入多邮箱维度。
+func (s *Service) noteIPFailure(ctx context.Context, ip, email string) {
+	ip = strings.TrimSpace(ip)
+	if ip == "" {
+		return // 拿不到来源 IP（如内部调用）时不做 IP 计数，避免所有请求共用一个键
+	}
+	ipHash := hashKey(ip)
+	s.bumpFailure(ctx, cacheKeyFailIP+ipHash)
+	seenKey := cacheKeyIPEmailSeen + ipHash + ":" + hashKey(email)
+	first, err := s.cache.SetNX(ctx, seenKey, "1", loginFailTTL)
+	if err != nil || !first {
+		return
+	}
+	if _, err := s.cache.Incr(ctx, cacheKeyIPEmails+ipHash, loginFailTTL); err != nil {
+		slog.Default().Warn("auth: IP 多邮箱计数写入失败", "err", err)
+	}
+}
+
 // normalizeEmail 邮箱统一去空白并转小写。
 func normalizeEmail(email string) string {
 	return strings.ToLower(strings.TrimSpace(email))
@@ -538,6 +607,11 @@ func randomToken() (string, error) {
 }
 
 // decodeKeyMaterial 解码客户端提交的密钥包裹材料（kdfSalt/wrappedDek/dekIv）。
+//
+// 【为什么要校验长度】客户端可以把任意 base64 塞进来；不校验就会把错误长度的
+// 材料落库，之后每次登录回显的信封都解不开，表现为「口令对了却打不开数据」。
+// 更糟的是 wrapped_dek 长度决定 AES-GCM 的行为，错误长度在解密端才炸。
+// 长度常量统一取自 credential.go，避免魔数漂移。
 func decodeKeyMaterial(kdfSalt, wrappedDEK, dekIV string) ([]byte, []byte, []byte, error) {
 	salt, err := decodeBase64(kdfSalt)
 	if err != nil {
@@ -550,6 +624,16 @@ func decodeKeyMaterial(kdfSalt, wrappedDEK, dekIV string) ([]byte, []byte, []byt
 	iv, err := decodeBase64(dekIV)
 	if err != nil {
 		return nil, nil, nil, apierr.New(apierr.CodeBadRequest, "dekIv 不是合法的 base64")
+	}
+	// AES-256-GCM 密文 = DEK(32) + tag(16)。
+	if len(salt) != credentialSaltLen {
+		return nil, nil, nil, apierr.New(apierr.CodeBadRequest, "kdfSalt 长度异常")
+	}
+	if len(wrapped) != credentialDEKLen+16 {
+		return nil, nil, nil, apierr.New(apierr.CodeBadRequest, "wrappedDek 长度异常")
+	}
+	if len(iv) != credentialIVLen {
+		return nil, nil, nil, apierr.New(apierr.CodeBadRequest, "dekIv 长度异常")
 	}
 	return salt, wrapped, iv, nil
 }

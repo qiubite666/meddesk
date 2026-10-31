@@ -12,7 +12,6 @@
 package webdav
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"encoding/xml"
@@ -42,6 +41,12 @@ const (
 
 	// maxListItems 是单次列目录返回的最大条目数。
 	maxListItems = 2000
+
+	// maxListBodyBytes 是 PROPFIND 207 响应体的字节上限（4 MiB）。
+	// 理由：一个条目约 200~300 字节，2000 条约 0.5 MiB，4 MiB 已留足 8 倍余量；
+	// 若不加限制，恶意/异常服务端可以返回任意大的 XML，在 xml.Decoder 反序列化
+	// 阶段就把内存吃光（此时还来得及返回错误，不用等解析完成再判条目数）。
+	maxListBodyBytes = 4 << 20
 
 	// maxPathBytes 是相对路径的字节上限。
 	maxPathBytes = 1024
@@ -228,9 +233,21 @@ func (c *Client) handleList(g *gin.Context) {
 		writeErr(g, statusError(resp.StatusCode))
 		return
 	}
-	items, err := parseMultiStatus(resp.Body, tgt.Base, tgt.Rel)
+	// 先套字节上限再解析：避免恶意服务端用超大 XML 在 Decode 阶段撑爆内存。
+	lr := &io.LimitedReader{R: resp.Body, N: maxListBodyBytes + 1}
+	items, err := parseMultiStatus(lr, tgt.Base, tgt.Rel)
 	if err != nil {
+		if lr.N <= 0 {
+			writeErr(g, apierr.Newf(apierr.CodePayloadTooLarge, "目录响应超过上限 %d 字节", maxListBodyBytes))
+			return
+		}
 		writeErr(g, err)
+		return
+	}
+	// Decoder 可能在根元素结束后提前停止，需把剩余字节读掉才能确认是否超限。
+	_, _ = io.Copy(io.Discard, lr)
+	if lr.N <= 0 {
+		writeErr(g, apierr.Newf(apierr.CodePayloadTooLarge, "目录响应超过上限 %d 字节", maxListBodyBytes))
 		return
 	}
 	if len(items) > c.maxItems {
@@ -320,14 +337,15 @@ func (c *Client) handleUpload(g *gin.Context) {
 		}
 	}
 
-	// 用缓冲区承载：bytes.Reader 能让 PUT 带上确定的 Content-Length，
-	// 避免 chunked 编码被部分 WebDAV 服务拒绝。请求体上限由上层 BodyLimit 中间件保证。
-	buf, err := io.ReadAll(f)
-	if err != nil {
+	// 直接把 multipart 的文件视图作为 PUT 请求体流式发送：FormFile 返回的
+	// multipart.File 支持 Seek，小文件是内存 section，大文件是已落盘的临时文件，
+	// 两条路径都不需要再整份读进内存。ContentLength 显式取 fh.Size，
+	// 保证请求带确定的 Content-Length（部分 WebDAV 服务拒绝 chunked 编码）。
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		writeErr(g, apierr.Wrap(apierr.CodeBadRequest, err, "无法读取上传内容"))
 		return
 	}
-	resp, err := c.do(g.Request.Context(), http.MethodPut, tgt.URL, req.Credentials, bytes.NewReader(buf), nil)
+	resp, err := c.doWithLength(g.Request.Context(), http.MethodPut, tgt.URL, req.Credentials, f, fh.Size, nil)
 	if err != nil {
 		writeErr(g, err)
 		return
@@ -365,34 +383,90 @@ func (c *Client) handleDownload(g *gin.Context) {
 		writeErr(g, statusError(resp.StatusCode))
 		return
 	}
-	// 先按上限读入内存再写出：超限才能干净地返回错误（响应头尚未发出）。
-	data, err := io.ReadAll(io.LimitReader(resp.Body, c.maxDownload+1))
-	if err != nil {
-		writeErr(g, apierr.Wrap(apierr.CodeUnavailable, err, "读取远程文件失败"))
-		return
-	}
-	if int64(len(data)) > c.maxDownload {
-		writeErr(g, apierr.Newf(apierr.CodePayloadTooLarge, "文件超过下载上限 %d 字节", c.maxDownload))
-		return
-	}
 	ctype := resp.Header.Get("Content-Type")
 	if ctype == "" {
 		ctype = "application/octet-stream"
 	}
-	g.Header("Content-Type", ctype)
-	g.Header("Content-Disposition", attachmentDisposition(path.Base(rel)))
-	g.Header("Cache-Control", "no-store")
-	g.Header("X-Content-Type-Options", "nosniff")
-	g.Data(http.StatusOK, ctype, data)
+	// 流式转发，不再整份读进内存。
+	//
+	// 上限处理分两种：
+	//  1. Content-Length 已知：此时响应头尚未发出，超限可以干净地返回 413；
+	//  2. Content-Length 未知（chunked / 上游谎报）：只能边读边写。此时若静默截断，
+	//     客户端会拿到一个"HTTP 200 + 长度不足"的损坏文件，比直接失败更糟。
+	//     因此超过上限时**主动断开连接**（hijack 关闭 TCP；HTTP/2 等不支持
+	//     hijack 的场景退回 panic(http.ErrAbortHandler)），让客户端看到传输中断。
+	src := io.LimitReader(resp.Body, c.maxDownload+1)
+	contentLength := int64(-1)
+	if resp.ContentLength >= 0 {
+		if resp.ContentLength > c.maxDownload {
+			writeErr(g, apierr.Newf(apierr.CodePayloadTooLarge, "文件超过下载上限 %d 字节", c.maxDownload))
+			return
+		}
+		contentLength = resp.ContentLength
+		// 按声明长度精确转发，避免上游多发的字节与 Content-Length 不一致。
+		src = io.LimitReader(resp.Body, resp.ContentLength)
+	}
+	headers := map[string]string{
+		"Content-Disposition":    attachmentDisposition(path.Base(rel)),
+		"Cache-Control":          "no-store",
+		"X-Content-Type-Options": "nosniff",
+	}
+	if contentLength >= 0 {
+		g.DataFromReader(http.StatusOK, contentLength, ctype, src, headers)
+		return
+	}
+
+	// 未知长度：先发头，再手动拷贝，以便在超限时中断而不是"成功返回半个文件"。
+	for k, v := range headers {
+		g.Writer.Header().Set(k, v)
+	}
+	g.Writer.Header().Set("Content-Type", ctype)
+	g.Status(http.StatusOK)
+	n, copyErr := io.Copy(g.Writer, src)
+	if n > c.maxDownload {
+		abortResponse(g)
+		return
+	}
+	if copyErr != nil {
+		// 头已发出，无法改状态码；断开连接，避免调用方把半截响应当成功。
+		abortResponse(g)
+		return
+	}
+	g.Writer.Flush()
+}
+
+// abortResponse 立即中断当前响应。
+//
+// 优先 hijack 关闭底层 TCP：这是 HTTP/1.1 下唯一能让客户端明确感知"传输未完成"
+// 的方式（仅设置状态码已经太晚）。HTTP/2 不支持 hijack，退回 net/http 的
+// ErrAbortHandler 语义——由 server 直接断开该 stream。
+func abortResponse(g *gin.Context) {
+	if hj, ok := g.Writer.(http.Hijacker); ok {
+		if conn, _, err := hj.Hijack(); err == nil {
+			_ = conn.Close()
+			return
+		}
+	}
+	panic(http.ErrAbortHandler)
 }
 
 // ---- 远程调用 ----
 
 // do 发起一次带 Basic Auth 的远程请求；凭据只在本次调用中使用，不写入任何状态。
 func (c *Client) do(ctx context.Context, method, target string, creds Credentials, body io.Reader, header map[string]string) (*http.Response, error) {
+	return c.doWithLength(ctx, method, target, creds, body, 0, header)
+}
+
+// doWithLength 是 do 的流式版本：contentLength > 0 时显式设置请求体长度，
+// 用于把 multipart 文件直接作为请求体转发（否则未知长度的 io.Reader 会走 chunked）。
+func (c *Client) doWithLength(ctx context.Context, method, target string, creds Credentials,
+	body io.Reader, contentLength int64, header map[string]string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
 		return nil, apierr.Wrap(apierr.CodeBadRequest, err, "构造远程请求失败")
+	}
+	if contentLength > 0 {
+		req.ContentLength = contentLength
 	}
 	req.SetBasicAuth(creds.User, creds.Pass)
 	for k, v := range header {
@@ -577,7 +651,40 @@ func (c *Client) checkHost(ctx context.Context, host string) error {
 	return nil
 }
 
-// defaultDenyIP 是生产环境的 IP 拦截策略：回环、私有、链路本地、未指定与 0.0.0.0/8。
+// blockedNets 是需要显式拦截的保留 / 特殊用途网段（生产策略）。
+//
+// 说明：net.IP.IsPrivate() 已覆盖 RFC1918（10/8、172.16/12、192.168/16）与
+// fc00::/7（ULA），回环 / 链路本地 / 未指定由 IsLoopback / IsLinkLocalUnicast /
+// IsUnspecified 覆盖，这里只补它们没覆盖到的部分，不重复实现也不删掉前者。
+// 预解析成 IPNet 切片（进程启动时一次），避免每次请求都做字符串解析。
+var blockedNets = mustParseCIDRs(
+	"0.0.0.0/8",       // 本网络（含 0.0.0.0）
+	"100.64.0.0/10",   // RFC 6598 运营商级 NAT（CGNAT）
+	"192.0.0.0/24",    // IETF 协议分配（含 192.0.0.170/171 NAT64）
+	"192.0.2.0/24",    // RFC 5737 TEST-NET-1
+	"198.18.0.0/15",   // RFC 2544 网络设备基准测试
+	"198.51.100.0/24", // RFC 5737 TEST-NET-2
+	"203.0.113.0/24",  // RFC 5737 TEST-NET-3
+	"224.0.0.0/4",     // IPv4 多播
+	"240.0.0.0/4",     // 保留位（含 255.255.255.255 广播）
+	"ff00::/8",        // IPv6 多播
+)
+
+// mustParseCIDRs 在初始化阶段解析网段；常量写错属于编码错误，直接 panic 暴露。
+func mustParseCIDRs(cidrs ...string) []*net.IPNet {
+	out := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic("webdav: 非法 CIDR " + c + ": " + err.Error())
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// defaultDenyIP 是生产环境的 IP 拦截策略：回环、私有、链路本地、未指定，
+// 以及 blockedNets 中列出的保留 / 特殊用途网段。
 func defaultDenyIP(ip net.IP) bool {
 	if ip == nil {
 		return true
@@ -585,8 +692,10 @@ func defaultDenyIP(ip net.IP) bool {
 	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsPrivate() || ip.IsLinkLocalUnicast() {
 		return true
 	}
-	if v4 := ip.To4(); v4 != nil {
-		return v4[0] == 0 // 0.0.0.0/8
+	for _, n := range blockedNets {
+		if n.Contains(ip) {
+			return true
+		}
 	}
 	return false
 }

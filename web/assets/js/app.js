@@ -854,7 +854,11 @@
         }).then(function () {
           if (window.caches && caches.keys) {
             return caches.keys().then(function (keys) {
-              return Promise.all(keys.map(function (k) { return caches.delete(k); }));
+              // 只删本应用的缓存（sw.js 的 CACHE_NAME 前缀 'meddesk-shell-'）：
+              // 同源下可能还有 admin 或其他工具注册的缓存，一律保留。
+              return Promise.all(keys.filter(function (k) {
+                return String(k).indexOf('meddesk') === 0;
+              }).map(function (k) { return caches.delete(k); }));
             });
           }
         }).then(function () { window.location.reload(); }).catch(function () {});

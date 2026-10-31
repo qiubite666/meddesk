@@ -13,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/qiubite666/meddesk/internal/apierr"
 	"github.com/qiubite666/meddesk/internal/cache"
 )
 
@@ -38,6 +39,28 @@ const (
 	// msgCaptchaInvalid 是验证码失败时对外统一的消息：不区分「不存在」「已过期」
 	// 「已用过」「输错了」，避免调用方据此推断某个 id 是否真实存在。
 	msgCaptchaInvalid = "验证码错误或已过期，请点击图片刷新后重试"
+
+	// captchaIPFailLimit 是同一 IP 在 captchaIPFailTTL 内允许的验证码失败次数。
+	//
+	// 【为什么必须有 IP 维度】captchaMaxFailures 是「单张图可错 5 次」，防的是
+	// 同一张图穷举；攻击者只要每次失败就重新取图，这条限制形同不存在。
+	// 6 位纯数字共 1e6 组合，若不限速，每张图试 5 次、每次换图，几小时即可打穿。
+	//
+	// 【取值理由】30 次 / 10 分钟：正常用户（看错 + 刷新重试 + 换设备）基本达不到；
+	// 脚本即便持续换图，有效猜测速率也被压到 ~3 次/分钟，1e6 组合仍需数百小时。
+	//
+	// 取 30 而不是 10：验证码是注册/登录链路上的第一道门，误伤成本极高——
+	// 老人连错两三次、家庭共用出口 IP、NAT 后多人同时注册都可能触顶，一旦被锁
+	// 10 分钟用户只会放弃。而 10 次/10 分钟对脚本的实际拦截力与 30 次差别很小
+	// （两者都远低于穷举所需速率），因此优先保证可用性。
+	// 成功校验时会清零该 IP 的计数（见 Verify），避免长期累积。
+	// 该阈值刻意不做成 config 项：它属实现细节，暴露出去只会被误调成 0。
+	captchaIPFailLimit = 30
+	// captchaIPFailTTL 是 IP 失败计数的窗口长度（取 10 分钟，与登录侧 15 分钟的
+	// 量级一致，又比单张码的 5 分钟 TTL 长，避免窗口切换处出现空档）。
+	captchaIPFailTTL = 10 * time.Minute
+	// msgCaptchaRateLimited 与登录限流文案区分开：用户能分辨是「图输错太多」。
+	msgCaptchaRateLimited = "验证码尝试过于频繁，请稍后再试"
 )
 
 // CaptchaResponse 是 GET /auth/captcha 的响应。
@@ -66,6 +89,10 @@ func newCaptchaStore(c cache.Cache) *captchaStore {
 // 失败计数独立过期，避免「答对就把计数键删掉」的写法在并发下丢失计数。
 func captchaCodeKey(id string) string { return "captcha:code:" + id }
 func captchaFailKey(id string) string { return "captcha:fail:" + id }
+
+// captchaIPFailKey 是 IP 维度的失败计数键。IP 直接入键（而非哈希）是刻意的：
+// 运维排查限流时能一眼看出是哪个来源，且该键只存计数不含任何业务数据。
+func captchaIPFailKey(ip string) string { return "captcha:fail:ip:" + ip }
 
 // issue 生成一张新验证码并返回 id 与 SVG 源码。
 func (s *captchaStore) issue(ctx context.Context) (string, string, error) {
@@ -111,34 +138,72 @@ func notifyCaptchaIssued(id, code string) {
 
 // verify 校验并消耗验证码。返回 false 时调用方一律回「错误或已过期」。
 // 校验通过即删除条目：验证码是一次性凭证，不能重放。
-func (s *captchaStore) verify(ctx context.Context, id, code string) bool {
+//
+// 返回值：ok 表示验证码是否通过；err 非 nil 时表示调用方应直接回该错误
+// （目前只有 IP 维度限流一种情况），此时不应再按「验证码错误」回复。
+// ip 为空表示拿不到来源（内部调用/测试），此时跳过 IP 维度计数。
+func (s *captchaStore) verify(ctx context.Context, id, code, ip string) (bool, error) {
+	ip = strings.TrimSpace(ip)
+	if s.ipBlocked(ctx, ip) {
+		return false, apierr.New(apierr.CodeRateLimited, msgCaptchaRateLimited)
+	}
 	id = strings.TrimSpace(id)
 	code = strings.TrimSpace(code)
 	if id == "" || code == "" || len(id) > 64 || len(code) > 16 {
-		return false
+		s.bumpIPFailure(ctx, ip)
+		return false, nil
 	}
 	// 先看失败次数：达到上限的 id 已作废，即使这一次输对也不放行。
 	if n, err := s.c.GetInt(ctx, captchaFailKey(id)); err == nil && n >= int64(s.maxFail) {
 		_ = s.c.Del(ctx, captchaCodeKey(id))
-		return false
+		s.bumpIPFailure(ctx, ip)
+		return false, nil
 	}
 	want, err := s.c.Get(ctx, captchaCodeKey(id))
 	if err != nil {
 		// 未命中或缓存故障都按失败处理（失败闭合），不因此放行注册。
-		return false
+		s.bumpIPFailure(ctx, ip)
+		return false, nil
 	}
 	if subtle.ConstantTimeCompare([]byte(strings.ToUpper(want)), []byte(strings.ToUpper(code))) == 1 {
 		_ = s.c.Del(ctx, captchaCodeKey(id), captchaFailKey(id))
-		return true
+		// 校验成功即清零该 IP 的失败计数：否则计数会在 10 分钟窗口内单向累积，
+		// 正常用户在「错几次、对一次、再错几次」的往复里迟早触顶被锁。
+		// 这不会削弱防爆破——能通过验证码说明对方已经解出一张图，
+		// 而解图速率本身仍受本计数器限制。
+		if ip != "" {
+			_ = s.c.Del(ctx, captchaIPFailKey(ip))
+		}
+		return true, nil
 	}
 	n, err := s.c.Incr(ctx, captchaFailKey(id), s.ttl)
 	if err != nil {
-		return false
+		s.bumpIPFailure(ctx, ip)
+		return false, nil
 	}
 	if n >= int64(s.maxFail) {
 		_ = s.c.Del(ctx, captchaCodeKey(id))
 	}
-	return false
+	s.bumpIPFailure(ctx, ip)
+	return false, nil
+}
+
+// ipBlocked 判断该 IP 的验证码失败次数是否已达上限。
+func (s *captchaStore) ipBlocked(ctx context.Context, ip string) bool {
+	if ip == "" {
+		return false
+	}
+	n, err := s.c.GetInt(ctx, captchaIPFailKey(ip))
+	return err == nil && n >= captchaIPFailLimit
+}
+
+// bumpIPFailure 累加该 IP 的验证码失败次数。
+// 计数写失败时只放弃限流、不放宽校验：答案正确性仍由常量时间比对保证。
+func (s *captchaStore) bumpIPFailure(ctx context.Context, ip string) {
+	if ip == "" {
+		return
+	}
+	_, _ = s.c.Incr(ctx, captchaIPFailKey(ip), captchaIPFailTTL)
 }
 
 // randomCaptchaCode 生成定长验证码。用 crypto/rand 而不是 math/rand：
@@ -183,10 +248,10 @@ var captchaGlyphs = map[byte][7]string{
 // renderCaptchaSVG 把验证码画成一张 SVG，字符以点阵方块呈现（不含任何文本节点）。
 func renderCaptchaSVG(code string) string {
 	const (
-		cell = 4 // 单个点的边长
+		cell   = 4 // 单个点的边长
 		glyphW = 5 * cell
 		glyphH = 7 * cell
-		gapX  = 7 // 字符之间的间距
+		gapX   = 7 // 字符之间的间距
 	)
 	width := 12 + len(code)*(glyphW+gapX)
 	height := glyphH + 16

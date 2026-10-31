@@ -53,30 +53,43 @@
   }
 
   // 所有事务错误都通过 reject 抛出，不返回伪成功对象。
+  //
+  // 关键：request 的 onsuccess 早于事务提交，此时事务仍可能 abort（配额超限、
+  // QuotaExceededError、约束冲突）；旧实现直接拿它当 resolve，调用方会把一次
+  // 「回滚掉的写入」当成成功（同步游标推进后数据其实没落盘）。
+  // 因此 operation 拿到的 resolve 只「暂存结果」，Promise 真正 settle 交给事务事件：
+  //   tx.oncomplete → resolve(暂存值)；tx.onabort / tx.onerror / request.onerror → reject。
+  // operation(store, resolve, reject, tx) 的签名保持不变，全部调用点无需改动。
   function transaction(storeName, mode, operation) {
     return openDB().then(function (db) {
       return new Promise(function (resolve, reject) {
         var settled = false;
+        var hasResult = false;
+        var result;
+        function fail(error, fallback) {
+          if (settled) return;
+          settled = true;
+          reject(asError(error, fallback));
+        }
+        function hold(value) {   // 只记录，不 settle
+          result = value;
+          hasResult = true;
+        }
         var tx;
         try {
           tx = db.transaction(storeName, mode);
-          operation(tx.objectStore(storeName), resolve, reject, tx);
+          operation(tx.objectStore(storeName), hold, fail, tx);
         } catch (error) {
-          reject(asError(error));
+          fail(error);
           return;
         }
-        tx.onabort = function () {
-          if (!settled) reject(asError(tx.error, '数据库事务已中止'));
-        };
-        tx.onerror = function () {
-          if (!settled) reject(asError(tx.error, '数据库事务失败'));
-        };
-        var originalResolve = resolve;
-        resolve = function (value) {
+        tx.oncomplete = function () {
           if (settled) return;
           settled = true;
-          originalResolve(value);
+          resolve(hasResult ? result : undefined);
         };
+        tx.onabort = function () { fail(tx.error, '数据库事务已中止'); };
+        tx.onerror = function () { fail(tx.error, '数据库事务失败'); };
       });
     });
   }

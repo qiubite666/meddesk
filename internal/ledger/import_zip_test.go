@@ -25,6 +25,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/qiubite666/meddesk/internal/fake"
 	"github.com/qiubite666/meddesk/internal/model"
 )
 
@@ -289,5 +290,127 @@ func TestImportZIPRejectsBrokenArchive(t *testing.T) {
 		if code != http.StatusBadRequest {
 			t.Fatalf("%s：应 400，实际 %d：%s", tc.name, code, resp)
 		}
+	}
+}
+
+// ------------------------------------------------------------------ 5. B-07：ZIP 放行 / JSON 拦截
+
+// seedAttachedRecord 给已存在的账单挂一张凭证，让 guardAttachments 在覆盖导入时必然命中。
+//
+// 为什么必须预置：guardAttachments 靠"快照里有多少凭证元数据"判定，账本里没有凭证时
+// 它会直接放行——那样两条用例都会假绿（测不到"放行"也测不到"拦截"）。
+// 凭证元数据直接写仓储而不走 AttachmentService.Save，是为了不依赖磁盘落盘。
+func seedAttachedRecord(t *testing.T, repos *fake.Repos, recordID string) *model.LedgerAttachment {
+	t.Helper()
+	img := pngBytes(t, 4, 4)
+	a := &model.LedgerAttachment{
+		ID: "77777777-7777-7777-7777-777777777777", UserID: testUser, RecordID: recordID,
+		RelPath: "ledger/" + testUser + "/7777.png", Mime: model.MimePNG, Bytes: int64(len(img)),
+	}
+	if err := repos.LedgerAttachments().Create(context.Background(), a); err != nil {
+		t.Fatalf("预置凭证失败: %v", err)
+	}
+	return a
+}
+
+// TestImportZIPOverwriteBypassesAttachmentGuard 锁定 ZIP 覆盖导入**不被** guardAttachments 挡住。
+//
+// 语义来源：team-lead 在 ImportZIP 里把 confirm 兼作 force（ZIP 自带 images/ 凭证，
+// 覆盖属于"完整还原"；若再要求 force，会把用户逼向不带图片的 JSON 覆盖）。
+// 这条用例的价值在于"注释挡不住回退"：如果哪天有人把 Force 改回 false，
+// 这里会立刻变红，而不是等线上发现"导出 ZIP 再还原"被 409 挡住。
+func TestImportZIPOverwriteBypassesAttachmentGuard(t *testing.T) {
+	repos, cfgSvc, _ := newTestEnv(t, false)
+	ctx := context.Background()
+	recID := "11111111-1111-1111-1111-111111111111"
+	seeded := seedAttachedRecord(t, repos, recID)
+
+	// 凭证仓储必须真的挂在 ExportService.repo 上（生产环境两者是同一个值），
+	// 否则 snapshotAttachments 走降级分支返回 nil，guard 永不命中，用例等于没测。
+	svc := NewExportService(
+		attachAwareRepo{LedgerRepo: repos.Ledger(), LedgerAttachmentRepo: repos.LedgerAttachments()},
+		NewAttachmentService(t.TempDir(), repos.LedgerAttachments(), repos.Ledger()),
+	)
+	snap, err := svc.snapshot(ctx, testUser)
+	if err != nil {
+		t.Fatalf("快照失败: %v", err)
+	}
+	if len(snap.attachments) != 1 {
+		t.Fatalf("快照未读到预置凭证，guard 不会命中，本用例无意义: %+v", snap.attachments)
+	}
+
+	_, payload, err := cfgSvc.BuildJSON(ctx, testUser, ExportFilter{})
+	if err != nil {
+		t.Fatalf("导出 JSON 失败: %v", err)
+	}
+	// ZIP 内的 recordId 必须与预置凭证的账单一致，才能测到"凭证被还原"。
+	zipBody := buildBackupZip(t, payload, map[string][]byte{
+		"images/" + recID + "/" + seeded.ID + ".png": pngBytes(t, 4, 4),
+	})
+
+	r := newImportRouter(t, svc, testUser)
+	code, resp := postImport(t, r, "/api/v1/ledger/import?mode=overwrite&confirm=true", "application/zip", zipBody)
+	if code != http.StatusOK {
+		t.Fatalf("ZIP 覆盖导入应被放行（confirm 兼作 force），实际 %d：%s", code, resp)
+	}
+	var res ImportResult
+	if err := json.Unmarshal([]byte(resp), &res); err != nil {
+		t.Fatalf("响应不是合法 JSON: %v", err)
+	}
+	if res.AttachmentsRestored < 1 {
+		t.Fatalf("凭证未从 ZIP 还原（只放行不还原等于什么都没做）: %+v", res)
+	}
+	// 覆盖必须真的生效：账本条数等于 ZIP 内条数，且不是"两条旧的还在 + 新的又加一遍"。
+	list, total, err := repos.Ledger().ListRecords(ctx, testUser, model.LedgerFilter{Page: 1, Size: 100})
+	if err != nil {
+		t.Fatalf("读取账单失败: %v", err)
+	}
+	if len(list) != len(payload.Records) || int(total) != len(payload.Records) {
+		t.Fatalf("覆盖后账单条数应为 %d，实际 %d（total=%d）", len(payload.Records), len(list), total)
+	}
+}
+
+// TestOverwriteJSONWithoutForceStillBlocked 是上一条的负向对照：JSON 覆盖**仍然**被拦截。
+//
+// 两条一起才锁得住语义：ZIP 放行（凭证字节随包还原）、JSON 拦截（只有清单、覆盖即永久丢图）。
+// 只加正向用例的话，有人把 guardAttachments 整个删掉也不会被发现。
+func TestOverwriteJSONWithoutForceStillBlocked(t *testing.T) {
+	repos, cfgSvc, _ := newTestEnv(t, false)
+	ctx := context.Background()
+	recID := "11111111-1111-1111-1111-111111111111"
+	seedAttachedRecord(t, repos, recID)
+
+	svc := NewExportService(
+		attachAwareRepo{LedgerRepo: repos.Ledger(), LedgerAttachmentRepo: repos.LedgerAttachments()},
+		nil,
+	)
+	_, payload, err := cfgSvc.BuildJSON(ctx, testUser, ExportFilter{})
+	if err != nil {
+		t.Fatalf("导出 JSON 失败: %v", err)
+	}
+	body, err := json.Marshal(ImportRequest{Mode: ImportModeOverwrite, Payload: payload, Confirm: true})
+	if err != nil {
+		t.Fatalf("序列化请求失败: %v", err)
+	}
+
+	r := newImportRouter(t, svc, testUser)
+	code, resp := postImport(t, r, "/api/v1/ledger/import", "application/json", body)
+	if code != http.StatusConflict {
+		t.Fatalf("JSON 覆盖且未传 force 应为 409，实际 %d：%s", code, resp)
+	}
+	if !strings.Contains(resp, "凭证") {
+		t.Fatalf("409 文案应说明凭证风险：%s", resp)
+	}
+	// 被拒绝 = 什么都没做：账单与凭证元数据都必须在。
+	list, _, err := repos.Ledger().ListRecords(ctx, testUser, model.LedgerFilter{Page: 1, Size: 100})
+	if err != nil {
+		t.Fatalf("读取账单失败: %v", err)
+	}
+	if len(list) != 2 {
+		t.Fatalf("被拒绝的覆盖导入不应删除账单，实际剩 %d 条", len(list))
+	}
+	kept, err := repos.LedgerAttachments().ListByRecord(ctx, testUser, recID)
+	if err != nil || len(kept) != 1 {
+		t.Fatalf("被拒绝的覆盖导入不应删除凭证：%v / %+v", err, kept)
 	}
 }

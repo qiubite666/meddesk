@@ -24,6 +24,7 @@
 
   var PAGE_SIZE = 20;                       // 账单列表每页条数
   var MAX_IMAGE_BYTES = 2 * 1024 * 1024;    // 单张凭证上限 2MB
+  var MAX_ATTACH = 9;                       // 单条账单凭证上限（与后端配额一致，超出返回 400）
   var IMAGE_EXT = ['jpg', 'jpeg', 'png', 'webp'];
   var TOP_N = 8;                            // 饼图最多展示分类数，其余归入「其他」
 
@@ -272,6 +273,19 @@
   }
 
   /**
+   * API 基址：唯一来源是 api.js 导出的 MD.api.base()（原实现把 '/api/v1' 写死，
+   * 原生壳页面源是 https://localhost，会被解析到设备自身，导致记账本全盘不可用）。
+   * 旧版 api.js 没有该导出时回退同源相对路径，行为与改造前一致，不至于整体崩掉。
+   */
+  function apiBase() {
+    var api = MD.api;
+    if (api && typeof api.base === 'function') {
+      try { return api.base(); } catch (_) { /* 探测异常按同源处理 */ }
+    }
+    return '/api/v1';
+  }
+
+  /**
    * 账本专用请求。不复用 MD.api.request：后者把 body 与鉴权绑得更紧（且带 401 自动刷新），
    * 账本接口部分尚未部署，需要自己区分「404 未启用」与「500 真失败」以便优雅降级。
    * @param {string} path 以 /ledger/... 开头
@@ -301,7 +315,7 @@
     try {
       // fetch 是外部边界：环境缺少 FormData/Headers 等实现时会同步抛错，
       // 包一层保证调用方拿到的永远是 Promise，不会因为 reject 变 throw 而中断渲染。
-      pending = fetchFn('/api/v1' + path, init);
+      pending = fetchFn(apiBase() + path, init);
     } catch (error) {
       return Promise.reject(error);
     }
@@ -1947,7 +1961,9 @@
         return { id: String(a.id), name: String(a.name || a.filename || '凭证'), bytes: Number(a.bytes || 0) };
       });
       paintAttachmentList(box);
-      if (hint) hint.textContent = S.formAttachments.length ? ('已有 ' + S.formAttachments.length + ' 张') : '暂无凭证';
+      if (hint) hint.textContent = S.formAttachments.length
+        ? ('已有 ' + S.formAttachments.length + ' / ' + MAX_ATTACH + ' 张')
+        : '暂无凭证';
     }).catch(function (error) {
       if (isNotDeployed(error)) {
         if (hint) hint.textContent = '凭证接口尚未启用';
@@ -2057,6 +2073,14 @@
   function uploadFiles(box, form, rawFiles) {
     var files = pickValidFiles(rawFiles || []);
     if (!files.length) return;
+    // 服务端单条账单最多 9 张凭证（超出直接 400）：在入口按「已上传 + 待上传」张数截断，
+    // 否则用户一次多选 10 张时，前 9 张上传成功、第 10 张才失败，看起来像随机报错。
+    var room = MAX_ATTACH - (S.formAttachments.length + S.formFiles.length);
+    if (room <= 0) { toast('每条账单最多 ' + MAX_ATTACH + ' 张凭证', 'warn'); return; }
+    if (files.length > room) {
+      files = files.slice(0, room);
+      toast('最多 ' + MAX_ATTACH + ' 张凭证，本次只加入前 ' + room + ' 张', 'warn');
+    }
     if (!form.id) {
       // 新增尚未保存：先暂存，保存成功后统一上传
       S.formFiles = S.formFiles.concat(files);
@@ -2296,11 +2320,57 @@
     return filename;
   }
 
+  /**
+   * 导入回执：服务端的 note / warnings / errors 属于「不影响结果但用户该知道」的信息
+   * （如备份里含凭证但字节不会恢复、ZIP 单条超 9 张被跳过）。只靠 toast 一闪而过，
+   * 用户会以为凭证都回来了，事后才发现图片缺失。
+   */
+  function showImportReport(res, fallbackMsg) {
+    res = res || {};
+    var warnings = Array.isArray(res.warnings) ? res.warnings : [];
+    var errors = Array.isArray(res.errors) ? res.errors : [];
+    var note = res.note ? String(res.note) : '';
+    if (!note && !warnings.length && !errors.length) return;
+    var counts = [];
+    if (res.recordsInserted != null) counts.push('新增账单 ' + res.recordsInserted + ' 条');
+    if (res.recordsSkipped != null) counts.push('跳过已有 ' + res.recordsSkipped + ' 条');
+    if (res.attachmentsRestored) counts.push('凭证恢复 ' + res.attachmentsRestored + ' 个');
+    if (res.attachmentsSkipped) counts.push('凭证跳过 ' + res.attachmentsSkipped + ' 个');
+    MD.ui.sheet({
+      title: '导入结果',
+      body: function (el) {
+        if (counts.length) el.appendChild(MD.ui.el('p', { text: counts.join(' · ') }));
+        if (note) el.appendChild(MD.ui.el('p', { class: 'muted', text: note }));
+        [warnings, errors].forEach(function (list, i) {
+          if (!list.length) return;
+          el.appendChild(MD.ui.el('p', { text: i ? '失败明细' : '提示' }));
+          var ul = MD.ui.el('ul', { class: 'muted' });
+          list.forEach(function (item) { ul.appendChild(MD.ui.el('li', { text: String(item) })); });
+          el.appendChild(ul);
+        });
+        if (!counts.length && !note) el.appendChild(MD.ui.el('p', { text: fallbackMsg || '' }));
+      },
+      actions: [{ label: '知道了', kind: 'primary' }]
+    });
+  }
+
   function runImport(mode) {
     var fileNode = doc.getElementById('ldg-import-file');
     var file = fileNode && fileNode.files && fileNode.files[0];
     if (!file) { toast('请先选择 JSON 备份文件', 'warn'); return; }
     if (!global.FileReader) { toast('当前环境不支持读取本地文件', 'error'); return; }
+
+    // send：服务端在「覆盖导入 + 账本里已有凭证」时返回 409，要求显式带 force=true，
+    // 否则覆盖会连凭证一起清掉却没留下 ZIP 备份。首次不带 force；收到 409 再让用户确认一次，
+    // 否则用户只会看到一句「导入失败」，没有任何可操作入口。
+    var send = function (parsed, force) {
+      var body = { mode: mode, payload: parsed };
+      // 覆盖是破坏性操作，后端要求显式 confirm=true（缺了直接 400「请确认后重试」）——
+      // 用户在上一步的确认弹窗里已经点过「覆盖导入」，这里就是那次确认的落点。
+      if (mode === 'overwrite') body.confirm = true;
+      if (force) body.force = true;
+      return ledgerApi('/ledger/import', { method: 'POST', body: body });
+    };
 
     var go = function () {
       var reader = new global.FileReader();
@@ -2310,13 +2380,24 @@
         try { parsed = JSON.parse(String(reader.result)); }
         catch (error) { toast('不是合法的 JSON 文件', 'error'); return; }
         runTask('导入', function () {
-          return ledgerApi('/ledger/import', {
-            method: 'POST',
-            body: { mode: mode, payload: parsed }
+          return send(parsed, false).catch(function (error) {
+            if (!error || error.status !== 409) throw error;
+            return MD.ui.confirm({
+              title: '覆盖前需二次确认',
+              message: msgOf(error) || '账本中已有凭证，覆盖导入会一并清理，请先导出 ZIP 备份再继续。',
+              confirmText: '我已知晓，继续覆盖',
+              danger: true
+            }).then(function (yes) {
+              if (!yes) return { skipped: true };
+              return send(parsed, true);
+            });
           }).then(function (res) {
+            if (res && res.skipped) return '已取消导入，数据未改动';
             S.catsLoaded = false;
             reloadAll();
-            return (res && res.message) || (mode === 'overwrite' ? '已覆盖导入' : '已合并导入');
+            var msg = mode === 'overwrite' ? '已覆盖导入' : '已合并导入';
+            showImportReport(res, msg);
+            return msg;
           });
         });
       };
@@ -2326,7 +2407,7 @@
     if (mode === 'overwrite') {
       MD.ui.confirm({
         title: '覆盖导入',
-        message: '覆盖导入会清空当前全部账单与分类并替换为备份内容。服务端会先自动备份现有数据，但仍建议确认备份已下载。确定继续？',
+        message: '覆盖导入会清空当前全部账单与分类并替换为备份内容。若账本里已有凭证，服务端会先拦住并再确认一次（JSON 备份只含凭证清单、不含图片），需要时请先导出 ZIP 备份。确定继续？',
         confirmText: '覆盖导入',
         danger: true
       }).then(function (yes) { if (yes) go(); });

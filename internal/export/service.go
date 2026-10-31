@@ -50,12 +50,13 @@ func (s *Service) RenderCSV(w io.Writer, req model.ExportRequest) error {
 	}
 	var buf bytes.Buffer
 	buf.Write([]byte{0xEF, 0xBB, 0xBF}) // UTF-8 BOM，保证 Excel 正确识别中文
-	writeCSVRow(&buf, csvHeader)
+	// 表头是固定文案，不做公式前缀防护（见 writeCSVRow 的第二个参数）。
+	writeCSVRow(&buf, csvHeader, csvField)
 	for _, row := range req.Rows {
 		writeCSVRow(&buf, []string{
 			row.Date, row.Time, row.Profile, row.Medication,
 			row.Dosage, statusText(row.Status), row.Note,
-		})
+		}, csvSafeField)
 	}
 	_, err := w.Write(buf.Bytes())
 	return err
@@ -81,13 +82,14 @@ func (s *Service) RenderPDF(w io.Writer, req model.ExportRequest) error {
 
 // ------------------------------------------------------------------ CSV
 
-// writeCSVRow 写一行 CSV：字段全部加引号，行尾固定 CRLF。
-func writeCSVRow(buf *bytes.Buffer, fields []string) {
+// writeCSVRow 写一行 CSV：各字段经 escape 处理后加引号，行尾固定 CRLF。
+// 表头传 csvField（纯转义），数据行传 csvSafeField（额外做公式注入防护）。
+func writeCSVRow(buf *bytes.Buffer, fields []string, escape func(string) string) {
 	for i, f := range fields {
 		if i > 0 {
 			buf.WriteByte(',')
 		}
-		buf.WriteString(csvField(f))
+		buf.WriteString(escape(f))
 	}
 	buf.WriteString("\r\n")
 }
@@ -98,6 +100,59 @@ func csvField(s string) string {
 	s = strings.ReplaceAll(s, "\r", " ")
 	s = strings.ReplaceAll(s, "\n", " ")
 	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
+}
+
+// csvSafeField 在 csvField 之前加一道公式注入（CSV injection）防护。
+//
+// 【为什么加引号不够】Excel / WPS / LibreOffice 会在双引号内继续解析以 =、+、-、@
+// 开头的单元格（如 "=cmd|'/c calc'!A1" 会触发 DDE），因此仅做引号转义无法阻止执行；
+// 必须在字段最前面插入一个单引号，让表格软件把它当作文本。
+//
+// 【为什么不误伤金额】单纯 `-12.00`、`+12` 也是合法数字，若一律加单引号会让 Excel
+// 把金额显示成文本、丢失右对齐与求和能力。因此仅当字段不是「纯数字」时才加前缀。
+func csvSafeField(s string) string {
+	// 判定必须基于原始字段：换行折叠会把开头的 \r 变成空格，从而漏判。
+	if needsFormulaGuard(s) {
+		s = "'" + s
+	}
+	return csvField(s)
+}
+
+// needsFormulaGuard 判断字段是否可能被表格软件当作公式执行。
+func needsFormulaGuard(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch s[0] {
+	case '=', '@', '\t', '\r':
+		// = 与 @ 一定是公式/函数起始；TAB、CR 常用于绕过前缀检查的变体。
+		return true
+	case '+', '-':
+		// 形如 -12.00 / +12 的纯数字放行；-2+3、+cmd 等一律防护。
+		return !isPlainNumber(s[1:])
+	}
+	return false
+}
+
+// isPlainNumber 判断 s 是否只由数字与至多一个小数点组成（用于放过负数/正数金额）。
+func isPlainNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	dot := false
+	for i := 0; i < len(s); i++ {
+		switch c := s[i]; {
+		case c >= '0' && c <= '9':
+		case c == '.':
+			if dot {
+				return false
+			}
+			dot = true
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 // ------------------------------------------------------------------ PDF
@@ -236,22 +291,36 @@ func writePDF(w io.Writer, pdf *fpdf.Fpdf) error {
 // （go-pdf/fpdf v0.9.0 把 UnicodeTranslatorFromDescriptor 作为 *Fpdf 的方法提供，
 // 这里直接用 GetStringWidth 手工截断，行为更可控且不会 panic。）
 func fitCell(pdf *fpdf.Fpdf, s string, maxW float64) string {
+	return fitText(s, maxW, pdf.GetStringWidth)
+}
+
+// fitText 按宽度函数裁剪文本：保留「加 .. 后能容纳的最长前缀」，
+// 用二分查找把测宽次数从 O(n) 降到 O(log n)（宽函数的开销随字符串长度增长，
+// 逐字符回退会导致长文本导出退化为 O(n²)）。
+func fitText(s string, maxW float64, width func(string) float64) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
 		return s
 	}
-	if pdf.GetStringWidth(s) <= maxW {
+	if width(s) <= maxW {
 		return s
 	}
 	runes := []rune(s)
-	for len(runes) > 1 {
-		runes = runes[:len(runes)-1]
-		cand := string(runes) + ".."
-		if pdf.GetStringWidth(cand) <= maxW {
-			return cand
+	// 前缀宽度单调不减，因此可用二分：在 [1, len-1] 中找最大的可容纳前缀长度。
+	lo, hi, best := 1, len(runes)-1, 0
+	for lo <= hi {
+		mid := lo + (hi-lo)/2
+		if width(string(runes[:mid])+"..") <= maxW {
+			best = mid
+			lo = mid + 1
+		} else {
+			hi = mid - 1
 		}
 	}
-	return ""
+	if best == 0 {
+		return "" // 连 1 个 rune + ".." 都放不下，返回空（与旧线性实现一致）
+	}
+	return string(runes[:best]) + ".."
 }
 
 // subtitle 生成副标题：成员 + 时间范围（缺省则显示「全部」）。

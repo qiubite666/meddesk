@@ -90,6 +90,29 @@ func (r ledgerAttachmentRepo) ListByRecord(ctx context.Context, userID, recordID
 	return out, nil
 }
 
+// ListByUser 与 ListByRecord 同源，只是不按账单过滤；排序规则保持一致，
+// 这样「快照 → 回滚重建」后的顺序与真实仓储一致。
+func (r ledgerAttachmentRepo) ListByUser(ctx context.Context, userID string) ([]model.LedgerAttachment, error) {
+	m := r.table()
+
+	r.r.mu.Lock()
+	defer r.r.mu.Unlock()
+	out := []model.LedgerAttachment{}
+	for _, a := range m {
+		if a.UserID != userID {
+			continue
+		}
+		out = append(out, *a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if !out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].CreatedAt.Before(out[j].CreatedAt)
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}
+
 func (r ledgerAttachmentRepo) Delete(ctx context.Context, userID, id string) (string, error) {
 	m := r.table()
 

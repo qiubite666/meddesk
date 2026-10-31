@@ -401,18 +401,33 @@ func (r *syncRepo) Stats(ctx context.Context, userID string) (model.SyncStatsRes
 }
 
 // Reset 清空该用户的全部同步记录并把游标归零（危险操作，附件不受影响）。
+//
+// 两条语句必须在同一个事务里：若"清空记录"提交成功而"游标归零"失败，账号会停在
+// 「记录已空、游标仍是旧值」的半截状态——客户端按旧游标增量拉取将永远拉不到任何东西，
+// 且无法自行发现，只能再点一次重置。放在一个事务里则任何一步失败都整体回滚，
+// 账号保持重置前的可恢复状态。
 func (r *syncRepo) Reset(ctx context.Context, userID string) error {
 	userParam, err := uuidParam(userID)
 	if err != nil {
 		return err
 	}
-	if _, err := r.s.pool.Exec(ctx, `DELETE FROM sync_records WHERE user_id = $1`, userParam); err != nil {
+	tx, err := r.s.pool.Begin(ctx)
+	if err != nil {
+		return wrap("开启重置事务失败", err)
+	}
+	// 未提交即退出（任意 return / panic）一律回滚；提交成功后再 Rollback 是空操作。
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `DELETE FROM sync_records WHERE user_id = $1`, userParam); err != nil {
 		return wrap("清空同步记录失败", err)
 	}
 	const q = `INSERT INTO sync_state (user_id, last_seq) VALUES ($1, 0)
 ON CONFLICT (user_id) DO UPDATE SET last_seq = 0`
-	if _, err := r.s.pool.Exec(ctx, q, userParam); err != nil {
+	if _, err := tx.Exec(ctx, q, userParam); err != nil {
 		return wrap("重置同步游标失败", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return wrap("提交重置事务失败", err)
 	}
 	return nil
 }

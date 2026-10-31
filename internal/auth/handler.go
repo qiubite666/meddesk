@@ -68,7 +68,11 @@ func (h *Handler) register(c *gin.Context) {
 	// 验证码在业务逻辑之前校验：注册的任何失败路径（邮箱已存在、未开放注册、
 	// 内部错误）都会让这张码失效。取舍是「用户需重新取图」换「一码只许试一次」，
 	// 否则攻击者可以用一张图反复探测邮箱是否已注册。
-	if !h.captcha.verify(c.Request.Context(), req.CaptchaID, req.CaptchaCode) {
+	if ok, err := h.captcha.verify(c.Request.Context(), req.CaptchaID, req.CaptchaCode, c.ClientIP()); err != nil {
+		// 目前只有 IP 维度限流会走到这里，需要如实回 429 而不是"验证码错误"。
+		writeError(c, err)
+		return
+	} else if !ok {
 		writeError(c, apierr.New(apierr.CodeBadRequest, msgCaptchaInvalid))
 		return
 	}
@@ -245,13 +249,19 @@ func (h *Handler) me(c *gin.Context) {
 			Email:     u.Email,
 			CreatedAt: u.CreatedAt,
 		},
-		ServerTime: time.Now().UnixMilli(),
+		ServerTime:      time.Now().UnixMilli(),
 		RecoveryEnabled: len(u.RecoveryWrappedDEK) > 0,
 		IsAdmin:         h.svc.IsAdminEmail(u.Email),
 	})
 }
 
-// metaFromRequest 合并 gin 上下文与请求体中的设备信息（请求体优先）。
+// metaFromRequest 合并 gin 上下文与请求体中的设备信息。
+//
+// 【为什么不再采信请求体里的 IP】m.IP 是登录失败计数（A-20）与验证码失败计数
+// （A-11）的限流键：一旦允许客户端用 device.ip 覆盖，攻击者每次随机填一个 IP
+// 就能把 IP 维度限流彻底绕过，两个安全控件同时失效。IP 只能取服务端观测值
+// （经 TrustProxy 校准的 c.ClientIP()）。设备自报 IP 若要保留，必须另立字段
+// 并标注「不可信、仅审计」，不能用于任何判定。
 func metaFromRequest(c *gin.Context, d model.DeviceInfo) RequestMeta {
 	m := MetaFromRequest(c)
 	if d.DeviceID != "" {
@@ -259,9 +269,6 @@ func metaFromRequest(c *gin.Context, d model.DeviceInfo) RequestMeta {
 	}
 	if d.UserAgent != "" {
 		m.UserAgent = d.UserAgent
-	}
-	if d.IP != "" {
-		m.IP = d.IP
 	}
 	return m
 }

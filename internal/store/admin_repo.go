@@ -28,6 +28,11 @@ type AdminUserRow struct {
 
 // AdminListUsers 分页查询用户，q 为空表示不过滤（按邮箱模糊匹配，大小写不敏感）。
 //
+// 模糊匹配用 position(lower($1) in lower(email))，不用 LIKE '%'||q||'%'：
+// 后者要把用户输入原样拼进 LIKE 模式，q 里的 % / _ / \ 会被当成通配符
+// （搜 "a_b" 会命中 "axb"），必须额外转义 + ESCAPE 才正确。
+// position 只做子串查找，没有元字符问题，也不需要 ESCAPE 子句。
+//
 // 只用一条 SQL + 窗口函数拿总数，避免 count 与 list 两次往返不一致。
 func (s *Store) AdminListUsers(ctx context.Context, q string, page, size int) ([]AdminUserRow, int64, error) {
 	if page < 1 {
@@ -48,7 +53,7 @@ WITH matched AS (
         SELECT count(*) AS n, max(seq) AS last_seq
         FROM sync_records WHERE user_id = u.id
     ) r ON true
-    WHERE $1 = '' OR lower(u.email::text) LIKE '%' || lower($1) || '%'
+    WHERE $1 = '' OR position(lower($1) in lower(u.email::text)) > 0
 )
 SELECT id, email, created_at, updated_at, record_count, last_seq,
        recovery_enabled, envelope_stale, (SELECT count(*) FROM matched)
@@ -80,8 +85,8 @@ LIMIT $2 OFFSET $3`
 
 // AdminOverview 是后台首屏统计。
 type AdminOverview struct {
-	Users       int64 `json:"users"`
-	Records     int64 `json:"records"`
+	Users        int64 `json:"users"`
+	Records      int64 `json:"records"`
 	ActiveGrants int64 `json:"activeGrants"`
 }
 
@@ -121,6 +126,12 @@ func (s *Store) AdminUpdateEmail(ctx context.Context, id, email string) error {
 // AdminDeleteUser 删除用户：先取出附件落盘路径（供调用方清理文件），
 // 再删除 users 行——refresh_tokens / sync_records / family_grants / attachments
 // 都建了 ON DELETE CASCADE，随主行一并消失。
+//
+// 【为什么必须连 ledger_attachments.rel_path 一起取】
+// 记账凭证也是落盘文件（明文图片），如果只收 attachments.path，删号事务提交后
+// ledger_attachments 行随 CASCADE 消失，磁盘上的凭证就成了永久孤儿——
+// 既没有任何记录指向它，也没有任务会去扫它。两条路径都相对上传根目录，
+// 由调用方用同一个 joinUploadPath 拼接后删除。
 func (s *Store) AdminDeleteUser(ctx context.Context, id string) ([]string, error) {
 	p, err := uuidParam(id)
 	if err != nil {
@@ -133,7 +144,10 @@ func (s *Store) AdminDeleteUser(ctx context.Context, id string) ([]string, error
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	paths := make([]string, 0, 8)
-	rows, err := tx.Query(ctx, `SELECT path FROM attachments WHERE user_id = $1`, p)
+	rows, err := tx.Query(ctx, `
+SELECT path FROM attachments WHERE user_id = $1
+UNION ALL
+SELECT rel_path FROM ledger_attachments WHERE user_id = $1`, p)
 	if err != nil {
 		return nil, wrap("读取附件路径失败", err)
 	}

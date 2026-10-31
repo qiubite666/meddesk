@@ -702,6 +702,9 @@
     // 底层请求封装对外暴露：WebDAV 等扩展模块需要复用同一套 Bearer 鉴权与 401 refresh，
     // 否则各自裸 fetch 会丢掉自动续期。仅供本仓库内部模块使用。
     request: request,
+    // 基址解析函数（返回值为函数，非字符串）：记账本等需要自己拼 URL 的模块
+    // 必须用它，否则在原生壳（页面源 https://localhost）里会打到设备自身。
+    base: apiBase,
     setDEK: setDEK,
     hasSession: function () {
       if (Boolean(storageGet('access') && storageGet('userId'))) return true;

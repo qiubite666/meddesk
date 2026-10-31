@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/qiubite666/meddesk/internal/apierr"
 	"github.com/qiubite666/meddesk/internal/model"
 	"github.com/qiubite666/meddesk/internal/store"
@@ -139,6 +141,17 @@ func (s *Service) UpdateCategory(ctx context.Context, userID, id string, in Cate
 	if in.Kind != "" {
 		if in.Kind != model.LedgerTypeIncome && in.Kind != model.LedgerTypeExpense {
 			return nil, apierr.New(apierr.CodeBadRequest, "kind 只能是 income 或 expense")
+		}
+		// 改收支类型会让历史账单的 type 与分类 kind 对不上（统计口径随之失真）。
+		// 分类下已有账单时一律拒绝，提示改用「停用 + 新建分类」。
+		if in.Kind != c.Kind {
+			n, err := s.repo.CategoryUsage(ctx, userID, c.ID)
+			if err != nil {
+				return nil, apierr.Wrap(apierr.CodeInternal, err, "校验分类引用失败")
+			}
+			if n > 0 {
+				return nil, apierr.New(apierr.CodeBadRequest, "该分类下已有账单，不能修改收支类型")
+			}
 		}
 		c.Kind = in.Kind
 	}
@@ -668,9 +681,17 @@ func (s *Service) MarkReimbursement(ctx context.Context, userID string, ids []st
 	}
 	clean := make([]string, 0, len(ids))
 	for _, id := range ids {
-		if strings.TrimSpace(id) != "" {
-			clean = append(clean, strings.TrimSpace(id))
+		v := strings.TrimSpace(id)
+		if v == "" {
+			continue
 		}
+		// id 会变成 SQL 的 uuid[] 参数：非法值若放过去，PostgreSQL 报 22P02，
+		// 最终变成 500。在入口按 400 拒绝，并规范化成标准 36 位形式。
+		u, err := uuid.Parse(v)
+		if err != nil {
+			return 0, apierr.Newf(apierr.CodeBadRequest, "账单 id %q 不是合法 UUID", v)
+		}
+		clean = append(clean, u.String())
 	}
 	if len(clean) == 0 {
 		return 0, apierr.New(apierr.CodeBadRequest, "请先选择要操作的账单")

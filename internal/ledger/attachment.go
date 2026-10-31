@@ -25,6 +25,16 @@ import (
 // 0004_ledger.sql 里 ledger_attachments.bytes 的 CHECK 约束保持一致。
 const maxAttachmentBytes = 2 << 20
 
+// maxAttachmentsPerRecord 是单条账单可挂的凭证张数上限。
+//
+// 取 9 的理由：前端凭证区就是 3×3 九宫格（一行最多 3 张、最多 3 行），
+// 超过 9 张 UI 无法完整展示，用户也只能靠滚动去看被截断的部分；
+// 同时 9 张 × 2 MiB = 18 MiB 的单账单字节量仍在一个可接受的量级。
+//
+// 【为什么必须在写盘之前统计】单张上限只能防"一张巨图"，防不了"一张账单挂一万张"：
+// 后者会让该账单的导出、备份打包以及凭证列表接口全部变成 O(n) 的大响应。
+const maxAttachmentsPerRecord = 9
+
 // ledgerAttachmentDir 是凭证在上传根目录下的子目录名。
 //
 // 为什么要单独一层目录：与加密附件（密文）物理隔离，便于备份脚本按目录打包、
@@ -99,6 +109,15 @@ func (s *AttachmentService) Save(ctx context.Context, userID, recordID string, d
 	if strings.TrimSpace(s.dir) == "" {
 		return nil, apierr.New(apierr.CodeInternal, "上传目录未配置")
 	}
+	// 配额：先数再写，不产生任何临时文件、也不多占一个文件描述符。
+	//
+	// 【已知的并发窗口】这里是"读计数 → 写库"两步，并发上传同一账单理论上可以
+	// 同时通过检查而略超配额。真正的强约束需要数据库侧的计数触发或唯一序号列，
+	// 那属于仓储层（本次不可改）。实际危害有限：超出的那几张仍受单张 2 MiB 限制，
+	// 且用户手工重试也不会无限增长（下一次上传就会被计数挡住）。
+	if err := s.checkQuota(ctx, userID, recordID); err != nil {
+		return nil, err
+	}
 
 	// id 由服务端生成并直接用于文件名：用户输入完全不参与路径拼装，
 	// 这是防路径穿越的根本手段（而不是事后过滤 ../）。
@@ -122,6 +141,23 @@ func (s *AttachmentService) Save(ctx context.Context, userID, recordID string, d
 		return nil, wrapRepoErr(err, "保存凭证失败")
 	}
 	return a, nil
+}
+
+// checkQuota 统计该账单当前的凭证张数，已达上限时返回 400。
+//
+// 计数走 ListByRecord 而不是 COUNT(*)：仓储接口只有这一个读能力（不可改仓储层），
+// 而配额场景下每账单至多十几行元数据，多取几列的开销可以忽略。
+func (s *AttachmentService) checkQuota(ctx context.Context, userID, recordID string) error {
+	items, err := s.repo.ListByRecord(ctx, userID, recordID)
+	if err != nil {
+		return wrapRepoErr(err, "统计凭证数量失败")
+	}
+	if len(items) >= maxAttachmentsPerRecord {
+		return apierr.Newf(apierr.CodeBadRequest,
+			"单条账单最多 %d 张凭证（当前已有 %d 张），请先删除部分凭证再上传",
+			maxAttachmentsPerRecord, len(items))
+	}
+	return nil
 }
 
 // Get 读取凭证元数据；越权与不存在一律 404（不透露资源是否存在）。

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/qiubite666/meddesk/internal/model"
 )
@@ -49,14 +50,19 @@ type LedgerRepo interface {
 func (s *Store) Ledger() LedgerRepo { return ledgerRepo{s} }
 
 // 账单查询列：amount 转成 text 保证精度；occurred_on 转 text 便于直接返回；
-// attachment_count 用左连接子查询，避免逐条再查。
+// attachment_count 用**相关子查询**统计，且必须带 user_id 谓词。
+//
+// 这里曾经写成 `LEFT JOIN (SELECT record_id, count(*) ... GROUP BY record_id)`：
+// 该派生表没有任何过滤条件，等于对全表凭证做一次聚合，用户量一大就成了
+// 全库扫描；而且它是常量片段，无论上面 WHERE 怎么收窄都下推不进去。
+// 改写成相关子查询后，每行只按 (record_id, user_id) 走 idx_ledger_attachments_record。
 const selectLedgerRecord = `SELECT r.id, r.user_id, r.type, r.amount::text, r.currency,
        COALESCE(r.category_id::text, ''), r.category_name_snapshot, r.transaction_at,
-       r.occurred_on::text, r.note, r.reimbursement_status, COALESCE(a.n, 0),
+       r.occurred_on::text, r.note, r.reimbursement_status,
+       (SELECT count(*) FROM ledger_attachments a
+         WHERE a.record_id = r.id AND a.user_id = r.user_id),
        r.created_at, r.updated_at
-FROM ledger_records r
-LEFT JOIN (SELECT record_id, count(*) AS n FROM ledger_attachments GROUP BY record_id) a
-       ON a.record_id = r.id`
+FROM ledger_records r`
 
 func scanLedgerRecord(row pgx.Row) (*model.LedgerRecord, error) {
 	var r model.LedgerRecord
@@ -215,6 +221,14 @@ FROM ledger_categories WHERE user_id = $1 AND id = $2`
 	return &c, nil
 }
 
+// updateLedgerCategorySQL 是分类更新的完整语句。
+//
+// 提为包级常量不是为了复用，而是为了**可测**：B-08 的成因就是这条 SQL 漏掉了
+// kind 列——服务层改了内存对象、接口返回 200，但库里没变，刷新即回退。
+// 这种"少一列"的缺陷在没有真实数据库的 CI 里只能靠语句断言兜住。
+const updateLedgerCategorySQL = `UPDATE ledger_categories SET name = $3, sort_order = $4, archived = $5,
+kind = $6 WHERE user_id = $1 AND id = $2`
+
 func (r ledgerRepo) UpdateCategory(ctx context.Context, c *model.LedgerCategory) error {
 	if c == nil {
 		return wrap("更新分类失败", errors.New("分类对象为空"))
@@ -227,9 +241,9 @@ func (r ledgerRepo) UpdateCategory(ctx context.Context, c *model.LedgerCategory)
 	if err != nil {
 		return err
 	}
-	const q = `UPDATE ledger_categories SET name = $3, sort_order = $4, archived = $5
-WHERE user_id = $1 AND id = $2`
-	tag, err := r.s.pool.Exec(ctx, q, uid, cid, c.Name, c.SortOrder, c.Archived)
+	// kind 必须一起写回：服务层允许改分类类型（income <-> expense），
+	// 早先这里漏了 kind 列，PATCH 返回 200 但刷新后仍是旧类型。
+	tag, err := r.s.pool.Exec(ctx, updateLedgerCategorySQL, uid, cid, c.Name, c.SortOrder, c.Archived, c.Kind)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return newConflict("同名分类已存在")
@@ -419,7 +433,12 @@ func (r ledgerRepo) DeleteRecord(ctx context.Context, userID, id string) error {
 //
 // 【为什么全参数化】关键词、分类 id 都来自用户输入，拼接进 SQL 就是注入入口；
 // 这里只把占位符下标拼进去，值一律走 args。
-func ledgerWhereFrom(f model.LedgerFilter, from, to string, startIdx int) (string, []any) {
+//
+// 【为什么 id 列上不能再写 ::text】r.category_id::text = ANY(...) 会让
+// idx_ledger_records_user_cat 这类 uuid 索引彻底失效（表达式 ≠ 列），
+// 只能顺序扫描整张表。这里改为 uuid[] 参数直接与 uuid 列比较；
+// 非法 UUID 在**构造参数阶段**就返回 bad_request，不会变成 PG 的 22P02（500）。
+func ledgerWhereFrom(f model.LedgerFilter, from, to string, startIdx int) (string, []any, error) {
 	var sb strings.Builder
 	args := []any{}
 	idx := startIdx
@@ -444,17 +463,42 @@ func ledgerWhereFrom(f model.LedgerFilter, from, to string, startIdx int) (strin
 		sb.WriteString(" AND r.occurred_on <= " + next(to) + "::date")
 	}
 	if len(f.CategoryIDs) > 0 {
-		sb.WriteString(" AND r.category_id::text = ANY(" + next(f.CategoryIDs) + ")")
+		ids, err := uuidListParam(f.CategoryIDs)
+		if err != nil {
+			return "", nil, err
+		}
+		sb.WriteString(" AND r.category_id = ANY(" + next(ids) + "::uuid[])")
 	}
 	if len(f.IDs) > 0 {
-		sb.WriteString(" AND r.id::text = ANY(" + next(f.IDs) + ")")
+		ids, err := uuidListParam(f.IDs)
+		if err != nil {
+			return "", nil, err
+		}
+		sb.WriteString(" AND r.id = ANY(" + next(ids) + "::uuid[])")
 	}
 	if f.Keyword != "" {
 		kw := "%" + strings.ToLower(strings.TrimSpace(f.Keyword)) + "%"
 		sb.WriteString(" AND (lower(r.note) LIKE " + next(kw) +
 			" OR lower(r.category_name_snapshot) LIKE " + next(kw) + ")")
 	}
-	return sb.String(), args
+	return sb.String(), args, nil
+}
+
+// uuidListParam 把字符串 ID 列表转成 uuid[] 参数。
+//
+// 非法 UUID 必须在拼 SQL 之前就挡住：直接交给 PostgreSQL 会得到 22P02
+// （invalid input syntax for type uuid），在仓储层被包成 500，用户看到的是
+// "服务器内部错误"而不是"参数有误"。
+func uuidListParam(ids []string) ([]pgtype.UUID, error) {
+	out := make([]pgtype.UUID, 0, len(ids))
+	for _, s := range ids {
+		v, err := uuidParam(s)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, nil
 }
 
 func (r ledgerRepo) ListRecords(ctx context.Context, userID string, f model.LedgerFilter) ([]model.LedgerRecord, int64, error) {
@@ -462,7 +506,10 @@ func (r ledgerRepo) ListRecords(ctx context.Context, userID string, f model.Ledg
 	if err != nil {
 		return nil, 0, err
 	}
-	cond, args := ledgerWhereFrom(f, f.From, f.To, 1) // $1=user_id，条件从 $2 起
+	cond, args, err := ledgerWhereFrom(f, f.From, f.To, 1) // $1=user_id，条件从 $2 起
+	if err != nil {
+		return nil, 0, err
+	}
 
 	size := f.Size
 	if size <= 0 || size > 200 {
@@ -518,7 +565,10 @@ func (r ledgerRepo) SumRecords(ctx context.Context, userID string, f model.Ledge
   COALESCE((SUM(amount) FILTER (WHERE type = 'income')  * 100)::bigint, 0),
   COALESCE((SUM(amount) FILTER (WHERE type = 'expense') * 100)::bigint, 0)
 FROM ledger_records r WHERE r.user_id = $1`
-	cond, args := ledgerWhereFrom(f, from, to, 1) // $1=user_id，条件从 $2 起
+	cond, args, err := ledgerWhereFrom(f, from, to, 1) // $1=user_id，条件从 $2 起
+	if err != nil {
+		return 0, 0, err
+	}
 	qArgs := append([]any{uid}, args...)
 	var income, expense int64
 	if err := r.s.pool.QueryRow(ctx, q+cond, qArgs...).Scan(&income, &expense); err != nil {
@@ -533,10 +583,13 @@ FROM ledger_records r WHERE r.user_id = $1`
 // 注意：这里**不能**把 from/to 再交给 ledgerWhereFrom——区间已由 generate_series 表达，
 // 再传一次会让日期条件与序列参数互相错位；传空串即可。
 // generate_series 保证"没有数据的日子补 0"，前端不必自己补齐。
-func dailyTrendSQL(f model.LedgerFilter, uid any, from, to string) (string, []any) {
+func dailyTrendSQL(f model.LedgerFilter, uid any, from, to string) (string, []any, error) {
 	// 起始下标必须是 3（不是 1）：否则 type/keyword 等条件会生成 $2 并撞上起始日期，
 	// PostgreSQL 报 42883，趋势接口 500。
-	cond, args := ledgerWhereFrom(f, "", "", 3)
+	cond, args, err := ledgerWhereFrom(f, "", "", 3)
+	if err != nil {
+		return "", nil, err
+	}
 	q := `SELECT d::date::text,
        COALESCE((SUM(r.amount) FILTER (WHERE r.type = 'income')  * 100)::bigint, 0),
        COALESCE((SUM(r.amount) FILTER (WHERE r.type = 'expense') * 100)::bigint, 0)
@@ -544,7 +597,7 @@ FROM generate_series($2::date, $3::date, '1 day') AS d
 LEFT JOIN ledger_records r
   ON r.user_id = $1 AND r.occurred_on = d::date` + cond + `
 GROUP BY d ORDER BY d`
-	return q, append([]any{uid, from, to}, args...)
+	return q, append([]any{uid, from, to}, args...), nil
 }
 
 func (r ledgerRepo) DailyTrend(ctx context.Context, userID string, f model.LedgerFilter, from, to string) ([]model.LedgerTrendPoint, error) {
@@ -552,7 +605,10 @@ func (r ledgerRepo) DailyTrend(ctx context.Context, userID string, f model.Ledge
 	if err != nil {
 		return nil, err
 	}
-	q, qArgs := dailyTrendSQL(f, uid, from, to)
+	q, qArgs, err := dailyTrendSQL(f, uid, from, to)
+	if err != nil {
+		return nil, err
+	}
 	rows, err := r.s.pool.Query(ctx, q, qArgs...)
 	if err != nil {
 		return nil, wrap("统计趋势失败", err)
@@ -580,7 +636,10 @@ func (r ledgerRepo) CategoryBreakdown(ctx context.Context, userID string, f mode
 	if err != nil {
 		return nil, nil, err
 	}
-	cond, args := ledgerWhereFrom(f, from, to, 1) // $1=user_id，条件从 $2 起
+	cond, args, err := ledgerWhereFrom(f, from, to, 1) // $1=user_id，条件从 $2 起
+	if err != nil {
+		return nil, nil, err
+	}
 	// 收入与支出分组统计：按 type 分组，两个结果集合并成一个查询再由 Go 拆分，
 	// 保证口径一致（同一 WHERE、同一聚合方式），绝不会把收入算进支出。
 	q := `SELECT r.type,
@@ -623,6 +682,12 @@ func (r ledgerRepo) MarkReimbursement(ctx context.Context, userID string, ids []
 	if len(ids) == 0 {
 		return 0, nil
 	}
+	// id::text = ANY(...) 会让主键索引失效；这里统一走 uuid[] 参数，
+	// 非法 id 在构造参数阶段就返回 bad_request（而不是 PG 的 22P02 → 500）。
+	uids, err := uuidListParam(ids)
+	if err != nil {
+		return 0, err
+	}
 	// 只更新该账号名下、且确实是支出的记录：收入不允许进入报销流程。
 	//
 	// updated_at 必须一起刷新：其他所有写操作都会更新它，唯独这里漏了，导致
@@ -630,8 +695,8 @@ func (r ledgerRepo) MarkReimbursement(ctx context.Context, userID string, ids []
 	// ② 数据库里查不出这笔是什么时候被标记为已报销的；
 	// ③ 按修改时间排序的列表里，改了状态的行不会上浮。
 	const q = `UPDATE ledger_records SET reimbursement_status = $3, updated_at = now()
-WHERE user_id = $1 AND id::text = ANY($2) AND type = 'expense'`
-	tag, err := r.s.pool.Exec(ctx, q, uid, ids, status)
+WHERE user_id = $1 AND id = ANY($2::uuid[]) AND type = 'expense'`
+	tag, err := r.s.pool.Exec(ctx, q, uid, uids, status)
 	if err != nil {
 		return 0, wrap("更新报销状态失败", err)
 	}

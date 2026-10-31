@@ -27,6 +27,12 @@ type LedgerAttachmentRepo interface {
 	Get(ctx context.Context, userID, id string) (*model.LedgerAttachment, error)
 	// ListByRecord 列出某条账单下的全部凭证，按创建时间升序（与上传顺序一致）。
 	ListByRecord(ctx context.Context, userID, recordID string) ([]model.LedgerAttachment, error)
+	// ListByUser 列出某账号的全部凭证，按 (created_at, id) 升序。
+	//
+	// 【为什么需要它】覆盖导入前的快照必须拿到全部凭证。若逐条账单调 ListByRecord，
+	// 2 万条账本 = 2 万次查询（N+1），而这条路径发生在"清空账本"之前，一旦超时
+	// 整个导入就卡住。这里用一次带 user_id 的查询替代。
+	ListByUser(ctx context.Context, userID string) ([]model.LedgerAttachment, error)
 	// Delete 删除单条凭证，返回它的相对存储路径供服务层清理磁盘文件。
 	Delete(ctx context.Context, userID, id string) (relPath string, err error)
 	// DeleteByRecord 删除某条账单下的全部凭证，返回被删的相对路径列表。
@@ -42,8 +48,9 @@ var _ LedgerAttachmentRepo = ledgerRepo{}
 // 凭证查询列（顺序与 scanLedgerAttachment 一致）。
 // width/height 在表里可为 NULL，因此用 pgtype.Int4 承载。
 const (
-	selectLedgerAttachment      = `SELECT id, user_id, record_id, rel_path, mime, bytes, width, height, created_at FROM ledger_attachments WHERE user_id = $1 AND id = $2`
-	selectLedgerAttachmentByRec = `SELECT id, user_id, record_id, rel_path, mime, bytes, width, height, created_at FROM ledger_attachments WHERE user_id = $1 AND record_id = $2 ORDER BY created_at, id`
+	selectLedgerAttachment       = `SELECT id, user_id, record_id, rel_path, mime, bytes, width, height, created_at FROM ledger_attachments WHERE user_id = $1 AND id = $2`
+	selectLedgerAttachmentByRec  = `SELECT id, user_id, record_id, rel_path, mime, bytes, width, height, created_at FROM ledger_attachments WHERE user_id = $1 AND record_id = $2 ORDER BY created_at, id`
+	selectLedgerAttachmentByUser = `SELECT id, user_id, record_id, rel_path, mime, bytes, width, height, created_at FROM ledger_attachments WHERE user_id = $1 ORDER BY created_at, id`
 )
 
 // Create 写入一条凭证元数据。
@@ -105,6 +112,35 @@ func (r ledgerRepo) ListByRecord(ctx context.Context, userID, recordID string) (
 		return nil, err
 	}
 	rows, err := r.s.pool.Query(ctx, selectLedgerAttachmentByRec, uid, rid)
+	if err != nil {
+		return nil, wrap("列出凭证失败", err)
+	}
+	defer rows.Close()
+
+	out := []model.LedgerAttachment{}
+	for rows.Next() {
+		a, err := scanLedgerAttachment(rows)
+		if err != nil {
+			return nil, wrap("列出凭证失败", err)
+		}
+		out = append(out, *a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, wrap("列出凭证失败", err)
+	}
+	return out, nil
+}
+
+// ListByUser 一次取回某账号的全部凭证，供覆盖导入前的快照使用。
+//
+// 走 (user_id, created_at) 过滤；排序与 ListByRecord 一致，保证回滚重建后的
+// 顺序与原来相同（凭证展示顺序依赖 created_at，不重排就不会错位）。
+func (r ledgerRepo) ListByUser(ctx context.Context, userID string) ([]model.LedgerAttachment, error) {
+	uid, err := uuidParam(userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.s.pool.Query(ctx, selectLedgerAttachmentByUser, uid)
 	if err != nil {
 		return nil, wrap("列出凭证失败", err)
 	}

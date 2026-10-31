@@ -158,8 +158,7 @@ func main() {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	if _, err = tx.Exec(ctx,
-		`UPDATE users SET kdf_salt=$1, wrapped_dek=$2, dek_iv=$3, password_hash=$4 WHERE id=$5`,
+	if _, err = tx.Exec(ctx, resetPasswordSQL,
 		mat.KDFSalt, mat.WrappedDEK, mat.DEKIV, mat.PasswordHash, userID); err != nil {
 		fatal("更新口令失败", err)
 	}
@@ -180,6 +179,20 @@ func main() {
 	fmt.Println("新口令:", password)
 	fmt.Println("（请立即保存。旧设备的登录已全部失效；旧设备本地数据仍在，可导出备份后导入新会话。）")
 }
+
+// resetPasswordSQL 重置口令时整体替换凭据材料。
+//
+// 【为什么必须同时清 envelope_stale / envelope_stale_at】
+// 旧实现只改四列，漏掉了「信封待修复」标记。该标记原本是给
+// 「管理员只改口令、保留旧信封」的场景用的（见 users_repo.UpdatePasswordKeepEnvelope）。
+// 而 reset-password 生成的是**全新 DEK + 与新口令匹配的新信封**，材料已经同代；
+// 若标记残留，客户端登录后会以为需要用本地旧 DEK 重新包裹，把一个早已不匹配的
+// DEK 覆盖到刚写好的新信封上 —— 账号从此再也解不开自己的数据。
+// 清理方式与 internal/store/users_repo.go 的 RepairEnvelope 保持一致。
+const resetPasswordSQL = `UPDATE users
+SET kdf_salt=$1, wrapped_dek=$2, dek_iv=$3, password_hash=$4,
+    envelope_stale = false, envelope_stale_at = NULL
+WHERE id=$5`
 
 // buildResetCredentials 生成「重置口令」所需的凭据材料（新 salt + 新 DEK + 新口令）。
 //
@@ -277,7 +290,6 @@ func adminCredential(args []string) {
 	}
 	fmt.Println("\n已写入", *envFile, "（重启服务后生效）")
 }
-
 
 // loadDSN 从 env 文件或环境变量里取数据库连接串。
 func loadDSN(envFile string) string {

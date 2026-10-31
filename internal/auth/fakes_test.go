@@ -117,7 +117,14 @@ func (f *fakeRefresh) MarkReplaced(_ context.Context, id, replacedBy string) err
 	if !ok {
 		return store.ErrNotFound
 	}
-	// 与 A1 行为一致：标记被轮换的同时置 revoked_at。
+	// 忠实复刻真实仓储的 `WHERE ... AND revoked_at IS NULL` 语义：
+	// 已被轮换/吊销的行再标记会命中 0 行并返回 ErrNotFound。
+	// 【为什么必须严格】早期这里无条件写入，掩盖了「宽限期二次刷新必 500」
+	// 的真实缺陷（服务层在放行后仍调用 MarkReplaced）；宽松的替身会让
+	// 该 bug 在测试里永远不暴露。
+	if t.RevokedAt != nil {
+		return store.ErrNotFound
+	}
 	now := time.Now()
 	t.ReplacedBy, t.RevokedAt = &replacedBy, &now
 	return nil
@@ -130,6 +137,7 @@ func (f *fakeRefresh) Revoke(_ context.Context, id string) error {
 	}
 	return nil
 }
+
 // RevokeAllForUser 忠实复刻真实仓储语义：吊销该用户全部未吊销令牌，
 // 使后续 Refresh 走到 ReplacedBy/RevokedAt 分支。仅计数会让上层行为的
 // 断言失真（改密后旧令牌看似仍能续期），故此处必须真实改写状态。

@@ -84,14 +84,21 @@
     return { mul: 1, resolved: 'medium' };
   }
 
-  // 四个经典公式统一入口：sex 决定基数与增量
+  // 四个经典公式统一入口：sex 决定基数与增量。
+  // 表驱动而非 if 链——旧实现只按性别换基数、增量写死男性值，
+  // Robinson/Hamwi/Miller 的女性结果因此系统性偏高。
+  var CLASSIC_COEF = {
+    devine: { base: { male: 50, female: 45.5 }, inc: { male: 2.3, female: 2.3 } },
+    robinson: { base: { male: 52, female: 49 }, inc: { male: 1.9, female: 1.7 } },
+    hamwi: { base: { male: 48, female: 45.5 }, inc: { male: 2.7, female: 2.2 } },
+    miller: { base: { male: 56.2, female: 53.1 }, inc: { male: 1.41, female: 1.36 } }
+  };
+
   function classic(id, sex, over) {
-    var male = sex === 'male';
-    if (id === 'devine') return (male ? 50 : 45.5) + 2.3 * over;
-    if (id === 'robinson') return (male ? 52 : 49) + 1.9 * over;
-    if (id === 'hamwi') return (male ? 48 : 45.5) + 2.7 * over;
-    if (id === 'miller') return (male ? 56.2 : 53.1) + 1.41 * over;
-    return null;
+    var coef = CLASSIC_COEF[id];
+    if (!coef) return null;
+    var key = sex === 'male' ? 'male' : 'female';
+    return coef.base[key] + coef.inc[key] * over;
   }
 
   var FRAME_LABEL = { small: '小骨架', medium: '中等骨架', large: '大骨架' };

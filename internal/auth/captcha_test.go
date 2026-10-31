@@ -57,11 +57,22 @@ func issueAndGet(t *testing.T, s *captchaStore, c cache.Cache) (string, string) 
 	return id, code
 }
 
+// mustVerify 是测试快捷键：只关心布尔结果，不传 IP（即不参与 IP 维度限流，
+// 该维度由 TestCaptchaIPThrottle 单独覆盖）。
+func mustVerify(t *testing.T, s *captchaStore, id, code string) bool {
+	t.Helper()
+	ok, err := s.verify(context.Background(), id, code, "")
+	if err != nil {
+		t.Fatalf("verify 返回意外错误: %v", err)
+	}
+	return ok
+}
+
 // TestCaptchaVerifySuccess 生成后立即可校验通过。
 func TestCaptchaVerifySuccess(t *testing.T) {
 	s, c := newTestCaptcha(t)
 	id, code := issueAndGet(t, s, c)
-	if !s.verify(context.Background(), id, code) {
+	if !mustVerify(t, s, id, code) {
 		t.Fatal("正确答案校验失败")
 	}
 }
@@ -70,7 +81,7 @@ func TestCaptchaVerifySuccess(t *testing.T) {
 func TestCaptchaVerifyCaseInsensitive(t *testing.T) {
 	s, c := newTestCaptcha(t)
 	id, code := issueAndGet(t, s, c)
-	if !s.verify(context.Background(), id, strings.ToLower(code)) {
+	if !mustVerify(t, s, id, strings.ToLower(code)) {
 		t.Fatal("小写输入应通过校验")
 	}
 }
@@ -83,7 +94,7 @@ func TestCaptchaVerifyWrongCode(t *testing.T) {
 	if strings.EqualFold(wrong, code) {
 		wrong = "YYYY"
 	}
-	if s.verify(context.Background(), id, wrong) {
+	if mustVerify(t, s, id, wrong) {
 		t.Fatal("错误验证码竟然通过校验")
 	}
 }
@@ -92,10 +103,10 @@ func TestCaptchaVerifyWrongCode(t *testing.T) {
 func TestCaptchaVerifySingleUse(t *testing.T) {
 	s, c := newTestCaptcha(t)
 	id, code := issueAndGet(t, s, c)
-	if !s.verify(context.Background(), id, code) {
+	if !mustVerify(t, s, id, code) {
 		t.Fatal("首次校验应通过")
 	}
-	if s.verify(context.Background(), id, code) {
+	if mustVerify(t, s, id, code) {
 		t.Fatal("同一验证码被重复使用")
 	}
 	if _, err := c.Get(context.Background(), captchaCodeKey(id)); err == nil {
@@ -109,7 +120,7 @@ func TestCaptchaExpired(t *testing.T) {
 	s.ttl = 20 * time.Millisecond
 	id, code := issueAndGet(t, s, c)
 	time.Sleep(60 * time.Millisecond)
-	if s.verify(context.Background(), id, code) {
+	if mustVerify(t, s, id, code) {
 		t.Fatal("过期验证码仍然通过校验")
 	}
 }
@@ -124,11 +135,11 @@ func TestCaptchaLockedAfterMaxFailures(t *testing.T) {
 		wrong = "YYYY"
 	}
 	for i := 0; i < captchaMaxFailures; i++ {
-		if s.verify(context.Background(), id, wrong) {
+		if mustVerify(t, s, id, wrong) {
 			t.Fatalf("第 %d 次错误输入竟然通过", i+1)
 		}
 	}
-	if s.verify(context.Background(), id, code) {
+	if mustVerify(t, s, id, code) {
 		t.Fatal("连错达到上限后，正确答案仍然通过校验")
 	}
 }
@@ -136,10 +147,10 @@ func TestCaptchaLockedAfterMaxFailures(t *testing.T) {
 // TestCaptchaUnknownID 未知 id 返回失败而不是 panic。
 func TestCaptchaUnknownID(t *testing.T) {
 	s, _ := newTestCaptcha(t)
-	if s.verify(context.Background(), "不存在的-id", "ABCD") {
+	if mustVerify(t, s, "不存在的-id", "ABCD") {
 		t.Fatal("未知 captchaId 竟然通过校验")
 	}
-	if s.verify(context.Background(), "", "") {
+	if mustVerify(t, s, "", "") {
 		t.Fatal("空 captchaId / 空验证码竟然通过校验")
 	}
 }
