@@ -84,18 +84,52 @@ func TestAccountSaltReturnsRealSaltForExistingUser(t *testing.T) {
 
 // TestAccountSaltFakeSaltShape 断言假盐的形态与真盐一致：标准 base64 且解码后 32 字节。
 // 长度/编码不同同样会泄露「账号不存在」，所以形态本身也是不可区分性的一部分。
+// TestAccountSaltFakeSaltShape 断言假盐与**真盐**在字节长度、编码长度上完全一致。
+//
+// 【这条曾经写错过】原断言是「假盐应为 32 字节」（HMAC-SHA256 的全长），
+// 而真盐是 credentialSaltLen=16 字节：base64 后一个是 44 字符、一个是 24 字符。
+// 长度不同时，攻击者根本不用测时序，只看响应体长短就能判定账号是否存在——
+// 把 A-19（假哈希抹平时序）费力堵上的侧信道从侧面整个绕开。
+//
+// 所以这里不再断言某个魔数，而是直接把「不存在的账号」与「真实账号」两条
+// 响应放在一起比较：只要长度不等就红。
 func TestAccountSaltFakeSaltShape(t *testing.T) {
-	svc, _ := newSaltTestService()
+	svc, users := newSaltTestService()
+	ctx := context.Background()
 
-	salt, err := svc.AccountSalt(context.Background(), "shape-ghost@example.com")
+	realSalt := make([]byte, credentialSaltLen)
+	for i := range realSalt {
+		realSalt[i] = byte(i + 1)
+	}
+	if err := users.Create(ctx, &model.User{
+		ID:      "u-real-salt",
+		Email:   "real@example.com",
+		KDFSalt: realSalt,
+	}); err != nil {
+		t.Fatalf("预置真实账号失败: %v", err)
+	}
+
+	realB64, err := svc.AccountSalt(ctx, "real@example.com")
+	if err != nil {
+		t.Fatalf("真实账号取盐失败: %v", err)
+	}
+	fakeB64, err := svc.AccountSalt(ctx, "shape-ghost@example.com")
 	if err != nil {
 		t.Fatalf("调用失败: %v", err)
 	}
-	raw, err := base64.StdEncoding.DecodeString(salt)
+
+	raw, err := base64.StdEncoding.DecodeString(fakeB64)
 	if err != nil {
 		t.Fatalf("假盐不是合法 base64: %v", err)
 	}
-	if len(raw) != 32 {
-		t.Fatalf("假盐应为 32 字节，实际 %d 字节", len(raw))
+	if len(raw) != credentialSaltLen {
+		t.Fatalf("假盐解码后 %d 字节，期望 %d（与真盐同长）", len(raw), credentialSaltLen)
+	}
+	// 真正的判据：两条响应必须一样长，否则长度本身就是存在性信号。
+	if len(fakeB64) != len(realB64) {
+		t.Fatalf("假盐长度 %d 与真盐长度 %d 不一致，可直接据此枚举账号", len(fakeB64), len(realB64))
+	}
+	if fakeB64 == realB64 {
+		t.Fatalf("假盐不应与真实账号的盐相同")
 	}
 }

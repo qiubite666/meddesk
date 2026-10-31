@@ -2388,11 +2388,14 @@
               confirmText: '我已知晓，继续覆盖',
               danger: true
             }).then(function (yes) {
-              if (!yes) return { skipped: true };
+              // 取消哨兵**不能**用 skipped：后端 ImportResult 里 skipped 是「跳过条数」
+              // （import.go: res.Skipped = res.RecordsSkipped），只要有重复记录就 > 0，
+              // 会把一次成功导入误判成"用户取消"，连数据都不刷新。
+              if (!yes) return { cancelled: true };
               return send(parsed, true);
             });
           }).then(function (res) {
-            if (res && res.skipped) return '已取消导入，数据未改动';
+            if (res && res.cancelled) return '已取消导入，数据未改动';
             S.catsLoaded = false;
             reloadAll();
             var msg = mode === 'overwrite' ? '已覆盖导入' : '已合并导入';

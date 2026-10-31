@@ -448,9 +448,14 @@ func (s *Service) AccountSalt(ctx context.Context, email string) (string, error)
 		if errors.Is(err, store.ErrNotFound) {
 			// 不能用随机盐：随机值每次不同、真盐恒定，连查两次即可判定账号存在。
 			// 用邮箱确定性派生，等价于让「不存在的账号」看起来也有一个稳定盐。
+			//
+			// 【必须截断到与真实盐相同长度】HMAC-SHA256 输出 32 字节，base64 后 44 字符；
+			// 而真盐是 credentialSaltLen=16 字节 → 24 字符。长度不一致时，攻击者不用测时序，
+			// 只看响应体长短就能区分账号是否存在——A-19 费力抹平的侧信道会被这条旁路整个抵消。
 			mac := hmac.New(sha256.New, s.fakeSaltKey)
 			mac.Write([]byte(fakeSaltMsgPrefix + email))
-			return base64.StdEncoding.EncodeToString(mac.Sum(nil)), nil
+			sum := mac.Sum(nil)
+			return base64.StdEncoding.EncodeToString(sum[:credentialSaltLen]), nil
 		}
 		return "", apierr.Wrap(apierr.CodeInternal, err, msgInternal)
 	}
