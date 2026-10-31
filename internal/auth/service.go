@@ -334,6 +334,12 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, meta Request
 	if !old.ExpiresAt.IsZero() && time.Now().After(old.ExpiresAt) {
 		return nil, apierr.New(apierr.CodeUnauthorized, msgSessionExpired)
 	}
+	// 会话族的绝对上限：超过它无论如何都要重新登录。
+	// 历史行（迁移前创建）该字段为零值，按"无上限"处理，避免升级即踢人。
+	if !old.FamilyExpiresAt.IsZero() && time.Now().After(old.FamilyExpiresAt) {
+		s.revokeAllSessions(ctx, old.UserID, "会话族已到期")
+		return nil, apierr.New(apierr.CodeUnauthorized, msgSessionExpired)
+	}
 	// 注意：A1 的 MarkReplaced 在标记 replaced_by 的同时会置 revoked_at，
 	// 因此「已被轮换」必须先于「已被吊销」判断，否则宽限期内的并发刷新会被误判为重放。
 	replaced := old.ReplacedBy != nil && *old.ReplacedBy != ""
@@ -342,15 +348,15 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, meta Request
 	case replaced:
 		// 宽限期内允许并发刷新重用一次；宽限机会只在首次轮换时发放，不被复用再次续期。
 		if graced = s.consumeGrace(ctx, old.ID); !graced {
-			s.revokeAllSessions(ctx, old.UserID)
+			s.revokeAllSessions(ctx, old.UserID, "刷新令牌重放（宽限已用尽）")
 			return nil, apierr.New(apierr.CodeUnauthorized, msgSessionExpired)
 		}
 	case old.RevokedAt != nil:
 		// 被显式吊销（登出/改密/管理员操作）的令牌再次出现 → 重放。
-		s.revokeAllSessions(ctx, old.UserID)
+		s.revokeAllSessions(ctx, old.UserID, "刷新令牌重放（已吊销令牌被复用）")
 		return nil, apierr.New(apierr.CodeUnauthorized, msgSessionExpired)
 	case s.isRevoked(ctx, old.ID):
-		s.revokeAllSessions(ctx, old.UserID)
+		s.revokeAllSessions(ctx, old.UserID, "刷新令牌重放（吊销名单命中）")
 		return nil, apierr.New(apierr.CodeUnauthorized, msgSessionExpired)
 	}
 
@@ -361,7 +367,12 @@ func (s *Service) Refresh(ctx context.Context, refreshToken string, meta Request
 		}
 		return nil, apierr.Wrap(apierr.CodeInternal, err, "刷新失败，请稍后重试")
 	}
-	resp, newID, err := s.issue(ctx, u, meta)
+	familyExpiresAt := old.FamilyExpiresAt
+	if familyExpiresAt.IsZero() {
+		// 迁移前的历史令牌没有族寿命：从此刻起算一个完整周期，而不是永久放行。
+		familyExpiresAt = time.Now().Add(s.cfg.RefreshMaxLifetime)
+	}
+	resp, newID, err := s.issueWithFamily(ctx, u, meta, familyExpiresAt)
 	if err != nil {
 		return nil, err
 	}
@@ -457,7 +468,7 @@ func (s *Service) ChangePassword(ctx context.Context, userID string, req model.C
 	// 依然能续出访问令牌；设备丢失场景下「改了口令，旧设备还能用满 30 天」，
 	// 防护形同虚设。此处撤销全部令牌，让所有设备必须重新用新口令认证。
 	// 副作用（有意为之）：发起改密的那台设备也会被登出，需要重新登录一次。
-	s.revokeAllSessions(ctx, userID)
+	s.revokeAllSessions(ctx, userID, "口令已修改")
 	return nil
 }
 
@@ -516,7 +527,16 @@ func (s *Service) Authorize(accessToken string) (string, error) {
 }
 
 // issue 签发访问令牌并落库一条新的刷新令牌，返回响应与新刷新令牌 ID。
+// issue 签发一对新令牌，并为它开启一个**新会话族**（登录/注册路径）。
 func (s *Service) issue(ctx context.Context, u *model.User, meta RequestMeta) (*model.TokenResponse, string, error) {
+	return s.issueWithFamily(ctx, u, meta, time.Now().Add(s.cfg.RefreshMaxLifetime))
+}
+
+// issueWithFamily 在既有会话族内签发新令牌：familyExpiresAt 原样继承，不因轮换而延后。
+//
+// 【为什么必须继承而不是重算】若每次刷新都写 now+RefreshMaxLifetime，"会话最长存活"
+// 就会被无限推后——只要每周用一次，令牌永久有效；泄露的令牌也无法自然失效。
+func (s *Service) issueWithFamily(ctx context.Context, u *model.User, meta RequestMeta, familyExpiresAt time.Time) (*model.TokenResponse, string, error) {
 	raw, err := randomToken()
 	if err != nil {
 		return nil, "", apierr.Wrap(apierr.CodeInternal, err, msgInternal)
@@ -532,7 +552,9 @@ func (s *Service) issue(ctx context.Context, u *model.User, meta RequestMeta) (*
 		UserAgent: truncate(meta.UserAgent, maxMetaLen),
 		IP:        truncate(meta.IP, maxMetaLen),
 		ExpiresAt: now.Add(s.cfg.RefreshTTL),
-		CreatedAt: now,
+		// 族寿命在首签时确定，轮换时继承。
+		FamilyExpiresAt: familyExpiresAt,
+		CreatedAt:       now,
 	}
 	if err := s.refresh.Create(ctx, rt); err != nil {
 		return nil, "", apierr.Wrap(apierr.CodeInternal, err, "登录失败，请稍后重试")
@@ -558,8 +580,12 @@ func (s *Service) issue(ctx context.Context, u *model.User, meta RequestMeta) (*
 
 // revokeAllSessions 撤销该用户全部刷新令牌，并让「吊销时刻之前签发」的访问令牌在一个 TTL 内失效。
 // 名单值存吊销时刻的 Unix 秒：吊销后重新登录得到的新令牌不受影响（见 Authorize）。
-func (s *Service) revokeAllSessions(ctx context.Context, userID string) {
-	slog.Default().Warn("auth: 检测到刷新令牌重放，撤销该用户全部会话", "user_id", userID)
+// revokeAllSessions 撤销该用户的全部刷新令牌与在途访问令牌。
+//
+// reason 会进日志：撤销的原因不止"检测到重放"（还有改密、会话族到期），
+// 固定文案会让运维把正常的到期限流当成安全事件去排查。
+func (s *Service) revokeAllSessions(ctx context.Context, userID, reason string) {
+	slog.Default().Warn("auth: 撤销该用户全部会话", "user_id", userID, "reason", reason)
 	if err := s.refresh.RevokeAllForUser(ctx, userID); err != nil {
 		slog.Default().Error("auth: 撤销全部刷新令牌失败", "user_id", userID, "err", err)
 	}

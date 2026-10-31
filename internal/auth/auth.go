@@ -95,6 +95,13 @@ func normalizeConfig(cfg config.AuthConfig) config.AuthConfig {
 	if cfg.AccessTTL <= 0 {
 		cfg.AccessTTL = 15 * time.Minute
 	}
+	if cfg.RefreshMaxLifetime <= 0 {
+		cfg.RefreshMaxLifetime = 90 * 24 * time.Hour
+	}
+	if cfg.RefreshMaxLifetime < cfg.RefreshTTL {
+		// 族寿命短于单次令牌寿命是无意义的配置（登录即过期），按单次 TTL 兜底。
+		cfg.RefreshMaxLifetime = cfg.RefreshTTL
+	}
 	if cfg.RefreshTTL <= 0 {
 		cfg.RefreshTTL = 30 * 24 * time.Hour
 	}

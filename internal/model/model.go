@@ -94,11 +94,11 @@ type DeviceInfo struct {
 
 // RegisterRequest 注册请求。passwordHash 是客户端 PBKDF2 派生的结果（非明文口令）。
 type RegisterRequest struct {
-	Email       string `json:"email" binding:"required,email,max=160"`
+	Email        string `json:"email" binding:"required,email,max=160"`
 	PasswordHash string `json:"passwordHash" binding:"required,min=32,max=128"`
-	KDFSalt     string `json:"kdfSalt" binding:"required"`     // base64，客户端 PBKDF2 salt
-	WrappedDEK  string `json:"wrappedDek" binding:"required"`  // base64，被 KEK 包裹的数据密钥
-	DEKIV       string `json:"dekIv" binding:"required"`       // base64，包裹 DEK 所用的 IV
+	KDFSalt      string `json:"kdfSalt" binding:"required"`    // base64，客户端 PBKDF2 salt
+	WrappedDEK   string `json:"wrappedDek" binding:"required"` // base64，被 KEK 包裹的数据密钥
+	DEKIV        string `json:"dekIv" binding:"required"`      // base64，包裹 DEK 所用的 IV
 	// CaptchaID / CaptchaCode 是图形验证码（服务端一次性凭证，5 分钟过期）。
 	// 不加 required：缺字段也走统一的「验证码错误或已过期」提示，
 	// 避免前端暴露「哪个字段没填」的差异信息。
@@ -180,8 +180,8 @@ type UserDTO struct {
 
 // MeResponse /api/v1/auth/me 响应。
 type MeResponse struct {
-	User     UserDTO `json:"user"`
-	ServerTime int64 `json:"serverTime"`
+	User       UserDTO `json:"user"`
+	ServerTime int64   `json:"serverTime"`
 
 	// RecoveryEnabled 表示该账号是否开启了「托管恢复」（设置页据此显示开关状态）。
 	RecoveryEnabled bool `json:"recoveryEnabled"`
@@ -221,9 +221,13 @@ type RefreshToken struct {
 	UserAgent string
 	IP        string
 	ExpiresAt time.Time
-	CreatedAt time.Time
-	RevokedAt *time.Time
-	ReplacedBy *string
+	// FamilyExpiresAt 是这一族会话（同一登录派生出的轮换链）的最晚存活时刻。
+	// 轮换时原样继承、绝不延后：否则每次刷新都把有效期推到 now+TTL，
+	// 只要每周用一次就能永久续命，令牌泄露后无法通过时间自然失效。
+	FamilyExpiresAt time.Time
+	CreatedAt       time.Time
+	RevokedAt       *time.Time
+	ReplacedBy      *string
 }
 
 // Attachment 是附件元数据（内容本身以密文落盘，服务端不可读）。
@@ -241,11 +245,11 @@ type Attachment struct {
 
 // AttachmentDTO 附件对外结构。
 type AttachmentDTO struct {
-	ID       string `json:"id"`
-	RecordID string `json:"recordId"`
-	IV       string `json:"iv"`
-	Size     int64  `json:"size"`
-	Mime     string `json:"mime"`
+	ID        string    `json:"id"`
+	RecordID  string    `json:"recordId"`
+	IV        string    `json:"iv"`
+	Size      int64     `json:"size"`
+	Mime      string    `json:"mime"`
 	CreatedAt time.Time `json:"createdAt"`
 }
 
@@ -253,33 +257,33 @@ type AttachmentDTO struct {
 
 // ExportRow 是一行导出数据（由客户端解密后提交，服务端仅在内存中渲染，不落盘）。
 type ExportRow struct {
-	Date       string `json:"date"`       // 2026-10-25
-	Time       string `json:"time"`       // 08:00
-	Profile    string `json:"profile"`    // 成员名
+	Date       string `json:"date"`    // 2026-10-25
+	Time       string `json:"time"`    // 08:00
+	Profile    string `json:"profile"` // 成员名
 	Medication string `json:"medication"`
-	Dosage     string `json:"dosage"`     // 0.5 片 / 5 ml
-	Status     string `json:"status"`     // taken|skipped|snoozed|pending|missed
+	Dosage     string `json:"dosage"` // 0.5 片 / 5 ml
+	Status     string `json:"status"` // taken|skipped|snoozed|pending|missed
 	Note       string `json:"note"`
 }
 
 // ExportRequest 导出请求（PDF/CSV）。
 type ExportRequest struct {
-	Format     string      `json:"format" binding:"required,oneof=pdf csv"`
-	Title      string      `json:"title"`
-	Profile    string      `json:"profile"`
-	RangeFrom  string      `json:"rangeFrom"`
-	RangeTo    string      `json:"rangeTo"`
-	Timezone   string      `json:"timezone"`
-	Rows       []ExportRow `json:"rows"`
-	Stats      ExportStats `json:"stats"`
+	Format    string      `json:"format" binding:"required,oneof=pdf csv"`
+	Title     string      `json:"title"`
+	Profile   string      `json:"profile"`
+	RangeFrom string      `json:"rangeFrom"`
+	RangeTo   string      `json:"rangeTo"`
+	Timezone  string      `json:"timezone"`
+	Rows      []ExportRow `json:"rows"`
+	Stats     ExportStats `json:"stats"`
 }
 
 // ExportStats 导出文件顶部汇总。
 type ExportStats struct {
-	Total    int     `json:"total"`
-	Taken    int     `json:"taken"`
-	Skipped  int     `json:"skipped"`
-	Missed   int     `json:"missed"`
+	Total     int     `json:"total"`
+	Taken     int     `json:"taken"`
+	Skipped   int     `json:"skipped"`
+	Missed    int     `json:"missed"`
 	Adherence float64 `json:"adherence"` // 0~1
 }
 
@@ -287,9 +291,9 @@ type ExportStats struct {
 
 // HealthResponse 健康检查响应。
 type HealthResponse struct {
-	Status    string `json:"status"` // ok | degraded | down
-	Version   string `json:"version"`
-	DB        string `json:"db"`
-	Cache     string `json:"cache"`
-	ServerTime int64 `json:"serverTime"`
+	Status     string `json:"status"` // ok | degraded | down
+	Version    string `json:"version"`
+	DB         string `json:"db"`
+	Cache      string `json:"cache"`
+	ServerTime int64  `json:"serverTime"`
 }

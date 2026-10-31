@@ -16,8 +16,8 @@ type refreshRepo struct{ s *Store }
 
 // 刷新令牌查询列（顺序与 scanRefresh 一致）。
 const (
-	selectRefreshByID   = `SELECT id, user_id, token_hash, device_id, user_agent, ip, expires_at, created_at, revoked_at, replaced_by FROM refresh_tokens WHERE id = $1`
-	selectRefreshByHash = `SELECT id, user_id, token_hash, device_id, user_agent, ip, expires_at, created_at, revoked_at, replaced_by FROM refresh_tokens WHERE token_hash = $1`
+	selectRefreshByID   = `SELECT id, user_id, token_hash, device_id, user_agent, ip, expires_at, created_at, revoked_at, replaced_by, family_expires_at FROM refresh_tokens WHERE id = $1`
+	selectRefreshByHash = `SELECT id, user_id, token_hash, device_id, user_agent, ip, expires_at, created_at, revoked_at, replaced_by, family_expires_at FROM refresh_tokens WHERE token_hash = $1`
 )
 
 // Create 写入刷新令牌记录（库中只保存令牌原文的 sha256，绝不落明文）。
@@ -43,13 +43,13 @@ func (r *refreshRepo) Create(ctx context.Context, t *model.RefreshToken) error {
 	}
 
 	const q = `INSERT INTO refresh_tokens
-    (id, user_id, token_hash, device_id, user_agent, ip, expires_at, revoked_at, replaced_by)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+    (id, user_id, token_hash, device_id, user_agent, ip, expires_at, revoked_at, replaced_by, family_expires_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 RETURNING created_at`
 
 	err = r.s.pool.QueryRow(ctx, q,
 		id, userID, t.TokenHash, nullText(t.DeviceID), nullText(t.UserAgent), nullText(t.IP),
-		t.ExpiresAt, timePtrParam(t.RevokedAt), replacedBy,
+		t.ExpiresAt, timePtrParam(t.RevokedAt), replacedBy, t.FamilyExpiresAt,
 	).Scan(&t.CreatedAt)
 	if err != nil {
 		return wrap("创建刷新令牌失败", err)
@@ -147,7 +147,7 @@ func scanRefresh(row pgx.Row) (*model.RefreshToken, error) {
 		revoked  pgtype.Timestamptz
 		replaced pgtype.UUID
 	)
-	err := row.Scan(&t.ID, &t.UserID, &t.TokenHash, &deviceID, &ua, &ip, &t.ExpiresAt, &t.CreatedAt, &revoked, &replaced)
+	err := row.Scan(&t.ID, &t.UserID, &t.TokenHash, &deviceID, &ua, &ip, &t.ExpiresAt, &t.CreatedAt, &revoked, &replaced, &t.FamilyExpiresAt)
 	if err != nil {
 		return nil, notFound(err)
 	}

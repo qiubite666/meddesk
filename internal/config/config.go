@@ -48,14 +48,17 @@ type RedisConfig struct {
 }
 
 type AuthConfig struct {
-	JWTSecret      string
-	AccessTTL      time.Duration
-	RefreshTTL     time.Duration
-	Argon2Memory   uint32 // KiB
-	Argon2Time     uint32 // iterations
-	Argon2Threads  uint8
-	SignupEnabled  bool
-	RefreshReuseGrace time.Duration // 刷新令牌重用宽限期（并发刷新容错）
+	JWTSecret  string
+	AccessTTL  time.Duration
+	RefreshTTL time.Duration
+	// RefreshMaxLifetime 是一个会话族（同一次登录及其所有轮换）的最长存活时间。
+	// 0 表示按默认 90 天；必须 >= RefreshTTL，否则每次登录都会立刻过期。
+	RefreshMaxLifetime time.Duration
+	Argon2Memory       uint32 // KiB
+	Argon2Time         uint32 // iterations
+	Argon2Threads      uint8
+	SignupEnabled      bool
+	RefreshReuseGrace  time.Duration // 刷新令牌重用宽限期（并发刷新容错）
 
 	// RecoveryKey 是「托管恢复」的 RSA 私钥（base64 PKCS#8 DER）。
 	// 为空表示本部署不支持托管恢复：管理员改口令仍可走「设备自愈」的无损路径，
@@ -136,12 +139,13 @@ func Load() (*Config, error) {
 			Enabled: envBool("MEDDESK_REDIS_ENABLED", false),
 		},
 		Auth: AuthConfig{
-			JWTSecret:         envString("MEDDESK_JWT_SECRET", ""),
-			AccessTTL:         envDuration("MEDDESK_ACCESS_TTL", 60*time.Minute),
-			RefreshTTL:        envDuration("MEDDESK_REFRESH_TTL", 30*24*time.Hour),
-			Argon2Memory:      uint32(envInt("MEDDESK_ARGON2_MEMORY", 65536)),
-			Argon2Time:        uint32(envInt("MEDDESK_ARGON2_ITERATIONS", 3)),
-			Argon2Threads:     uint8(envInt("MEDDESK_ARGON2_PARALLELISM", 2)),
+			JWTSecret:          envString("MEDDESK_JWT_SECRET", ""),
+			AccessTTL:          envDuration("MEDDESK_ACCESS_TTL", 60*time.Minute),
+			RefreshTTL:         envDuration("MEDDESK_REFRESH_TTL", 30*24*time.Hour),
+			RefreshMaxLifetime: envDuration("MEDDESK_REFRESH_MAX_LIFETIME", 90*24*time.Hour),
+			Argon2Memory:       uint32(envInt("MEDDESK_ARGON2_MEMORY", 65536)),
+			Argon2Time:         uint32(envInt("MEDDESK_ARGON2_ITERATIONS", 3)),
+			Argon2Threads:      uint8(envInt("MEDDESK_ARGON2_PARALLELISM", 2)),
 			// 默认关闭：避免"部署到公网却忘了关注册"变成公开的匿名账本。
 			// 需要开户时临时置 true → 重启 → 注册 → 改回 false → 重启。
 			SignupEnabled:     envBool("MEDDESK_SIGNUP_ENABLED", false),

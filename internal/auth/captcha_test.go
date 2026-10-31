@@ -119,7 +119,10 @@ func TestCaptchaExpired(t *testing.T) {
 	s, c := newTestCaptcha(t)
 	s.ttl = 20 * time.Millisecond
 	id, code := issueAndGet(t, s, c)
-	time.Sleep(60 * time.Millisecond)
+	// 余量给到 200ms 而不是 60ms：Windows 的定时器粒度约 15.6ms，机器繁忙时
+	// time.Sleep 的实际唤醒可能明显晚于标称值；这里要验证的是"过期后不放行"，
+	// 不是"恰好卡在过期边界"，余量不足只会制造偶发红灯。
+	time.Sleep(200 * time.Millisecond)
 	if mustVerify(t, s, id, code) {
 		t.Fatal("过期验证码仍然通过校验")
 	}

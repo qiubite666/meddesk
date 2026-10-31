@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"net/http"
@@ -299,5 +300,52 @@ func TestArgon2GateBusyReturnsError(t *testing.T) {
 	}
 	if code := apierr.FromError(argon2Err(errors.New("boom"))).Code; code != apierr.CodeInternal {
 		t.Fatalf("其它 argon2 错误仍应为 internal，实际 %s", code)
+	}
+}
+
+// TestRefreshFamilyExpiry 锁住「会话族绝对上限」。
+//
+// 缺陷回顾：expires_at 每次轮换都被重置为 now+TTL（滑动过期），
+// 于是只要每周用一次，令牌就能永久续命——泄露后无法靠时间自然失效。
+// 修法是给每个会话族一个不可延长的 family_expires_at，轮换时原样继承。
+func TestRefreshFamilyExpiry(t *testing.T) {
+	ctx := context.Background()
+	svc, fr, _ := newTestService()
+
+	u := &model.User{ID: "11111111-1111-1111-1111-111111111111", Email: "family@example.com"}
+	if err := svc.users.Create(ctx, u); err != nil {
+		t.Fatalf("预置账号失败: %v", err)
+	}
+
+	resp, id, err := svc.issue(ctx, u, RequestMeta{IP: "203.0.113.7"})
+	if err != nil {
+		t.Fatalf("签发失败: %v", err)
+	}
+	first := fr.byID[id]
+	if first == nil || first.FamilyExpiresAt.IsZero() {
+		t.Fatalf("首签必须写入族寿命")
+	}
+	if !first.FamilyExpiresAt.After(first.ExpiresAt) {
+		t.Fatalf("族寿命(%v)应晚于单次令牌寿命(%v)", first.FamilyExpiresAt, first.ExpiresAt)
+	}
+
+	// 轮换一次：新令牌的族寿命必须与旧令牌**完全相同**，不得被 now+TTL 推迟。
+	second, err := svc.Refresh(ctx, resp.RefreshToken, RequestMeta{IP: "203.0.113.7"})
+	if err != nil {
+		t.Fatalf("首次刷新失败: %v", err)
+	}
+	sum := sha256.Sum256([]byte(second.RefreshToken))
+	rotated, err := svc.refresh.GetByHash(ctx, sum[:])
+	if err != nil {
+		t.Fatalf("读取轮换后的令牌失败: %v", err)
+	}
+	if !rotated.FamilyExpiresAt.Equal(first.FamilyExpiresAt) {
+		t.Fatalf("轮换不得延长族寿命：旧 %v，新 %v", first.FamilyExpiresAt, rotated.FamilyExpiresAt)
+	}
+
+	// 把族寿命推到过去：即使单次令牌仍在有效期内，也必须拒绝并要求重新登录。
+	rotated.FamilyExpiresAt = time.Now().Add(-time.Minute)
+	if _, err := svc.Refresh(ctx, second.RefreshToken, RequestMeta{IP: "203.0.113.7"}); !apierr.Is(err, apierr.CodeUnauthorized) {
+		t.Fatalf("族寿命已过应返回 401，实际 %v", err)
 	}
 }
