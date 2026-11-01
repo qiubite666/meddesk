@@ -78,7 +78,13 @@ fi
 git tag -a "$VER" -m "MedDesk ${VER}
 
 二进制 sha256: ${BIN_SHA}" 2>/dev/null || echo "  tag ${VER} 已存在，跳过"
-git push origin main "$VER" || echo "  ⚠ push 失败，请稍后手动执行：git push origin main ${VER}"
+# push 失败必须中止：tag 没推上去时，GitHub 创建 Release 会自动用默认分支 HEAD
+# 补一个同名 tag，指向错误提交；事后要删 tag + 重建 Release 才能纠正。
+if ! git push origin main "$VER"; then
+  echo "  ✗ push 失败，已中止后续步骤（避免 Release 挂到错误的 tag 上）。"
+  echo "    修复网络/认证后重跑本脚本即可（已提交的交付包与 tag 会自动跳过）。"
+  exit 1
+fi
 
 step "6/7 GitHub Release（需要令牌；未配置则跳过）"
 TOKEN="${GITHUB_TOKEN:-}"
@@ -91,12 +97,15 @@ if [[ -z "$TOKEN" ]]; then
 else
   AUTH="Authorization: Bearer ${TOKEN}"
   REPO_API="https://api.github.com/repos/qiubite666/meddesk"
-  # 若已有该版本 release 则复用，否则创建
+  # 若已有该版本 release 则复用，否则创建。
+  # 注意：创建分支必须把返回的 id 回填给 REL_ID —— 少了这个赋值，
+  # 即使 Release 创建成功，下面的 `-z "$REL_ID"` 仍为真，会误报「创建失败」
+  # 并跳过附件上传（v0.3.64 首次发布就是这么丢的附件）。
   REL_ID=$(curl -sS -H "$AUTH" "${REPO_API}/releases/tags/${VER}" | python -c "import json,sys; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
   if [[ -z "$REL_ID" ]]; then
-    curl -sS -X POST -H "$AUTH" -H "Content-Type: application/json" \
+    REL_ID=$(curl -sS -X POST -H "$AUTH" -H "Content-Type: application/json" \
       -d "{\"tag_name\":\"${VER}\",\"name\":\"MedDesk ${VER}\",\"draft\":false,\"prerelease\":false,\"body\":\"MedDesk ${VER}（sha256 二进制: ${BIN_SHA} / 完整包: ${TGZ_SHA}）\"}" \
-      "${REPO_API}/releases" | python -c "import json,sys;print(json.load(sys.stdin).get('id',''))"
+      "${REPO_API}/releases" | python -c "import json,sys;print(json.load(sys.stdin).get('id',''))")
   fi
   if [[ -z "$REL_ID" ]]; then echo "  ⚠ Release 创建失败（权限或已存在冲突），请手动检查"; else
     for f in "dist/release/${NAME}" "$TARBALL"; do
