@@ -8,6 +8,7 @@ deploy/scripts/initdb/*.local.sql
 # ---- 构建产物 ----
 /meddesk
 /meddesk.exe
+/bin/
 /dist/
 dist/
 *.tar.gz

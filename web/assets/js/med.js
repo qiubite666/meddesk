@@ -555,41 +555,62 @@
       };
     }).sort(function (a, b) { return String(a.med.name).localeCompare(String(b.med.name), 'zh-Hans-CN'); });
 
-    // 历史（近 N 天，按日分组，倒序）
+    // ---- 按「计划日」一次性分组：用药历史 / 柱状图 / 热力图共用同一份结果 ----
+    // 为什么必须共用一份：三处各自 filter 一遍，口径迟早分叉。此前的 bug 就是
+    // 历史按 scheduledFor 分组（正确），而柱状图内部按 takenAt 归日（错误），
+    // 于是出现「历史里有记录、图表却是空白」。
+    var byDay = Object.create(null);
+    intakes.forEach(function (i) {
+      if (!i) return;
+      var sf = Number(i.scheduledFor);
+      if (!isFinite(sf) || sf <= 0) return; // 无计划时刻的记录不进任何一天（与旧逻辑一致）
+      var k = dayKey(sf);
+      if (!byDay[k]) byDay[k] = [];
+      byDay[k].push(i);
+    });
+    function intakesOfDay(dayMs) { return byDay[dayKey(dayMs)] || []; }
+    function keyToMs(key) {
+      var p = String(key).split('-');
+      return new Date(+p[0], +p[1] - 1, +p[2]).getTime();
+    }
+
+    // 历史（近 N 天，按日分组，倒序）—— 直接由上面的 byDay 派生，不再单独 filter
     var fromMs = startOfDay(addDays(now, -(S.historyDays - 1)));
     var toMs = startOfDay(now) + 86400000;
-    var histRaw = intakes.filter(function (i) { return i.scheduledFor >= fromMs && i.scheduledFor < toMs; });
     var medNameOf = {};
     d.meds.forEach(function (m) { medNameOf[m.id] = m.name; });
-    var dayMap = {}, dayOrder = [];
-    histRaw.forEach(function (i) {
-      var key = dayKey(i.scheduledFor);
-      if (!dayMap[key]) { dayMap[key] = []; dayOrder.push(key); }
-      dayMap[key].push({
-        id: i.id, occKey: i.occKey, timeMs: i.scheduledFor,
-        name: medNameOf[i.medicationId] || '已删除药物',
-        doseText: i.doseText || '',
-        status: normalizeStatus(i),
-        note: i.note || ''
-      });
-    });
-    dayOrder.sort().reverse();
+    var dayOrder = Object.keys(byDay).filter(function (k) {
+      var t = keyToMs(k);
+      return t >= fromMs && t < toMs;
+    }).sort().reverse();
     var history = dayOrder.map(function (key) {
+      var dayMs = keyToMs(key);
       return {
         key: key,
-        label: fmtDate(new Date(key + 'T00:00:00').getTime()) + ' · ' + weekdayCn(new Date(key + 'T00:00:00').getDay()),
-        items: dayMap[key].sort(function (a, b) { return a.timeMs - b.timeMs; })
+        label: fmtDate(dayMs) + ' · ' + weekdayCn(new Date(dayMs).getDay()),
+        items: byDay[key].slice()
+          .sort(function (a, b) { return (a.scheduledFor || 0) - (b.scheduledFor || 0); })
+          .map(function (i) {
+            return {
+              id: i.id, occKey: i.occKey, timeMs: i.scheduledFor,
+              name: medNameOf[i.medicationId] || '已删除药物',
+              doseText: i.doseText || '',
+              status: normalizeStatus(i),
+              note: i.note || ''
+            };
+          })
       };
     });
 
-    // 依从性统计
+    // 依从性统计（区间口径见 schedule.js adherence；此处只负责按天取记录）
     var stats7 = adherenceOf(intakes, startOfDay(addDays(now, -6)), now);
     var stats30 = adherenceOf(intakes, startOfDay(addDays(now, -29)), now);
     var bars = [];
     for (var b = 29; b >= 0; b--) {
       var ds = startOfDay(addDays(now, -b));
       var de = ds + 86400000;
-      var dayIntakes = intakes.filter(function (i) { return i.scheduledFor >= ds && i.scheduledFor < de; });
+      // 与「用药历史」取的是同一份 day 分组：图上每一天 = 历史里那一天。
+      var dayIntakes = intakesOfDay(ds);
       // 今天：统计终点必须是「当前时刻」而非当天 24:00——否则 22:00 的未来计划
       // 会被 A7 漏服判定（due <= 区间终点-15min）误判为漏服，导致今日柱红色。
       var a = adherenceOf(dayIntakes, ds, b === 0 ? Math.min(now, de) : de);
@@ -605,7 +626,8 @@
     for (i2 = 0; i2 < heat.lead; i2++) heat.cells.push(null);
     for (i2 = 1; i2 <= heat.count; i2++) {
       var dms = monthStartMs(mk) + (i2 - 1) * 86400000;
-      var dIntakes = intakes.filter(function (x) { return x.scheduledFor >= dms && x.scheduledFor < dms + 86400000; });
+      // 同 bars：热力图与用药历史共用同一份 day 分组
+      var dIntakes = intakesOfDay(dms);
       // 今天：终点用当前时刻（理由同 bars——未来计划不算漏服）
       var dEnd = (dms === startOfDay(now)) ? now : dms + 86400000;
       var aa = adherenceOf(dIntakes, dms, dEnd);

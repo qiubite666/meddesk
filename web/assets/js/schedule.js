@@ -535,9 +535,22 @@
   }
 
   /* ------------------------------------------------------------ adherence */
-  function intakeTime(it) {
-    var t = num(it.takenAt, NaN);
-    if (!isFinite(t) || t <= 0) { t = num(it.scheduledFor, NaN); }
+  /**
+   * 归日锚点：依从率按「计划服药时刻」归属自然日，而不是打卡动作发生的时刻。
+   *
+   * 为什么不能用 takenAt 归日：打卡时刻会跨天，而计划时刻不会。
+   *   a) 提前预打卡：分装药盒后一次把未来几天的都点掉，takenAt 全落在同一天；
+   *   b) 次日补打卡：昨夜的药第二天早上才点，takenAt 落到今天；
+   *   c) 跨设备/跨时区同步：打卡设备的本地日期与计划日期不一致。
+   * 一旦按 takenAt 归日，这些记录会全部堆到「打卡那天」，计划日反而查不到记录
+   * → 该日 taken=0/missed=0 → 分母为 0 → rate=null → 柱子空白（本 bug 的成因）。
+   * 用药历史一直按 scheduledFor 分组，所以历史正确而图表空白，正是两者口径不一致。
+   *
+   * 仅在缺失 scheduledFor（极老数据）时回退 takenAt。
+   */
+  function intakeDayAnchor(it) {
+    var t = num(it.scheduledFor, NaN);
+    if (!isFinite(t) || t <= 0) { t = num(it.takenAt, NaN); }
     return isFinite(t) ? t : 0;
   }
 
@@ -546,6 +559,10 @@
    * @param {Object} arg {intakes, fromMs, toMs}
    * @returns {{total:number, taken:number, skipped:number, missed:number, rate:number|null, streakDays:number}}
    * rate = taken / (taken + skipped + missed)；分母为 0 时返回 null。
+   *
+   * 区间按「自然日」闭区间判定（[fromMs, toMs) 折算成 [fromDay, toDay]），
+   * 这样「今天 22:00 的药在 15:00 提前打卡」也能计入今天——
+   * 若仍用毫秒比较，scheduledFor(22:00) > toMs(15:00) 会被整条剔除，当天再次变空白。
    */
   function adherence(arg) {
     arg = arg || {};
@@ -556,6 +573,13 @@
     if (!isFinite(toMs)) { toMs = Date.now(); }
     if (toMs < fromMs) { var tmp = fromMs; fromMs = toMs; toMs = tmp; }
 
+    // 半开区间 [fromMs, toMs) → 闭日区间 [fromDay, toDay]；toMs <= fromMs 时退化为单日
+    var fromDay = dayKeyOf(fromMs);
+    var toDay = dayKeyOf(toMs > fromMs ? toMs - 1 : toMs);
+    // 漏服判定对照「真实当前时刻」，不能用 toMs——历史查询的 toMs 是区间终点，
+    // 而「今天还没到点的计划」必须判为未到期，不能算漏服。
+    var nowReal = Date.now();
+
     var taken = 0, skipped = 0, missed = 0;
     var takenDaySet = Object.create(null);
     var items = Object.prototype.toString.call(list) === '[object Array]' ? list : [];
@@ -563,12 +587,14 @@
     for (var i = 0; i < items.length; i++) {
       var it = items[i];
       if (!it || it.deleted === true) { continue; }
-      var t = intakeTime(it);
-      if (t < fromMs || t > toMs) { continue; }
+      var t = intakeDayAnchor(it);
+      if (!t) { continue; }
+      var dk = dayKeyOf(t);
+      if (dk < fromDay || dk > toDay) { continue; }
       var st = normStatus(it.status);
       if (st === 'taken') {
         taken++;
-        takenDaySet[dayKeyOf(t)] = true;
+        takenDaySet[dk] = true;
       } else if (st === 'skipped') {
         skipped++;
       } else if (st === 'missed') {
@@ -577,17 +603,24 @@
         // pending / snoozed：计划时间已过宽限期且未改期 -> 计为漏服
         var due = num(it.scheduledFor, t);
         var until = num(it.snoozeUntil, 0);
-        if (until > toMs) { continue; }
-        if (due <= (toMs - OVERDUE_GRACE_MS)) { missed++; }
+        if (until > nowReal) { continue; }
+        if (due <= (nowReal - OVERDUE_GRACE_MS)) { missed++; }
       }
     }
 
     var denom = taken + skipped + missed;
     var rate = denom === 0 ? null : Math.round((taken / denom) * 10000) / 10000;
 
-    // 连续服药天数：从 toMs 当天往前数，每天只要有 1 条已服用记录即计入
+    // 连续服药天数：从「统计终点所在日」（通常就是今天）往前数，
+    // 每天只要有 1 条已服用记录即计入。
+    // 归日改用 scheduledFor 后，昨天 22:00 的药即使今天早上才补打卡也归昨天，
+    // 于是「今天」自然不会有记录——但今天还没过完，不能因此判为断档。
+    // 故：终点是今天且今天尚无已服记录时，从昨天开始数。
     var streak = 0;
-    var cursor = startOfDay(toMs);
+    var cursor = startOfDay(Math.min(toMs, nowReal));
+    if (dayKeyOf(cursor) === dayKeyOf(nowReal) && !takenDaySet[dayKeyOf(cursor)]) {
+      cursor = addDaysLocal(cursor, -1);
+    }
     for (var g = 0; g < MAX_SCAN_DAYS; g++) {
       if (takenDaySet[dayKeyOf(cursor)]) {
         streak++;
