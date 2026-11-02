@@ -96,17 +96,25 @@ func main() {
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           engine,
-	// ReadTimeout 覆盖「从连接建立起，读完整个请求体」的全过程，不只是等请求头。
-	// 它曾经是 30s，结果移动网络上传 5MB 文件必然失败：手机上行慢，30 秒读不完
-	// body，net/http 直接掐断连接，handler 里的 FormFile 拿到 i/o timeout，
-	// 于是返回 400「缺少 file 字段」——线上表现为「上传约 30 秒后固定失败」。
-	// 上传体积另有 middleware.BodyLimitByPath（WebDAV 200 MiB）约束，
-	// 慢速 header 攻击由下面的 ReadHeaderTimeout 单独兜住，因此这里放宽到 10 分钟：
-	// 200 MiB 在 3 Mbps 上行下约 9 分钟，留出余量。
-	ReadHeaderTimeout: 10 * time.Second,
-	ReadTimeout:       10 * time.Minute,
-	WriteTimeout:      180 * time.Second, // 导出大文件需要较长写超时
-	IdleTimeout:       120 * time.Second,
+		// ReadTimeout 覆盖「从连接建立起，读完整个请求体」的全过程，不只是等请求头。
+		// 它曾经是 30s，结果移动网络上传 5MB 文件必然失败：手机上行慢，30 秒读不完
+		// body，net/http 直接掐断连接，handler 里的 FormFile 拿到 i/o timeout，
+		// 于是返回 400「缺少 file 字段」——线上表现为「上传约 30 秒后固定失败」。
+		// 上传体积另有 middleware.BodyLimitByPath（WebDAV 200 MiB）约束，
+		// 慢速 header 攻击由下面的 ReadHeaderTimeout 单独兜住，这里放宽到 15 分钟：
+		// 200 MiB 在 2 Mbps 上行为约 13 分钟，留出余量，并与 WriteTimeout、
+		// webdav.uploadTimeout 三者的上限保持一致——上传链路上任何一段超时
+		// 短于实际耗时，都会表现成「文件传上去了但提示失败」。
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       15 * time.Minute,
+		// WriteTimeout 覆盖「读完请求头 → 响应写完」，它同样是上传链路上的暗坑：
+		// 68MiB 文件转存网盘耗时 173 秒，加上收请求体共 203 秒，超过 180 秒的
+		// write deadline 后连接被判超时——后端其实已完成转存（status=201），
+		// 却写不出响应，nginx 记 "upstream prematurely closed connection" 并回 502，
+		// 用户看到「上传失败」，文件却已安静地躺在网盘里。
+		// 与 ReadTimeout / webdav.uploadTimeout 的上限（15 分钟）对齐。
+		WriteTimeout: 15 * time.Minute,
+		IdleTimeout:  120 * time.Second,
 	}
 
 	go func() {

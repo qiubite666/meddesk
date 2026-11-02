@@ -652,8 +652,7 @@
 
   /* ============================ 7. 渲染：文件浏览器 ============================ */
 
-  function normalizeItems(items) {
-    if (!Array.isArray(items)) return [];
+  function normalizeItems(items) {    if (!Array.isArray(items)) return [];
     return items.filter(function (item) {
       return item && item.name;
     }).map(function (item) {
@@ -668,6 +667,34 @@
       if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
       return a.name.localeCompare(b.name, 'zh-CN');
     });
+  }
+
+  /**
+   * 上传失败后回查：连接断开 ≠ 没传上去。
+   *
+   * 线上真实场景：68MiB 文件转存网盘耗时 173 秒，整个请求 203 秒；手机在这段时间
+   * 切后台/锁屏，浏览器会挂起或中断 XHR，前端只能看到「失败」，
+   * 但后端早已把文件写完（日志 status=201）。用户于是看到最困惑的结果：
+   * 提示失败，刷新一下文件却在。
+   *
+   * 用「同名 + 大小一致」回查一次，命中就按成功处理，并在文案里说明原因。
+   */
+  async function verifyUploadLanded(cfg, dirPath, file) {
+    var name = String((file && file.name) || '');
+    var size = Number(file && file.size);
+    if (!name) return false;
+    try {
+      var res = await apiList(cfg, dirPath || '');
+      var items = normalizeItems(res && res.items);
+      for (var i = 0; i < items.length; i += 1) {
+        var item = items[i];
+        if (!item || item.isDir || item.name !== name) continue;
+        // 大小可比时以大小为准（同名覆盖场景下，大小不符说明写的不是这个文件）
+        if (!isFinite(size) || size <= 0 || !item.size) return true;
+        return item.size === size;
+      }
+    } catch (_) { /* 回查本身失败不影响原判定 */ }
+    return false;
   }
 
   function renderBrowser(host, cfg) {
@@ -909,6 +936,7 @@
       var doneBytes = 0;
       var okCount = 0;
       var failCount = 0;
+      var recoveredCount = 0;   // 连接中断但服务器已落盘的数量
       var lastError = '';
       setBusy(true, '准备上传…');
       setProgress(totalBytes > 0 ? 0 : null, '准备上传…', '');
@@ -949,10 +977,22 @@
             setProgress(totalBytes > 0 ? doneBytes / totalBytes : 1, '已完成：' + file.name, '');
           } catch (error) {
             doneBytes = baseBytes + size;
-            failCount += 1;
-            lastError = readableError(error, '上传失败');
-            // 失败也落在进度条上：条变红并停在出问题的位置，用户能看出「传到一半断的」
-            setProgress(totalBytes > 0 ? doneBytes / totalBytes : 0, '上传失败：' + file.name, 'error');
+            // 连接断了不等于没传上去：先回查目标目录，命中同名同大小就按成功处理。
+            var landed = await verifyUploadLanded(cfg, state.path, file);
+            if (landed) {
+              okCount += 1;
+              recoveredCount += 1;
+              setProgress(
+                totalBytes > 0 ? doneBytes / totalBytes : 1,
+                '已完成（连接中断，服务器已保存）：' + file.name,
+                'done'
+              );
+            } else {
+              failCount += 1;
+              lastError = readableError(error, '上传失败');
+              // 失败也落在进度条上：条变红并停在出问题的位置，用户能看出「传到一半断的」
+              setProgress(totalBytes > 0 ? doneBytes / totalBytes : 0, '上传失败：' + file.name, 'error');
+            }
           }
         }
       } finally {
@@ -960,7 +1000,11 @@
       }
       if (!failCount) {
         success();
-        setProgress(1, '已上传 ' + okCount + ' 个文件', 'done');
+        var doneText = '已上传 ' + okCount + ' 个文件';
+        if (recoveredCount > 0) {
+          doneText += '（其中 ' + recoveredCount + ' 个连接中断，但服务器已保存）';
+        }
+        setProgress(1, doneText, 'done');
         toast('已上传 ' + okCount + ' 个文件', 'success');
         // 让 100% 停留一会儿再收起，否则成功瞬间消失，用户来不及确认
         setTimeout(function () { if (!state.busy) setProgress(null); }, 2500);
