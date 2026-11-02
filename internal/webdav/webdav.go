@@ -141,6 +141,10 @@ type denyIPFunc func(ip net.IP) bool
 // Client 是无状态的 WebDAV 转发客户端：不持有任何凭据。
 type Client struct {
 	http *http.Client
+	// uploadHTTP 是上传（PUT）专用客户端：不设 http.Client.Timeout。
+	// 原因见 uploadTimeout —— Timeout 是「整个请求」的总超时（含发送请求体），
+	// 15s 连 12MiB 都推不完，会把正常的慢速转存误判成「连不上网盘」。
+	uploadHTTP *http.Client
 	// denyIP 为目标 IP 的拦截策略；生产使用 defaultDenyIP，测试可替换为放行回环地址。
 	denyIP denyIPFunc
 	// maxDownload 与 maxItems 是资源上限，拆成字段便于测试注入小值。
@@ -148,20 +152,71 @@ type Client struct {
 	maxItems    int
 }
 
+// uploadTimeout 按文件体积估算转存超时。
+//
+// 为什么不能用一个固定值：PUT 的耗时 ≈ 文件大小 ÷ 后端到网盘的链路带宽。
+// 线上是「meddesk 后端 → 公网域名 → 同一台机器的 nginx dav」，走的是公网回环，
+// 出网带宽通常只有几 Mbps，12MiB 就可能要几十秒到一分多钟，15s 必然超时。
+//
+// 公式：30s 基础（DNS/TLS/首字节）+ 每 128KiB 计 1 秒（等价于 128KiB/s 的保守下限），
+// 封顶 15min（与 http.Server.ReadTimeout 的上限对齐，避免超长挂起）。
+func uploadTimeout(size int64) time.Duration {
+	const (
+		base     = 30 * time.Second
+		chunk    = 128 << 10
+		maxLimit = 15 * time.Minute
+	)
+	if size <= 0 {
+		return base
+	}
+	d := base + time.Duration(size/chunk)*time.Second
+	if d > maxLimit {
+		d = maxLimit
+	}
+	return d
+}
+
+// isTimeoutErr 判断错误是否为超时（含 context 到期与 net.Error）。
+func isTimeoutErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // newClient 构造使用默认安全策略的客户端。
 func newClient() *Client {
+	// 重定向可能把请求带到内网地址，一律拒绝（SSRF 防护的一部分）。
+	noRedirect := func(*http.Request, []*http.Request) error {
+		return errors.New("禁止跟随重定向")
+	}
 	return &Client{
 		http: &http.Client{
-			Timeout: requestTimeout,
-			// 重定向可能把请求带到内网地址，一律拒绝（SSRF 防护的一部分）。
-			CheckRedirect: func(*http.Request, []*http.Request) error {
-				return errors.New("禁止跟随重定向")
-			},
+			Timeout:       requestTimeout,
+			CheckRedirect: noRedirect,
+		},
+		uploadHTTP: &http.Client{
+			Timeout:       0, // 由每次上传的 context 超时控制
+			CheckRedirect: noRedirect,
 		},
 		denyIP:      defaultDenyIP,
 		maxDownload: maxDownloadBytes,
 		maxItems:    maxListItems,
 	}
+}
+
+// setTransport 统一替换「普通请求」与「上传」两个客户端的 Transport。
+//
+// 必须成对替换：上传走的是独立的 uploadHTTP（Timeout=0），
+// 只改 c.http 会让上传路径用回默认 Transport —— 测试里的自签证书就会校验失败，
+// 生产里若将来接入自定义 Transport（代理、链路追踪）也会同样漏掉上传。
+func (c *Client) setTransport(tr http.RoundTripper) {
+	c.http.Transport = tr
+	c.uploadHTTP.Transport = tr
 }
 
 // RegisterWebDAV 在给定的 gin 路由组上挂载 WebDAV 代理端点。
@@ -374,10 +429,23 @@ func (c *Client) handleUpload(g *gin.Context) {
 		writeErr(g, apierr.Wrap(apierr.CodeBadRequest, err, "无法读取上传内容"))
 		return
 	}
-	resp, err := c.doWithLength(g.Request.Context(), http.MethodPut, tgt.URL, req.Credentials, f, fh.Size, nil)
+	// 转存超时按体积算，而不是复用 requestTimeout(15s)：
+	// 此刻文件已完整落在本机 multipart 临时文件里，PUT 的耗时只取决于
+	// 「后端 → 网盘」的链路带宽。线上是公网域名回环到同机 nginx dav，
+	// 出网带宽有限，12MiB 就可能超过 15 秒 → 被误判成「连不上网盘」。
+	uploadCtx, cancelUpload := context.WithTimeout(g.Request.Context(), uploadTimeout(fh.Size))
+	defer cancelUpload()
+	putStart := time.Now()
+	resp, err := c.doUpload(uploadCtx, http.MethodPut, tgt.URL, req.Credentials, f, fh.Size, nil)
 	if err != nil {
+		slog.Warn("WebDAV 转存失败", "size_bytes", fh.Size,
+			"elapsed_ms", time.Since(putStart).Milliseconds(), "error", err)
 		writeErr(g, err)
 		return
+	}
+	if resp != nil {
+		slog.Info("WebDAV 转存完成", "size_bytes", fh.Size,
+			"elapsed_ms", time.Since(putStart).Milliseconds(), "status", resp.StatusCode)
 	}
 	defer resp.Body.Close()
 	drain(resp.Body)
@@ -483,12 +551,24 @@ func abortResponse(g *gin.Context) {
 
 // do 发起一次带 Basic Auth 的远程请求；凭据只在本次调用中使用，不写入任何状态。
 func (c *Client) do(ctx context.Context, method, target string, creds Credentials, body io.Reader, header map[string]string) (*http.Response, error) {
-	return c.doWithLength(ctx, method, target, creds, body, 0, header)
+	return c.doWith(ctx, c.http, method, target, creds, body, 0, header)
 }
 
 // doWithLength 是 do 的流式版本：contentLength > 0 时显式设置请求体长度，
 // 用于把 multipart 文件直接作为请求体转发（否则未知长度的 io.Reader 会走 chunked）。
 func (c *Client) doWithLength(ctx context.Context, method, target string, creds Credentials,
+	body io.Reader, contentLength int64, header map[string]string) (*http.Response, error) {
+	return c.doWith(ctx, c.http, method, target, creds, body, contentLength, header)
+}
+
+// doUpload 用「上传专用」客户端推送请求体：该客户端不设整体超时，
+// 超时完全由调用方按文件体积算出的 ctx 决定（见 uploadTimeout）。
+func (c *Client) doUpload(ctx context.Context, method, target string, creds Credentials,
+	body io.Reader, contentLength int64, header map[string]string) (*http.Response, error) {
+	return c.doWith(ctx, c.uploadHTTP, method, target, creds, body, contentLength, header)
+}
+
+func (c *Client) doWith(ctx context.Context, hc *http.Client, method, target string, creds Credentials,
 	body io.Reader, contentLength int64, header map[string]string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, target, body)
 	if err != nil {
@@ -501,10 +581,16 @@ func (c *Client) doWithLength(ctx context.Context, method, target string, creds 
 	for k, v := range header {
 		req.Header.Set(k, v)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
 		// 只记录方法与路径，不记录凭据；底层错误可能含主机地址，但不含 user/pass。
 		slog.Warn("WebDAV 代理请求失败", "method", method, "error", err)
+		if isTimeoutErr(err) {
+			// 超时与「连不上」是两回事：前者说明网盘可达但太慢，重试/换网络有用；
+			// 后者说明地址或凭据有问题。文案必须分开，否则用户会去改地址。
+			return nil, apierr.Wrap(apierr.CodeUnavailable, err,
+				"转存到 WebDAV 超时：网盘服务器在限定时间内未返回响应（大文件请重试，或改用带宽更好的网盘）")
+		}
 		return nil, apierr.Wrap(apierr.CodeUnavailable, err, "无法连接 WebDAV 服务（请检查地址与网络）")
 	}
 	return resp, nil

@@ -94,16 +94,19 @@
     if (error && error.network) {
       return error.timeout ? '上传超时，请检查网络后重试' : '网络异常，请检查连接后重试';
     }
-    // 网关层的错误没有后端 JSON body，apiError 只能给「请求失败（413）」，
-    // 这类必须按状态码给可行动提示，否则用户只看到一串数字。
     var status = error && error.status;
-    if (status === 413) return '文件超过服务端允许的上传大小，请压缩或分卷后重试';
-    if (status === 504 || status === 408) return '服务端处理超时，文件可能过大或网络过慢，请重试';
-    if (status === 502 || status === 503) return '服务暂时不可用，请稍后重试';
     var message = error && error.message ? String(error.message).trim() : '';
-    // apiError 在没有后端 message 时会兜一句「请求失败（500）」，这种才该让位给 code 文案。
+    // apiError 在没有后端 message 时会兜一句「请求失败（500）」，这种才该让位给兜底文案。
     var generic = !message || /^请求失败（\d+）$/.test(message) || message === '请求失败';
+
+    // 后端给的 message 是本次失败的具体原因，优先级最高。
+    // 注意不能先按 status 短路：503 既可能是网关故障，也可能是后端明确写的
+    //「转存到 WebDAV 超时」，一律回「服务暂时不可用」就把真实原因盖掉了。
     if (!generic) return scrub(message);
+
+    if (status === 413) return '文件超过服务端允许的上传大小，请压缩或分卷后重试';
+    if (status === 408 || status === 504) return '服务端处理超时，文件可能过大或网络过慢，请重试';
+    if (status === 502 || status === 503) return '服务暂时不可用，请稍后重试';
     if (error && error.code && ERROR_TEXT[error.code]) return ERROR_TEXT[error.code];
     return scrub(fallback || '操作失败');
   }

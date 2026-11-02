@@ -225,7 +225,7 @@ func newEnv(t *testing.T) *env {
 
 	c := newClient()
 	c.denyIP = func(net.IP) bool { return false } // 仅测试放行本地回环
-	c.http.Transport = srv.Client().Transport     // 信任 httptest 自签证书
+	c.setTransport(srv.Client().Transport)     // 信任 httptest 自签证书
 
 	r := gin.New()
 	mount(r.Group("/api/v1/webdav"), c)
@@ -575,7 +575,7 @@ func TestListBodyLimit(t *testing.T) {
 
 	c := newClient()
 	c.denyIP = func(net.IP) bool { return false }
-	c.http.Transport = srv.Client().Transport
+	c.setTransport(srv.Client().Transport)
 	r := gin.New()
 	mount(r.Group("/api/v1/webdav"), c)
 
@@ -607,7 +607,7 @@ func TestDownloadChunkedOverLimitAborts(t *testing.T) {
 
 	c := newClient()
 	c.denyIP = func(net.IP) bool { return false }
-	c.http.Transport = srv.Client().Transport
+	c.setTransport(srv.Client().Transport)
 	c.maxDownload = 4
 	r := gin.New()
 	mount(r.Group("/api/v1/webdav"), c)
@@ -652,7 +652,7 @@ func TestDownloadChunkedWithinLimitOK(t *testing.T) {
 
 	c := newClient()
 	c.denyIP = func(net.IP) bool { return false }
-	c.http.Transport = srv.Client().Transport
+	c.setTransport(srv.Client().Transport)
 	c.maxDownload = 64 // 上限大于实际长度
 	r := gin.New()
 	mount(r.Group("/api/v1/webdav"), c)
@@ -723,3 +723,63 @@ func TestUploadParseMessage(t *testing.T) {
 		}
 	}
 }
+
+// TestUploadTimeout 守住「转存超时按体积算」。
+//
+// 背景：http.Client.Timeout 是包含「发送请求体」在内的总超时，15s 连 12MiB
+// 都推不完；线上表现为 PUT 到网盘时 15 秒后报 Client.Timeout，
+// 被误译为「无法连接 WebDAV」。改成按体积估算后，同样的文件有 126s 预算。
+func TestUploadTimeout(t *testing.T) {
+	cases := []struct {
+		name string
+		size int64
+		want time.Duration
+	}{
+		{"0 字节走基础值", 0, 30 * time.Second},
+		{"1KiB 仍在基础值内", 1 << 10, 30 * time.Second},
+		{"128KiB 加 1 秒", 128 << 10, 31 * time.Second},
+		{"12MiB 约 126 秒", 12 << 20, 30*time.Second + 96*time.Second},
+		{"200MiB 封顶 15 分钟", 200 << 20, 15 * time.Minute},
+		{"超大值不得溢出", 1 << 40, 15 * time.Minute},
+	}
+	for _, c := range cases {
+		if got := uploadTimeout(c.size); got != c.want {
+			t.Errorf("%s: uploadTimeout(%d) = %v，期望 %v", c.name, c.size, got, c.want)
+		}
+	}
+	// 单调性：更大的文件绝不能拿到更短的超时
+	prev := time.Duration(0)
+	for _, size := range []int64{0, 1 << 10, 1 << 20, 8 << 20, 64 << 20, 200 << 20} {
+		cur := uploadTimeout(size)
+		if cur < prev {
+			t.Fatalf("uploadTimeout 非单调：size=%d 得到 %v，小于上一档 %v", size, cur, prev)
+		}
+		prev = cur
+	}
+}
+
+// TestIsTimeoutErr 区分「超时」与「连不上」——两者的用户提示必须不同。
+func TestIsTimeoutErr(t *testing.T) {
+	if isTimeoutErr(nil) {
+		t.Error("nil 不应判定为超时")
+	}
+	if !isTimeoutErr(context.DeadlineExceeded) {
+		t.Error("context.DeadlineExceeded 应判定为超时")
+	}
+	if !isTimeoutErr(os.ErrDeadlineExceeded) {
+		t.Error("os.ErrDeadlineExceeded 应判定为超时")
+	}
+	if !isTimeoutErr(&timeoutErr{}) {
+		t.Error("net.Error.Timeout()=true 应判定为超时")
+	}
+	if isTimeoutErr(errors.New("connection refused")) {
+		t.Error("connection refused 不应判定为超时")
+	}
+}
+
+// timeoutErr 满足 net.Error 且 Timeout() 恒为 true。
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return true }
