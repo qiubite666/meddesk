@@ -96,10 +96,17 @@ func main() {
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
 		Handler:           engine,
-		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      180 * time.Second, // 导出大文件需要较长写超时
-		IdleTimeout:       120 * time.Second,
+	// ReadTimeout 覆盖「从连接建立起，读完整个请求体」的全过程，不只是等请求头。
+	// 它曾经是 30s，结果移动网络上传 5MB 文件必然失败：手机上行慢，30 秒读不完
+	// body，net/http 直接掐断连接，handler 里的 FormFile 拿到 i/o timeout，
+	// 于是返回 400「缺少 file 字段」——线上表现为「上传约 30 秒后固定失败」。
+	// 上传体积另有 middleware.BodyLimitByPath（WebDAV 200 MiB）约束，
+	// 慢速 header 攻击由下面的 ReadHeaderTimeout 单独兜住，因此这里放宽到 10 分钟：
+	// 200 MiB 在 3 Mbps 上行下约 9 分钟，留出余量。
+	ReadHeaderTimeout: 10 * time.Second,
+	ReadTimeout:       10 * time.Minute,
+	WriteTimeout:      180 * time.Second, // 导出大文件需要较长写超时
+	IdleTimeout:       120 * time.Second,
 	}
 
 	go func() {

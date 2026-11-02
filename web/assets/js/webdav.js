@@ -82,11 +82,30 @@
     unavailable: '无法连接 WebDAV 服务器或请求超时，请稍后重试'
   };
 
+  /**
+   * 把异常翻译成可读文案。
+   *
+   * 优先级：后端返回的 message > 按 code 的兜底文案 > 调用方给的 fallback。
+   * 顺序不能反：后端 message 是本次失败的具体原因（如「上传中断：请求体未完整到达」），
+   * 而 code 文案是「bad_request → 请检查地址/账号/路径」这类泛化提示。
+   * 之前 code 排在前面，导致所有 400 都显示成同一句泛化文案，用户根本看不出真实原因。
+   */
   function readableError(error, fallback) {
-    if (error && error.network) return '网络异常，请检查连接后重试';
+    if (error && error.network) {
+      return error.timeout ? '上传超时，请检查网络后重试' : '网络异常，请检查连接后重试';
+    }
+    // 网关层的错误没有后端 JSON body，apiError 只能给「请求失败（413）」，
+    // 这类必须按状态码给可行动提示，否则用户只看到一串数字。
+    var status = error && error.status;
+    if (status === 413) return '文件超过服务端允许的上传大小，请压缩或分卷后重试';
+    if (status === 504 || status === 408) return '服务端处理超时，文件可能过大或网络过慢，请重试';
+    if (status === 502 || status === 503) return '服务暂时不可用，请稍后重试';
+    var message = error && error.message ? String(error.message).trim() : '';
+    // apiError 在没有后端 message 时会兜一句「请求失败（500）」，这种才该让位给 code 文案。
+    var generic = !message || /^请求失败（\d+）$/.test(message) || message === '请求失败';
+    if (!generic) return scrub(message);
     if (error && error.code && ERROR_TEXT[error.code]) return ERROR_TEXT[error.code];
-    var message = error && error.message ? String(error.message) : '';
-    return scrub(message || fallback || '操作失败');
+    return scrub(fallback || '操作失败');
   }
 
   function humanSize(bytes) {
@@ -175,6 +194,15 @@
     '.wd-note{margin:10px 0 0;font-size:13px;color:var(--text-dim)}',
     '.wd-note[data-tone="error"]{color:var(--danger)}',
     '.wd-note[data-tone="warn"]{color:var(--warn)}',
+    '.wd-progress{margin:10px 0 0}',
+    '.wd-progress[hidden]{display:none}',
+    '.wd-progress__track{height:6px;border-radius:3px;background:var(--border);overflow:hidden}',
+    '.wd-progress__bar{height:100%;width:0;border-radius:3px;background:var(--ok);transition:width .15s linear}',
+    '.wd-progress[data-tone="error"] .wd-progress__bar{background:var(--danger)}',
+    '.wd-progress[data-tone="done"] .wd-progress__bar{background:var(--ok)}',
+    '.wd-progress__label{margin:6px 0 0;font-size:12px;color:var(--text-dim);word-break:break-all}',
+    '.wd-progress[data-tone="error"] .wd-progress__label{color:var(--danger)}',
+    '.wd-progress[data-tone="done"] .wd-progress__label{color:var(--ok)}',
     '.wd-form{display:flex;flex-direction:column;gap:12px}',
     '.wd-form .input{min-height:46px;width:100%;font-size:16px}',
     '.wd-secret{display:flex;align-items:center;gap:8px}',
@@ -342,13 +370,23 @@
     return call('download', credentialsBody(cfg, path), { responseType: 'blob' });
   }
 
-  /** 上传走 multipart：字段 config（JSON 字符串）+ file，Authorization 头由 MD.api 统一带上。 */
-  function apiUpload(cfg, path, file) {
-    if (!MD.api || !MD.api.request) throw new Error('数据接口未就绪');
+  /**
+   * 上传走 multipart：字段 config（JSON 字符串）+ file，Authorization 头由 MD.api 统一带上。
+   *
+   * onProgress（可选）回调 {loaded,total,ratio} —— 由 XHR 的 upload.onprogress 驱动，
+   * fetch 没有上传进度事件，所以这里必须走 requestWithProgress。
+   */
+  function apiUpload(cfg, path, file, onProgress) {
+    if (!MD.api) throw new Error('数据接口未就绪');
     var form = new FormData();
     form.append('config', JSON.stringify(credentialsBody(cfg, path)));
     form.append('file', file, file && file.name ? file.name : 'upload.bin');
-    return MD.api.request(API + '/upload', { method: 'POST', body: form });
+    var options = { method: 'POST', body: form, onProgress: onProgress };
+    // 兼容旧缓存里的 api.js：没有进度通道时退回普通请求，功能不降级（只是没有百分比）。
+    if (typeof MD.api.requestWithProgress === 'function') {
+      return MD.api.requestWithProgress(API + '/upload', options);
+    }
+    return MD.api.request(API + '/upload', options);
   }
 
   function saveBlobToDevice(name, blob) {
@@ -640,6 +678,15 @@
     });
 
     var note = MD.ui.el('p', { class: 'wd-note', 'aria-live': 'polite' });
+    // 上传进度条：三态共用一套 DOM（正常=绿、完成=绿、失败=红），
+    // 隐藏用 hidden 属性而不是删除节点，避免每次上传都重建导致状态闪烁。
+    var progressBar = MD.ui.el('div', { class: 'wd-progress__bar' });
+    var progressLabel = MD.ui.el('p', { class: 'wd-progress__label', 'aria-live': 'polite' });
+    var progress = MD.ui.el('div', { class: 'wd-progress' }, [
+      MD.ui.el('div', { class: 'wd-progress__track' }, [progressBar]),
+      progressLabel
+    ]);
+    progress.hidden = true;
     var crumbs = MD.ui.el('nav', { class: 'wd-crumbs', 'aria-label': '目录层级' });
     var listHost = MD.ui.el('ul', { class: 'wd-list' });
 
@@ -699,6 +746,26 @@
       note.textContent = text || '';
       if (tone) note.dataset.tone = tone;
       else delete note.dataset.tone;
+    }
+
+    /**
+     * 进度条三态：上传中（tone 空 = 绿色增量）、完成（done）、失败（error）。
+     * ratio 传 null 表示收起进度条。
+     */
+    function setProgress(ratio, text, tone) {
+      if (ratio == null) {
+        progress.hidden = true;
+        progressBar.style.width = '0%';
+        progressLabel.textContent = '';
+        delete progress.dataset.tone;
+        return;
+      }
+      progress.hidden = false;
+      var pct = Math.max(0, Math.min(1, Number(ratio) || 0));
+      progressBar.style.width = (pct * 100).toFixed(1) + '%';
+      if (tone) progress.dataset.tone = tone;
+      else delete progress.dataset.tone;
+      progressLabel.textContent = text || '';
     }
 
     function idleNote() {
@@ -832,26 +899,57 @@
 
     async function uploadFiles(files) {
       if (!files.length || state.busy) return;
+      var queue = Array.prototype.slice.call(files).filter(Boolean);
+      if (!queue.length) return;
+      // 多文件按字节加权：否则「1 个 100MB + 1 个 1KB」时进度条会瞬间跳到 50% 再卡住
+      var totalBytes = queue.reduce(function (sum, item) { return sum + (Number(item.size) || 0); }, 0);
+      var doneBytes = 0;
       var okCount = 0;
       var failCount = 0;
       var lastError = '';
       setBusy(true, '准备上传…');
+      setProgress(totalBytes > 0 ? 0 : null, '准备上传…', '');
       try {
-        for (var index = 0; index < files.length; index += 1) {
-          var file = files[index];
-          if (!file) continue;
+        for (var index = 0; index < queue.length; index += 1) {
+          var file = queue[index];
+          var size = Number(file.size) || 0;
           if (!isSafeName(file.name)) {             // 浏览器一般已限制，这里再兜一层
             failCount += 1;
             lastError = '文件名不合法：' + String(file.name);
+            doneBytes += size;
             continue;
           }
-          setBusy(true, '正在上传 ' + (index + 1) + '/' + files.length + '：' + file.name);
+          var baseBytes = doneBytes;
+          var header = '正在上传 ' + (index + 1) + '/' + queue.length + '：' + file.name;
+          setBusy(true, header);
+          setProgress(totalBytes > 0 ? baseBytes / totalBytes : 0, header, '');
           try {
-            await apiUpload(cfg, state.path, file);
+            await apiUpload(cfg, state.path, file, function (info) {
+              // 单文件进度 → 整体进度：已完成的字节 + 当前文件已传字节
+              var overall = totalBytes > 0 ? (baseBytes + info.loaded) / totalBytes : info.ratio;
+              if (info.ratio >= 1) {
+                // 浏览器传完 ≠ 完成：nginx 默认 proxy_request_buffering on，
+                // 收完整个 body 后才转发给后端，再由后端转存到网盘。
+                // 这段时间没有进度可报，必须明确告诉用户「还在保存」，否则会以为卡住。
+                setProgress(overall, header + ' · 已传完，正在保存到网盘…', '');
+                return;
+              }
+              var part = Math.round(info.ratio * 100);
+              setProgress(
+                overall,
+                header + ' · ' + part + '%（' + humanSize(info.loaded) + ' / ' + humanSize(info.total) + '）',
+                ''
+              );
+            });
+            doneBytes = baseBytes + size;
             okCount += 1;
+            setProgress(totalBytes > 0 ? doneBytes / totalBytes : 1, '已完成：' + file.name, '');
           } catch (error) {
+            doneBytes = baseBytes + size;
             failCount += 1;
             lastError = readableError(error, '上传失败');
+            // 失败也落在进度条上：条变红并停在出问题的位置，用户能看出「传到一半断的」
+            setProgress(totalBytes > 0 ? doneBytes / totalBytes : 0, '上传失败：' + file.name, 'error');
           }
         }
       } finally {
@@ -859,13 +957,17 @@
       }
       if (!failCount) {
         success();
+        setProgress(1, '已上传 ' + okCount + ' 个文件', 'done');
         toast('已上传 ' + okCount + ' 个文件', 'success');
+        // 让 100% 停留一会儿再收起，否则成功瞬间消失，用户来不及确认
+        setTimeout(function () { if (!state.busy) setProgress(null); }, 2500);
       } else {
-        setNote(failCount + ' 个文件上传失败：' + lastError, 'error');
         toast(failCount + ' 个文件上传失败', 'error');
       }
       if (fileInput.value) fileInput.value = '';
       await load();
+      // 放在 load() 之后：load 会重置提示区，先写会被覆盖掉
+      if (failCount) setNote(failCount + ' 个文件上传失败：' + lastError, 'error');
     }
 
     async function downloadItem(item, target) {
@@ -999,6 +1101,7 @@
     var listCard = MD.ui.el('section', { class: 'card' }, [
       crumbs,
       listHost,
+      progress,
       note
     ]);
 

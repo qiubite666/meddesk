@@ -2,7 +2,9 @@ package webdav
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -10,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -691,6 +694,32 @@ func TestCleanRelPath(t *testing.T) {
 	for _, in := range []string{"..", "../a", "a/..", "/a", `\a`, "a\\b", "%2e%2e/a", "%252e%252e/a", "a\x00b"} {
 		if got, err := cleanRelPath(in); err == nil {
 			t.Fatalf("cleanRelPath(%q) 应被拒绝，实际返回 %q", in, got)
+		}
+	}
+}
+
+// TestUploadParseMessage 守住「上传失败原因」的区分逻辑。
+//
+// 这条断言对应一次真实的线上误判：http.Server.ReadTimeout 只有 30s 时，
+// 移动网络上传会在第 30 秒被掐断，FormFile 拿到 i/o timeout，
+// 旧代码一律回「缺少 file 字段」，把「超时」说成「前端漏传」，排查方向被带偏。
+func TestUploadParseMessage(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"真的没传 file", http.ErrMissingFile, "缺少 file 字段"},
+		{"请求体被截断", io.ErrUnexpectedEOF, "上传中断"},
+		{"读 deadline 到期", os.ErrDeadlineExceeded, "上传中断"},
+		{"context 超时", context.DeadlineExceeded, "上传中断"},
+		{"context 取消（客户端断开）", context.Canceled, "上传中断"},
+		{"超过体积上限", &http.MaxBytesError{Limit: 8 << 20}, "文件过大"},
+		{"其他解析错误", errors.New("malformed MIME header"), "multipart 格式错误"},
+	}
+	for _, c := range cases {
+		if got := uploadParseMessage(c.err); !strings.Contains(got, c.want) {
+			t.Errorf("%s: uploadParseMessage() = %q，期望包含 %q", c.name, got, c.want)
 		}
 	}
 }

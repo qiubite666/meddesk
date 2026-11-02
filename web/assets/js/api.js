@@ -504,6 +504,92 @@
     return payload;
   }
 
+  /**
+   * 带上传进度的请求（仅用于上传）。
+   *
+   * 为什么不用 fetch：Fetch API 至今没有「上传」进度事件（只有下载侧的 ReadableStream
+   * 能做），要显示「已传 x%」只能用 XMLHttpRequest 的 upload.onprogress。
+   *
+   * 鉴权、401 自动刷新、错误结构三者必须与 request() 完全一致，否则上传会成为
+   * 全站唯一一个「token 一过期就失败」的接口 —— 而上传恰好是最不该失败的操作。
+   */
+  function requestWithProgress(path, options) {
+    options = options || {};
+    var retried = Boolean(options._retried);
+
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open(options.method || 'POST', BASE + path, true);
+
+      var access = storageGet('access');
+      if (access) xhr.setRequestHeader('Authorization', 'Bearer ' + access);
+      xhr.setRequestHeader('Accept', 'application/json');
+      // 0 = 不设超时：上传耗时由服务端 read timeout 与网络决定，前端不该先掐断。
+      xhr.timeout = typeof options.timeout === 'number' ? options.timeout : 0;
+
+      if (xhr.upload && typeof options.onProgress === 'function') {
+        xhr.upload.onprogress = function (event) {
+          if (!event.lengthComputable) return;
+          try {
+            options.onProgress({
+              loaded: event.loaded,
+              total: event.total,
+              ratio: event.total > 0 ? event.loaded / event.total : 0
+            });
+          } catch (_) { /* 进度回调异常不得影响上传本身 */ }
+        };
+      }
+
+      xhr.onload = function () {
+        var payload = null;
+        if (xhr.responseText) {
+          try { payload = JSON.parse(xhr.responseText); } catch (_) { payload = xhr.responseText; }
+        }
+        // 401：先续期再重放。上传请求体是 FormData，可重复发送，重放安全。
+        if (xhr.status === 401 && !options.skipAuthRefresh && !retried) {
+          refreshSession()
+            .then(function () {
+              return requestWithProgress(path, Object.assign({}, options, { _retried: true }));
+            })
+            .then(resolve, function (error) {
+              if (!error || !error.transient) notifyUnauthorized();
+              reject(error);
+            });
+          return;
+        }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve(payload);
+          return;
+        }
+        if (xhr.status === 401 && !options.skipUnauthorized) notifyUnauthorized();
+        reject(apiError({ status: xhr.status }, payload));
+      };
+
+      xhr.onerror = function () {
+        var error = new Error('网络异常，请检查连接后重试');
+        error.network = true;
+        reject(error);
+      };
+      xhr.ontimeout = function () {
+        var error = new Error('上传超时，请检查网络后重试');
+        error.network = true;
+        error.timeout = true;
+        reject(error);
+      };
+      xhr.onabort = function () {
+        var error = new Error('上传已取消');
+        error.aborted = true;
+        reject(error);
+      };
+
+      try {
+        xhr.send(options.body);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
   async function unlockSession(session, password) {
     if (!session.kdfSalt || !session.wrappedDek || !session.dekIv) throw new Error('账户缺少加密凭据');
     var salt = MD.crypto.b64ToBytes(session.kdfSalt);
@@ -702,6 +788,8 @@
     // 底层请求封装对外暴露：WebDAV 等扩展模块需要复用同一套 Bearer 鉴权与 401 refresh，
     // 否则各自裸 fetch 会丢掉自动续期。仅供本仓库内部模块使用。
     request: request,
+    // 带上传进度的版本（内部仍走同一套 Bearer 鉴权与 401 刷新）；仅供上传使用。
+    requestWithProgress: requestWithProgress,
     // 基址解析函数（返回值为函数，非字符串）：记账本等需要自己拼 URL 的模块
     // 必须用它，否则在原生壳（页面源 https://localhost）里会打到设备自身。
     base: apiBase,

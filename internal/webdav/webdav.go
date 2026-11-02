@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path"
 	"sort"
 	"strconv"
@@ -30,6 +31,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/qiubite666/meddesk/internal/apierr"
+	"github.com/qiubite666/meddesk/internal/middleware"
 )
 
 const (
@@ -301,6 +303,30 @@ func (c *Client) handleDelete(g *gin.Context) {
 	g.JSON(http.StatusOK, okResponse{OK: true})
 }
 
+// uploadParseMessage 把 multipart 解析错误翻译成用户能照着行动的提示。
+//
+// 背景：ReadTimeout 曾是 30s，移动网络上传稍大的文件会在第 30 秒被掐断，
+// FormFile 拿到的是 i/o timeout，而不是「没有 file 字段」。旧代码一律回
+// 「缺少 file 字段」，把「上传超时」误报成「前端漏传」，线上排查因此走了弯路。
+func uploadParseMessage(err error) string {
+	var maxErr *http.MaxBytesError
+	if errors.As(err, &maxErr) {
+		return "文件过大：单次上传不得超过 200 MB"
+	}
+	if errors.Is(err, http.ErrMissingFile) {
+		return "缺少 file 字段"
+	}
+	var netErr net.Error
+	if errors.Is(err, os.ErrDeadlineExceeded) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		(errors.As(err, &netErr) && netErr.Timeout()) {
+		return "上传中断：请求体未完整到达（网络不稳定或上传超时），请重试；大文件建议改用 Wi-Fi"
+	}
+	return "上传内容无法解析（multipart 格式错误）"
+}
+
 // handleUpload 接收 multipart/form-data：config（JSON 字符串）+ file，PUT 到远程。
 func (c *Client) handleUpload(g *gin.Context) {
 	raw := g.Request.FormValue("config")
@@ -315,7 +341,10 @@ func (c *Client) handleUpload(g *gin.Context) {
 	}
 	f, fh, err := g.Request.FormFile("file")
 	if err != nil {
-		writeErr(g, apierr.New(apierr.CodeBadRequest, "缺少 file 字段"))
+		// 「没传 file」和「传了但请求体没读完」都会落到这里，必须区分开：
+		// 后者在移动网络下极常见（上行慢、切后台、超过 http.Server 的 ReadTimeout），
+		// 若一律回「缺少 file 字段」，用户会以为是前端漏传，排查方向完全跑偏。
+		writeErr(g, apierr.New(apierr.CodeBadRequest, uploadParseMessage(err)))
 		return
 	}
 	defer f.Close()
@@ -829,7 +858,18 @@ func statusError(status int) *apierr.Error {
 func drain(r io.Reader) { _, _ = io.Copy(io.Discard, io.LimitReader(r, maxDrainBytes)) }
 
 // writeErr 统一错误输出。
+//
+// 顺带把 4xx/5xx 的原因写进日志：此前只有中间件的「慢请求」WARN，只记了状态码，
+// 看不到究竟是「缺字段」「远端拒绝」还是「请求体没读完」，排查上传失败时等于没有线索。
+// 401 不记（凭据无效属正常业务分支，记了只会刷屏）。
 func writeErr(g *gin.Context, err error) {
 	e := apierr.FromError(err)
+	if e.Code != apierr.CodeUnauthorized {
+		attrs := []any{"code", string(e.Code), "error", err}
+		if g != nil && g.Request != nil {
+			attrs = append(attrs, "path", g.Request.URL.Path, "request_id", middleware.GetRequestID(g))
+		}
+		slog.Warn("WebDAV 请求失败", attrs...)
+	}
 	g.AbortWithStatusJSON(apierr.HTTPStatus(e.Code), e)
 }
