@@ -379,7 +379,131 @@
    * onProgress（可选）回调 {loaded,total,ratio} —— 由 XHR 的 upload.onprogress 驱动，
    * fetch 没有上传进度事件，所以这里必须走 requestWithProgress。
    */
+  /**
+   * 直连上传：浏览器直接把文件 PUT 给 WebDAV，不经过 meddesk 后端。
+   *
+   * 为什么单独开这条路：走后端时同一份数据要传两遍 ——
+   * 手机→服务器（用手机上行），服务器→网盘（用服务器出网带宽，实测仅 3.3 Mbps，
+   * 68MiB 文件转了 173 秒）。直连只传一次，且用的就是手机自己的带宽。
+   *
+   * 前提：WebDAV 侧放行 CORS（含 OPTIONS 免认证）。没放行时浏览器在预检阶段就拦下，
+   * 这里会抛 network 错误，由 apiUpload 回退到后端代理，功能不中断。
+   */
+  function directUpload(cfg, dirPath, file, onProgress) {
+    return new Promise(function (resolve, reject) {
+      var xhr = new XMLHttpRequest();
+      xhr.open('PUT', davFileUrl(cfg, dirPath, file.name), true);
+      xhr.setRequestHeader('Authorization', basicAuthToken(cfg.user, cfg.pass));
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+      xhr.timeout = 0;
+      if (xhr.upload && typeof onProgress === 'function') {
+        xhr.upload.onprogress = function (event) {
+          if (!event.lengthComputable) return;
+          try {
+            onProgress({
+              loaded: event.loaded,
+              total: event.total,
+              ratio: event.total > 0 ? event.loaded / event.total : 0
+            });
+          } catch (_) { /* 进度回调异常不得影响上传 */ }
+        };
+      }
+      xhr.onload = function () {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve({ ok: true, path: joinPath(dirPath, file.name) });
+          return;
+        }
+        reject(directError(xhr.status));
+      };
+      xhr.onerror = function () {
+        // CORS 未放行时浏览器同样走这里（status=0），与真实断网无法区分，
+        // 标记 network 让上层决定是否回退到后端代理。
+        var error = new Error('直连 WebDAV 失败');
+        error.network = true;
+        error.direct = true;
+        reject(error);
+      };
+      xhr.ontimeout = function () {
+        var error = new Error('直连上传超时');
+        error.network = true;
+        error.timeout = true;
+        error.direct = true;
+        reject(error);
+      };
+      xhr.onabort = function () {
+        var error = new Error('上传已取消');
+        error.aborted = true;
+        error.direct = true;
+        reject(error);
+      };
+      try {
+        // File 直接作为请求体：直连不需要 multipart，省掉一层封装
+        xhr.send(file);
+      } catch (error) {
+        reject(error);
+      }
+    });
+  }
+
+  /** 直连 URL：baseURL + 目录各段 + 文件名，逐段编码（base 自身的 path 保持原样）。 */
+  function davFileUrl(cfg, dirPath, fileName) {
+    var base = String((cfg && cfg.baseURL) || '').replace(/\/+$/, '');
+    var segs = [];
+    String(dirPath || '').replace(/^\/+|\/+$/g, '').split('/').forEach(function (seg) {
+      if (seg) segs.push(encodeURIComponent(seg));
+    });
+    segs.push(encodeURIComponent(String(fileName || 'upload.bin')));
+    return base + '/' + segs.join('/');
+  }
+
+  /** Basic 认证头：btoa 只接受 latin1，非 ASCII 账号密码必须先转 UTF-8。 */
+  function basicAuthToken(user, pass) {
+    var raw = String(user == null ? '' : user) + ':' + String(pass == null ? '' : pass);
+    return 'Basic ' + btoa(unescape(encodeURIComponent(raw)));
+  }
+
+  /** 把直连 PUT 的状态码翻译成与后端一致的结构，好让 readableError 统一处理。 */
+  function directError(status) {
+    var table = {
+      401: ['unauthorized', 'WebDAV 账号或密码错误'],
+      403: ['forbidden', 'WebDAV 拒绝写入：没有该目录的写权限'],
+      404: ['not_found', 'WebDAV 目录不存在'],
+      409: ['conflict', 'WebDAV 目录不存在，或与现有资源冲突'],
+      412: ['conflict', 'WebDAV 目标已存在且禁止覆盖'],
+      423: ['locked', 'WebDAV 文件被其他客户端锁定'],
+      507: ['insufficient_storage', 'WebDAV 空间不足']
+    };
+    var pair = table[status];
+    var error = new Error(pair ? pair[1] : ('WebDAV 返回状态 ' + status));
+    error.status = status;
+    if (pair) error.code = pair[0];
+    return error;
+  }
+
+  // 直连失败过的主机（内存级，刷新即重置）：避免每次上传都先撞一次 CORS 墙
+  var directBlocked = Object.create(null);
+
+  /**
+   * 上传入口：直连优先，失败回退后端代理。
+   *
+   * 回退只针对网络层失败（含 CORS 被拦）。401/403/409 这类业务错误直接抛出 ——
+   * 换条路也是同样的错，回退只会让用户多等一轮。
+   */
   function apiUpload(cfg, path, file, onProgress) {
+    var host = String((cfg && cfg.baseURL) || '');
+    if (directBlocked[host]) {
+      return apiUploadViaProxy(cfg, path, file, onProgress);
+    }
+    return directUpload(cfg, path, file, onProgress).catch(function (error) {
+      if (error && error.aborted) throw error;
+      if (!(error && error.network)) throw error;
+      directBlocked[host] = true;
+      return apiUploadViaProxy(cfg, path, file, onProgress);
+    });
+  }
+
+  /** 走后端代理（原有实现）：WebDAV 未放行 CORS 时的兜底路径。 */
+  function apiUploadViaProxy(cfg, path, file, onProgress) {
     if (!MD.api) throw new Error('数据接口未就绪');
     var form = new FormData();
     form.append('config', JSON.stringify(credentialsBody(cfg, path)));
@@ -1185,6 +1309,20 @@
     clearConfig: clearConfig,
     settingsSection: settingsSection
   };
+
+  // 仅测试环境暴露内部实现（生产不挂载，避免调用方绕过上传流程直接调），
+  // 供 tmp/browsertest/test-webdav-direct.js 断言直连 URL、Basic 头与回退行为。
+  if (global.__MEDDESK_TEST__) {
+    MD.webdav.__test = {
+      directUpload: directUpload,
+      apiUpload: apiUpload,
+      apiUploadViaProxy: apiUploadViaProxy,
+      davFileUrl: davFileUrl,
+      basicAuthToken: basicAuthToken,
+      directError: directError,
+      resetBlocked: function () { directBlocked = Object.create(null); }
+    };
+  }
 
   if (MD.router && typeof MD.router.register === 'function') {
     MD.router.register({
