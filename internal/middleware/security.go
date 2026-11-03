@@ -8,12 +8,20 @@ import (
 
 // 安全响应头的取值。CSP 采用 default-src 'self' 基线，
 // 仅按一期功能需要放开：data:/blob: 图片（拍照预览）、内联样式（主题变量切换）。
+//
+// connect-src 额外放开 https: —— WebDAV 上传采用「浏览器直连网盘」模式，
+// 目标地址是用户在设置页填写的任意 https 域名，无法在编译期枚举。
+// 若只允许 'self'，浏览器会在发出请求之前就拦掉（连 CORS 预检都不会发），
+// 前端只能看到 onerror 并静默回退到后端中转，表现为「直连始终不生效」。
+// 注意 script-src 仍是 'self'，XSS 注入的脚本无法执行；
+// connect-src 的放开只影响「已运行的同源脚本能把数据发往哪些 https 地址」，
+// 对本项目而言这正是产品功能本身。
 const (
 	cspValue = "default-src 'self'; " +
 		"img-src 'self' data: blob:; " +
 		"style-src 'self' 'unsafe-inline'; " +
 		"script-src 'self'; " +
-		"connect-src 'self'; " +
+		"connect-src 'self' https:; " +
 		"form-action 'self'; " +
 		"base-uri 'self'; " +
 		"frame-ancestors 'none'; " +

@@ -403,7 +403,8 @@
             onProgress({
               loaded: event.loaded,
               total: event.total,
-              ratio: event.total > 0 ? event.loaded / event.total : 0
+              ratio: event.total > 0 ? event.loaded / event.total : 0,
+              mode: 'direct'
             });
           } catch (_) { /* 进度回调异常不得影响上传 */ }
         };
@@ -508,7 +509,12 @@
     var form = new FormData();
     form.append('config', JSON.stringify(credentialsBody(cfg, path)));
     form.append('file', file, file && file.name ? file.name : 'upload.bin');
-    var options = { method: 'POST', body: form, onProgress: onProgress };
+    // 标注来源：100% 之后代理还要把文件转存到网盘，直连则只剩服务端落盘确认，
+    // 两者文案不同，否则用户会在直连时白白等着「保存到网盘」。
+    var wrapped = typeof onProgress === 'function'
+      ? function (info) { onProgress(Object.assign({}, info, { mode: 'proxy' })); }
+      : onProgress;
+    var options = { method: 'POST', body: form, onProgress: wrapped };
     // 兼容旧缓存里的 api.js：没有进度通道时退回普通请求，功能不降级（只是没有百分比）。
     if (typeof MD.api.requestWithProgress === 'function') {
       return MD.api.requestWithProgress(API + '/upload', options);
@@ -1083,10 +1089,13 @@
               // 单文件进度 → 整体进度：已完成的字节 + 当前文件已传字节
               var overall = totalBytes > 0 ? (baseBytes + info.loaded) / totalBytes : info.ratio;
               if (info.ratio >= 1) {
-                // 浏览器传完 ≠ 完成：nginx 默认 proxy_request_buffering on，
-                // 收完整个 body 后才转发给后端，再由后端转存到网盘。
-                // 这段时间没有进度可报，必须明确告诉用户「还在保存」，否则会以为卡住。
-                setProgress(overall, header + ' · 已传完，正在保存到网盘…', '');
+                // onprogress 的 100% 只代表「浏览器把手上的数据都交给了网络栈」，
+                // 不代表服务器已经收完。此后两条路径的等待阶段还不一样：
+                //   直连：只剩服务端落盘确认，没有「转存网盘」这一步
+                //   代理：nginx 收完 body → 转给后端 → 后端再转存网盘
+                // 文案必须分开，否则直连时会让人白等一个根本不存在的阶段。
+                var tail = info.mode === 'direct' ? '已发送，等待网盘确认…' : '已传完，正在保存到网盘…';
+                setProgress(overall, header + ' · ' + tail, '');
                 return;
               }
               var part = Math.round(info.ratio * 100);
