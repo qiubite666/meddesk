@@ -442,6 +442,66 @@
 
   // 未归类药物的修复入口：恢复原档案，或整体归到某个现存档案。
   // 不做静默猜测 —— 归到哪个"人"身上必须由用户点。
+  /**
+   * 清理重复的服药记录：同一 occKey 只保留一条，其余软删除。
+   *
+   * 背景：「推迟」按钮曾因 doSnooze ↔ remind.snooze 事件回弹形成死循环
+   * （详见 doSnooze 注释），单日可写出上万条同 occKey 的记录。
+   *
+   * 保留优先级：非 snoozed 的优先（用户真实状态 taken/skipped），
+   * 同状态下保留 updatedAt 最新的 —— 死循环产物几乎全是 snoozed，
+   * 若单纯按时间取最新，会把用户真正的打卡记录一起删掉。
+   *
+   * 用软删除而非物理删除：墓碑才能同步到其他设备，
+   * 否则云端副本会在下次 pull 时把这些记录"复活"。
+   */
+  async function dedupeIntakes() {
+    var all = await MD.data.intakes.list();
+    var groups = Object.create(null);
+    all.forEach(function (it) {
+      if (!it || !it.occKey) return;
+      var key = String(it.occKey);
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(it);
+    });
+
+    var tomb = [];
+    var dupGroups = 0;
+    Object.keys(groups).forEach(function (key) {
+      var arr = groups[key];
+      if (arr.length <= 1) return;
+      dupGroups += 1;
+      arr.sort(function (a, b) {
+        var sa = normalizeStatus(a) === 'snoozed' ? 1 : 0;
+        var sb = normalizeStatus(b) === 'snoozed' ? 1 : 0;
+        if (sa !== sb) return sa - sb;
+        return (Number(b.updatedAt) || 0) - (Number(a.updatedAt) || 0);
+      });
+      for (var i = 1; i < arr.length; i += 1) tomb.push(arr[i]);
+    });
+
+    if (!tomb.length) return { dupGroups: 0, removed: 0 };
+    var removed = await MD.data.intakes.bulkRemoveRecords(tomb);
+    await refreshAll();
+    return { dupGroups: dupGroups, removed: removed };
+  }
+
+  /** 带确认的重复记录清理入口。 */
+  function runDedupe() {
+    confirmBox({
+      title: '清理重复记录',
+      message: '同一次用药的多条重复记录会被合并为一条，保留你的实际打卡状态（已服用/已跳过优先于已推迟）。'
+        + '此操作不可撤销，但不会删除任何独立的用药记录。',
+      danger: true
+    }).then(function (yes) {
+      if (!yes) return null;
+      toast('正在清理…', 'info');
+      return dedupeIntakes().then(function (r) {
+        toast(r.removed ? ('已清理 ' + r.removed + ' 条重复记录') : '没有需要清理的记录', r.removed ? 'success' : 'info');
+      });
+    }).catch(function (e) { toast('清理失败：' + msgOf(e), 'error'); });
+  }
+
   function openOrphanFix() {
     if (!MD.family || typeof MD.family.orphanReport !== 'function') {
       MD.toast.show('当前版本不支持修复', 'error');
@@ -509,6 +569,17 @@
     meds.forEach(function (m) { medIds[m.id] = true; });
     var schedules = d.schedules.filter(function (s) { return medIds[s.medicationId]; });
     var intakes = isAll() ? d.intakes : d.intakes.filter(function (i) { return i.profileId === pid; });
+
+    // 重复记录检测：同一 occKey 出现多条，是「推迟」死循环留下的残渣。
+    // 一次遍历即可（上万条也在毫秒级），用来在页面上提示并给出一键清理入口。
+    var occSeen = Object.create(null);
+    var dupIntakeCount = 0;
+    intakes.forEach(function (i) {
+      if (!i || !i.occKey) return;
+      var k = String(i.occKey);
+      occSeen[k] = (occSeen[k] || 0) + 1;
+      if (occSeen[k] > 1) dupIntakeCount += 1;   // 统计"多余的"条数
+    });
 
     // 今日剂量（A7 负责排程与昨天顺延）
     var doses = [];
@@ -637,6 +708,7 @@
     return {
       now: now, profiles: d.profiles, profileId: S.profileId,
       orphanCount: orphanMeds.length,
+      dupIntakeCount: dupIntakeCount,
       doses: doses, todayRate: todayRate, done: done, total: doses.length, overdueCount: overdueCount,
       meds: medVM, history: history, hasMoreHistory: true,
       stats7: stats7, stats30: stats30, bars: bars, heat: heat
@@ -838,6 +910,15 @@
   function renderMeds(el, vm) {
     if (!el) return;
     var head = '<div class="md-section__bar"><div class="section-title">药物清单（' + vm.meds.length + '）</div></div>';
+    if (vm.dupIntakeCount > 0) {
+      head += '<div class="card" style="margin:0 0 10px;border-color:var(--danger)">'
+        + '<div style="font-size:13px;font-weight:600;margin-bottom:4px">检测到 ' + vm.dupIntakeCount + ' 条重复的服药记录</div>'
+        + '<div class="muted" style="font-size:12px;line-height:1.6;margin-bottom:8px">'
+        + '同一次用药存在多条记录（「推迟」旧版本的缺陷所致），会让用药历史和依从率虚高。'
+        + '清理后每个用药时点只保留一条，你的真实打卡记录不受影响。</div>'
+        + '<button class="btn btn-primary" type="button" data-act="dedupe-intakes">清理重复记录</button>'
+        + '</div>';
+    }
     if (vm.orphanCount > 0) {
       head += '<div class="card" style="margin:0 0 10px;border-color:var(--danger)">'
         + '<div style="font-size:13px;font-weight:600;margin-bottom:4px">有 ' + vm.orphanCount + ' 味药未归属任何档案</div>'
@@ -1565,10 +1646,31 @@
     });
   }
 
-  function doSnooze(occKey, minutes) {
+  // 同一 occKey 的推迟正在处理中时，忽略重复触发。
+  //
+  // 为什么必须有这道闸门：doSnooze → MD.remind.snooze() 会**同步** emit('remind:snooze')，
+  // 而本模块又监听该事件转发回 doSnooze —— 两者构成无限循环，
+  // 每一圈都执行一次 applyIntake() 落库。线上曾因此单日写出 11294 条重复记录，
+  // 页面表现为「点一次推迟，当天记录爆炸」。
+  var snoozeInFlight = Object.create(null);
+
+  /**
+   * 推迟提醒。
+   * @param {Object} [opts]
+   * @param {boolean} [opts.fromEvent] 由 'remind:snooze' 事件转发而来时为 true：
+   *        remind 内部已经更新过计时器，这里不能再回调它，否则事件会立刻反弹回来。
+   */
+  function doSnooze(occKey, minutes, opts) {
+    if (!occKey) { return; }
+    if (snoozeInFlight[occKey]) { return; }
+    snoozeInFlight[occKey] = true;
+    // 用宏任务释放：emit 是同步的，同一调用栈内的反弹必须仍被挡住
+    global.setTimeout(function () { delete snoozeInFlight[occKey]; }, 0);
+
+    opts = opts || {};
     var dose = S.doseMap[occKey] || {};
-    var until = nowMs() + minutes * 60000;
-    if (MD.remind && typeof MD.remind.snooze === 'function') {
+    var until = nowMs() + Number(minutes) * 60000;
+    if (!opts.fromEvent && MD.remind && typeof MD.remind.snooze === 'function') {
       try { MD.remind.snooze(occKey, minutes); } catch (e) { /* 忽略 */ }
     }
     applyIntake(occKey, 'snoozed', {
@@ -1663,6 +1765,7 @@
     if (act === 'med-copy') { promptCopyMed(id); return; }
     if (act === 'profile') { switchProfile(id); return; }
     if (act === 'profile-new') { openProfileForm(null); return; }
+    if (act === 'dedupe-intakes') { runDedupe(); return; }
     if (act === 'orphan-fix') { openOrphanFix(); return; }
     if (act === 'profile-edit') { e.stopPropagation(); openProfileForm(id); return; }
     if (act === 'hist-open') { openHistoryActions(id); return; }
@@ -1809,7 +1912,8 @@
       var occKey = pick(p, 'occKey');
       if (!occKey) return;
       var minutes = Number(pick(p, 'minutes', 'min', 'snoozeMinutes')) || 10;
-      doSnooze(occKey, minutes);
+      // fromEvent：这个事件就是 remind.snooze() 发出来的，回调它会立刻再 emit 一次。
+      doSnooze(occKey, minutes, { fromEvent: true });
     });
     MD.bus.on('data:changed', function () { refreshAll(); });
     // 提醒触发 → 页面内横幅（系统通知不可用时的兜底，也作为系统通知之外的可见性保障）
@@ -1923,13 +2027,12 @@
         return;
       }
       if (a === 'snooze') {
-        var until = nowMs() + 10 * 60000;
-        if (MD.remind && typeof MD.remind.snooze === 'function') {
-          try { MD.remind.snooze(dose.occKey, 10); } catch (e) { /* 忽略 */ }
-        }
-        applyIntake(dose.occKey, 'snoozed', Object.assign({}, meta, { snoozeUntil: until, note: '推迟 10 分钟' })).then(function () {
-          remove(); toast('已推迟 10 分钟', 'success'); refreshAll();
-        }).catch(function (e) { toast('操作失败：' + msgOf(e), 'error'); });
+        // 统一走 doSnooze：它负责调 remind.snooze（更新计时器）+ 落库 + 提示。
+        // 这里若再单独调一次 remind.snooze，emit('remind:snooze') 会让监听器
+        // 再执行一次 doSnooze，形成循环落库。
+        doSnooze(dose.occKey, 10);
+        remove();
+        return;
       }
     });
 
@@ -1962,6 +2065,8 @@
   med.openProfileForm = openProfileForm;
   med.seedSamples = seedSamples;
   med.clearSamples = clearSamples;
+  // 供「清理重复记录」与排查脚本调用
+  med.dedupeIntakes = dedupeIntakes;
 
   // 供 refreshAll 之外的调试使用；不在生产交互中依赖
   med._state = S;

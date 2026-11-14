@@ -61,6 +61,31 @@
         });
         await MD.db.put(table, record);
         notify(table, id, 'remove');
+      },
+      /**
+       * 批量软删除（调用方已持有完整记录时用，不必逐条再查一遍）。
+       *
+       * 为什么单独开一个：save() 每条都会 notify → 触发一次全量刷新。
+       * 上千条时等于上千次 refreshAll，页面会直接卡死。
+       * 这里全部写完后只广播一次。
+       */
+      bulkRemoveRecords: async function (records) {
+        var list = records || [];
+        var now = MD.util.nowMs();
+        var n = 0;
+        for (var i = 0; i < list.length; i += 1) {
+          var rec = list[i];
+          if (!rec || !rec.id || rec.deleted) continue;
+          await MD.db.put(table, Object.assign({}, rec, {
+            deleted: true,
+            updatedAt: now,
+            ver: (Number(rec.ver) || 0) + 1,
+            _dirty: true
+          }));
+          n += 1;
+        }
+        if (n > 0) notify(table, '*', 'bulk-remove');
+        return n;
       }
     };
   }
