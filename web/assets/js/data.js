@@ -72,19 +72,22 @@
       bulkRemoveRecords: async function (records) {
         var list = records || [];
         var now = MD.util.nowMs();
-        var n = 0;
+        var pending = [];
         for (var i = 0; i < list.length; i += 1) {
           var rec = list[i];
           if (!rec || !rec.id || rec.deleted) continue;
-          await MD.db.put(table, Object.assign({}, rec, {
+          pending.push(Object.assign({}, rec, {
             deleted: true,
             updatedAt: now,
             ver: (Number(rec.ver) || 0) + 1,
             _dirty: true
           }));
-          n += 1;
         }
-        if (n > 0) notify(table, '*', 'bulk-remove');
+        if (!pending.length) return 0;
+        // 合成单事务写入：逐条 put 在上万条时要几十秒，期间页面卡死、选区也被刷掉，
+        // 用户反而点不到清理按钮（线上 11294 条正是这种死锁状态）。
+        var n = await MD.db.bulkPut(table, pending);
+        notify(table, '*', 'bulk-remove');
         return n;
       }
     };

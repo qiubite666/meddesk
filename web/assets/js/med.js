@@ -25,6 +25,10 @@
   var SNOOZE_OPTIONS = [10, 30, 60];      // 推迟分钟选项
   var HISTORY_DAYS = 90;                  // 历史默认展示天数
   var HISTORY_STEP = 90;                  // 「加载更早」步长
+  // 单日最多渲染条数。历史按天分组后一次性 innerHTML 全量重建，
+  // 一天上万条时（「推迟」死循环残留）光 DOM 就足以让页面假死，
+  // 而且每次刷新都会重建，用户连字都选不中。超出部分折叠，点「展开」才渲染。
+  var HIST_DAY_MAX = 60;
   var MISS_GRACE_MS = 60 * 60 * 1000;     // 计划时间超过 1 小时仍 pending → 视为漏服
 
   var STATUS_TEXT = { taken: '已服用', skipped: '已跳过', snoozed: '已推迟', pending: '待服用', missed: '漏服' };
@@ -232,6 +236,7 @@
     doseMap: {},         // occKey -> DoseVM（供事件处理取上下文）
     profileId: 'all',    // 当前档案：'all' 或具体 id
     historyDays: HISTORY_DAYS,
+    expandedDays: {},    // dayKey -> true：单日超过折叠阈值后，用户点「展开」才全量渲染
     heatMonth: monthKeyOf(Date.now()),
     busy: false,
     queued: false,
@@ -914,7 +919,8 @@
       head += '<div class="card" style="margin:0 0 10px;border-color:var(--danger)">'
         + '<div style="font-size:13px;font-weight:600;margin-bottom:4px">检测到 ' + vm.dupIntakeCount + ' 条重复的服药记录</div>'
         + '<div class="muted" style="font-size:12px;line-height:1.6;margin-bottom:8px">'
-        + '同一次用药存在多条记录（「推迟」旧版本的缺陷所致），会让用药历史和依从率虚高。'
+        + '同一次用药存在多条记录（「推迟」旧版本的缺陷所致），会让用药历史和依从率虚高，'
+        + (vm.dupIntakeCount > 500 ? '也会让页面明显变慢。' : '')
         + '清理后每个用药时点只保留一条，你的真实打卡记录不受影响。</div>'
         + '<button class="btn btn-primary" type="button" data-act="dedupe-intakes">清理重复记录</button>'
         + '</div>';
@@ -995,8 +1001,21 @@
       body = '<div class="empty">暂无用药记录</div>';
     } else {
       body = vm.history.map(function (day) {
-        return '<div class="md-day"><div class="md-day__head">' + esc(day.label) + '<span class="muted">' + day.items.length + ' 条</span></div>' +
-          day.items.map(function (it) {
+        var all = day.items || [];
+        var folded = all.length > HIST_DAY_MAX && !S.expandedDays[day.key];
+        var shown = folded ? all.slice(0, HIST_DAY_MAX) : all;
+        var more = '';
+        if (folded) {
+          var rest = all.length - HIST_DAY_MAX;
+          more = '<button class="btn btn-ghost" type="button" data-act="hist-expand" data-day="' + esc(day.key) + '"' +
+            ' style="min-height:40px;width:100%;margin-top:6px">展开其余 ' + rest + ' 条' +
+            (rest > 200 ? '（该日记录异常偏多，可用上方「清理重复记录」）' : '') + '</button>';
+        } else if (all.length > HIST_DAY_MAX && S.expandedDays[day.key]) {
+          more = '<button class="btn btn-ghost" type="button" data-act="hist-expand" data-day="' + esc(day.key) + '"' +
+            ' style="min-height:40px;width:100%;margin-top:6px">收起</button>';
+        }
+        return '<div class="md-day"><div class="md-day__head">' + esc(day.label) + '<span class="muted">' + all.length + ' 条</span></div>' +
+          shown.map(function (it) {
             var st = it.status;
             var tone = STATUS_TONE[st] || '';
             return '<div class="md-hist" data-act="hist-open" data-id="' + esc(it.id) + '" role="button" tabindex="0">' +
@@ -1005,7 +1024,7 @@
               '<span class="muted" style="font-size:12px">' + esc(it.doseText) + '</span>' +
               '<span class="badge' + (tone ? ' badge--' + tone : '') + '">' + esc(STATUS_TEXT[st] || st) + '</span>' +
               '</div>';
-          }).join('') + '</div>';
+          }).join('') + more + '</div>';
       }).join('');
     }
     var foot = '<button class="btn btn-ghost" type="button" data-act="hist-more" style="min-height:44px;margin-top:4px">' + ICON.chevron + '加载更早</button>';
@@ -1135,8 +1154,35 @@
 
   /* ============================ 8. 统一刷新入口 ============================ */
 
+  /** 用户是否正在选中页面文本（复制 / 长按选择中） */
+  function userSelecting() {
+    try {
+      var sel = global.getSelection && global.getSelection();
+      if (!sel || !sel.rangeCount || sel.isCollapsed) return false;
+      return String(sel).trim().length > 0;
+    } catch (e) { return false; }
+  }
+
+  var selectDeferTimer = null;
+  var selectDeferCount = 0;
+
   function refreshAll() {
     if (!S.root || !S.mounted || !MD.data) return Promise.resolve();
+    // renderAll 是整体重建 innerHTML，重建瞬间选区必然消失 ——
+    // 这就是「内容无法复制、刚选中就刷新没了」的直接原因。
+    // 选区存在时把重绘推迟到松手后，最多推迟 6 秒（15 × 400ms），
+    // 保证长时间按住也不会一直看不到数据更新。
+    if (userSelecting() && selectDeferCount < 15) {
+      selectDeferCount += 1;
+      if (!selectDeferTimer) {
+        selectDeferTimer = global.setTimeout(function () {
+          selectDeferTimer = null;
+          refreshAll();
+        }, 400);
+      }
+      return Promise.resolve();
+    }
+    selectDeferCount = 0;
     if (S.busy) { S.queued = true; return Promise.resolve(); }
     S.busy = true;
     return loadData()
@@ -1146,6 +1192,7 @@
         var vm = computeVM(d);
         renderAll(vm);
         pushReminders(vm);
+        warnDupIfSevere(vm);
       })
       .catch(function (err) {
         if (global.console) console.error('[med] refreshAll 失败', err);
@@ -1156,9 +1203,21 @@
       });
   }
 
+  var dupWarned = false;
+  /**
+   * 重复记录过多时，第一屏用 toast 提醒一次。
+   * 为什么不能只靠药物清单里的红框：数量上万时页面本身就很慢，
+   * 用户往往停在「今天要处理」这一屏，看不到下面的清理入口，
+   * 于是一直卡着而不知道有按钮可点。
+   */
+  function warnDupIfSevere(vm) {
+    if (dupWarned || !vm || !(vm.dupIntakeCount >= 500)) return;
+    dupWarned = true;
+    toast('检测到 ' + vm.dupIntakeCount + ' 条重复记录，正拖慢页面，请到「药物清单」顶部点「清理重复记录」', 'error');
+  }
+
   /** 把今日待提醒列表交给 A7 */
-  function pushReminders(vm) {
-    if (!MD.remind || typeof MD.remind.schedule !== 'function') return;
+  function pushReminders(vm) {    if (!MD.remind || typeof MD.remind.schedule !== 'function') return;
     try {
       var pending = vm.doses.filter(function (x) { return !isDone(x); });
       MD.remind.schedule(pending);
@@ -1770,6 +1829,13 @@
     if (act === 'profile-edit') { e.stopPropagation(); openProfileForm(id); return; }
     if (act === 'hist-open') { openHistoryActions(id); return; }
     if (act === 'hist-more') { S.historyDays += HISTORY_STEP; refreshAll(); return; }
+    if (act === 'hist-expand') {
+      var dk = String(node.getAttribute('data-day') || '');
+      if (!dk) return;
+      if (S.expandedDays[dk]) delete S.expandedDays[dk]; else S.expandedDays[dk] = true;
+      refreshAll();
+      return;
+    }
     if (act === 'heat-prev') { S.heatMonth = shiftMonth(S.heatMonth, -1); refreshAll(); return; }
     if (act === 'heat-next') { S.heatMonth = shiftMonth(S.heatMonth, 1); refreshAll(); return; }
     if (act === 'exp-csv' || act === 'exp-pdf') { runExport(act === 'exp-csv' ? 'csv' : 'pdf'); return; }
@@ -1915,7 +1981,33 @@
       // fromEvent：这个事件就是 remind.snooze() 发出来的，回调它会立刻再 emit 一次。
       doSnooze(occKey, minutes, { fromEvent: true });
     });
-    MD.bus.on('data:changed', function () { refreshAll(); });
+    // ---- data:changed → 合并刷新 ----
+    // 为什么必须合并：同步（sync.js）每采纳一条远端记录就 emit 一次 data:changed，
+    // 冲突回写、批量推送落库同理。而 refreshAll 会把六个区块的 DOM 整体重建一遍。
+    // 线上实测：11/14 单日 11294 条记录时，一次同步就是上万次 emit → 上万次全量重渲染，
+    // 表现为「页面一直在刷新」「刚选中文字就被刷掉」「根本没法复制」。
+    // 合并策略：连续变更只在最后一次之后 300ms 刷一次；变更不断时由 1500ms 上限兜底，
+    // 保证用户不会长时间看到旧数据。
+    var refreshTimer = null;
+    var refreshFirstAt = 0;
+    var REFRESH_QUIET_MS = 300;
+    var REFRESH_MAX_WAIT_MS = 1500;
+    MD.bus.on('data:changed', function () {
+      var t = nowMs();
+      if (!refreshFirstAt) refreshFirstAt = t;
+      if (t - refreshFirstAt >= REFRESH_MAX_WAIT_MS) {
+        if (refreshTimer) { global.clearTimeout(refreshTimer); refreshTimer = null; }
+        refreshFirstAt = 0;
+        refreshAll();
+        return;
+      }
+      if (refreshTimer) global.clearTimeout(refreshTimer);
+      refreshTimer = global.setTimeout(function () {
+        refreshTimer = null;
+        refreshFirstAt = 0;
+        refreshAll();
+      }, REFRESH_QUIET_MS);
+    });
     // 提醒触发 → 页面内横幅（系统通知不可用时的兜底，也作为系统通知之外的可见性保障）
     MD.bus.on('remind:fire', function (p) { if (p && p.dose) { showDoseBanner(p.dose); } });
     // 契约 6.5 的 MD.remind.onFire(cb)：页面内提示提醒已触发（不在这里 refresh，避免与

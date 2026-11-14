@@ -140,7 +140,15 @@
 
   function vibrate(pattern) {
     try {
-      if (window.navigator && typeof window.navigator.vibrate === 'function') window.navigator.vibrate(pattern);
+      var nav = window.navigator;
+      if (!nav || typeof nav.vibrate !== 'function') return;
+      // Chrome 在「页面尚未收到任何用户手势」时会直接拦掉 vibrate，并在控制台
+      // 刷一条 [Intervention] Blocked call to navigator.vibrate。提醒 tick 每秒都会
+      // 走到这里，于是控制台被同一句话刷屏，真正的报错反而被淹没。
+      // userActivation 可用时先做判断，不可用（旧浏览器）则照原样尝试。
+      var act = nav.userActivation;
+      if (act && typeof act.hasBeenActive === 'boolean' && !act.hasBeenActive) return;
+      nav.vibrate(pattern);
     } catch (_) {
       // 触觉反馈不可用时静默降级。
     }

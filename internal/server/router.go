@@ -371,6 +371,11 @@ func mountSPA(r *gin.Engine, cfg *config.Config, log *slog.Logger) {
 	r.GET("/admin/app.js", serveFile("admin-app.js", "application/javascript; charset=utf-8"))
 
 	r.GET("/", gin.WrapH(http.HandlerFunc(serveIndex)))
+	// HEAD /：浏览器与 PWA 会先发 HEAD 探测首页可用性（线上日志里那条
+	// 「404 HEAD /」就是它）。只注册 GET 时 HEAD 会落到 NoRoute，
+	// 命中「以 / 结尾 → 页面不存在」的分支返回 404 —— 控制台多一条莫名的
+	// 失败请求，PWA 的可用性探测也可能据此误判站点不可用。
+	r.HEAD("/", gin.WrapH(http.HandlerFunc(serveIndex)))
 	r.GET("/index.html", gin.WrapH(http.HandlerFunc(serveIndex)))
 	r.GET("/sw.js", gin.WrapH(http.HandlerFunc(serveSW)))
 	// manifest：no-cache + ETag 协商（内容小，304 开销可忽略）。

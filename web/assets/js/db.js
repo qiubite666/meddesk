@@ -131,6 +131,21 @@
         requestResult(store.delete([table, id]), resolve, reject, function () { return undefined; });
       });
     },
+    /**
+     * 单事务批量写入。put() 是每条一个事务，上万条墓碑要几十秒，
+     * 期间主线程被 IndexedDB 回调占满、页面完全无响应；合成一个事务后
+     * 1 万条通常 1 秒内完成。失败时整批回滚（事务原子性），不会写出半批脏数据。
+     */
+    bulkPut: function (table, records) {
+      var list = (records || []).filter(function (r) { return r && r.id; });
+      if (!list.length) return Promise.resolve(0);
+      var stored = list.map(function (r) { return Object.assign({}, r, { table: table }); });
+      return transaction('records', 'readwrite', function (store, _resolve, reject) {
+        for (var i = 0; i < stored.length; i += 1) {
+          requestResult(store.put(stored[i]), function () { /* 结果由事务完成统一决定 */ }, reject);
+        }
+      }).then(function () { return stored.length; });
+    },
     list: function (table) {
       return transaction('records', 'readonly', function (store, resolve, reject) {
         var index = store.index('table');

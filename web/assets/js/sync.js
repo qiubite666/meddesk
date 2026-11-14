@@ -62,6 +62,30 @@
       (incomingVer === currentVer && incomingAt === currentAt && Boolean(incoming.deleted) && !current.deleted);
   }
 
+  /* ------------------------------------------------ 变更通知合并
+   * 一次同步可能落库成百上千条（首次对齐、冲突批量裁决、故障期重复记录）。
+   * 原先每条都 emit 一次 data:changed，而 med 页面对该事件做的是**全量重渲染**，
+   * 于是上万条 = 上万次重建 DOM：页面持续闪烁、文本选不中、复制不了。
+   * 这里只累加计数，一轮同步结束统一广播一次。冲突提示同理合并成一句。
+   */
+  var pendingChanges = 0;
+  var pendingConflicts = 0;
+
+  function noteChange() { pendingChanges += 1; }
+
+  function flushChangeNotes() {
+    var n = pendingChanges;
+    pendingChanges = 0;
+    if (n > 0 && MD.bus && typeof MD.bus.emit === 'function') {
+      MD.bus.emit('data:changed', { table: '*', id: '*', action: 'sync', count: n });
+    }
+    var c = pendingConflicts;
+    pendingConflicts = 0;
+    if (c > 0 && MD.toast && typeof MD.toast.show === 'function') {
+      MD.toast.show(c === 1 ? '该记录已在其他设备更新' : (c + ' 条记录已在其他设备更新'), 'info');
+    }
+  }
+
   function syncRecord(record) {
     var clean = Object.assign({}, record);
     delete clean._dirty;
@@ -157,8 +181,8 @@
     if (!local || better(remote, local) || (!local._dirty && !better(local, remote))) {
       remote._dirty = false;
       await MD.db.put(table, remote);
-      if (notify) MD.toast.show('该记录已在其他设备更新', 'info');
-      MD.bus.emit('data:changed', { table: table, id: id, action: 'sync' });
+      if (notify) pendingConflicts += 1;
+      noteChange();
       return true;
     }
     return false;
@@ -196,8 +220,8 @@
       if (!local || better(remote, local)) {
         remote._dirty = false;
         await MD.db.put(table, remote);
-        MD.toast.show('该记录已在其他设备更新', 'info');
-        MD.bus.emit('data:changed', { table: table, id: id, action: 'conflict' });
+        pendingConflicts += 1;
+        noteChange();
       } else if (local._dirty) {
         // 平局（ver/updatedAt 完全相等）：服务器拒绝等 ver 推送，原样重试永远冲突，
         // 脏标记永远清不掉 → 每分钟重推同样的字节（实测死循环）。
@@ -279,6 +303,10 @@
     } catch (error) {
       setState(error.network || (window.navigator && window.navigator.onLine === false) ? 'offline' : 'error');
       throw error;
+    } finally {
+      // 成功或失败都要广播：同步中途失败时，已经落库的那部分也得让界面看到。
+      // 一轮只广播一次，页面只重绘一次。
+      flushChangeNotes();
     }
   }
 
