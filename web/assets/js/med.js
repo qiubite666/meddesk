@@ -29,6 +29,7 @@
   // 一天上万条时（「推迟」死循环残留）光 DOM 就足以让页面假死，
   // 而且每次刷新都会重建，用户连字都选不中。超出部分折叠，点「展开」才渲染。
   var HIST_DAY_MAX = 60;
+  var MAX_STREAK_SCAN = 400;              // 连续服药天数最多回溯多少天
   var MISS_GRACE_MS = 60 * 60 * 1000;     // 计划时间超过 1 小时仍 pending → 视为漏服
 
   var STATUS_TEXT = { taken: '已服用', skipped: '已跳过', snoozed: '已推迟', pending: '待服用', missed: '漏服' };
@@ -678,19 +679,110 @@
       };
     });
 
-    // 依从性统计（区间口径见 schedule.js adherence；此处只负责按天取记录）
-    var stats7 = adherenceOf(intakes, startOfDay(addDays(now, -6)), now);
-    var stats30 = adherenceOf(intakes, startOfDay(addDays(now, -29)), now);
+    // ---- 依从率的分母：排程「应服」剂量，而不是只数「已有记录」 ----
+    // 只数记录时，整天没吃药的日子根本不进分母 —— 表现为 11/12 一颗没吃，
+    // 依从率却仍是 100%。这里一次性算出覆盖「近 30 天 + 热力图当月」的应服清单，
+    // 再按天切分，让没打卡的时点以 missed 出现在柱状图、热力图与 KPI 里。
+    var statsFrom = startOfDay(addDays(now, -29));
+    var heatMonthStart = monthStartMs(S.heatMonth);
+    var rangeFrom = Math.min(statsFrom, heatMonthStart);
+    var rangeDoses = [];
+    if (MD.sched && typeof MD.sched.buildRange === 'function') {
+      rangeDoses = MD.sched.buildRange({
+        meds: meds, schedules: schedules, intakes: intakes, profileId: pid,
+        nowMs: now, fromMs: rangeFrom, toMs: startOfDay(now) + 86400000 - 1
+      }) || [];
+    }
+    var dosesByDay = Object.create(null);
+    rangeDoses.forEach(function (x) {
+      var k = dayKey(x.timeMs);
+      (dosesByDay[k] || (dosesByDay[k] = [])).push(x);
+    });
+
+    /** 把一天/一段的剂量折算成统计口径。 */
+    function tallyDoses(list) {
+      var taken = 0, skipped = 0, missed = 0, pending = 0;
+      for (var i = 0; i < list.length; i++) {
+        var d = list[i];
+        var st = d.status;
+        if (st === 'taken') { taken++; }
+        else if (st === 'skipped') { skipped++; }
+        else if (st === 'missed') { missed++; }
+        else {
+          // 用户显式「撤销为待服用」的不计入任何口径：主动取消不是遗忘
+          if (d.undoneAt) { continue; }
+          pending++;
+        }
+      }
+      var denom = taken + missed;   // 与既有口径一致：主动跳过不进分母
+      return {
+        total: taken + skipped + missed,
+        taken: taken, skipped: skipped, missed: missed, pending: pending,
+        rate: denom === 0 ? null : Math.round((taken / denom) * 10000) / 10000
+      };
+    }
+
+    /** 某一天的统计。该日没有排程应服项时回退到「已有记录」口径。 */
+    function statsOfDay(dayMs) {
+      var arr = dosesByDay[dayKey(dayMs)];
+      if (arr && arr.length) { return tallyDoses(arr); }
+      // 回退场景：排程被删除、或纯手动记录（没设排程）。
+      // 此时没有应服清单可补，只能按记录算，否则整天空白更误导。
+      var end = dayKey(dayMs) === dayKey(now) ? now : dayMs + 86400000;
+      return adherenceOf(intakesOfDay(dayMs), dayMs, end);
+    }
+
+    function hasTakenOn(dayMs) {
+      var arr = dosesByDay[dayKey(dayMs)];
+      if (arr && arr.length) {
+        for (var i = 0; i < arr.length; i++) { if (arr[i].status === 'taken') return true; }
+        return false;
+      }
+      var recs = intakesOfDay(dayMs);
+      for (var j = 0; j < recs.length; j++) { if (normalizeStatus(recs[j]) === 'taken') return true; }
+      return false;
+    }
+
+    function streakDays() {
+      var cursor = startOfDay(now);
+      // 今天还没过完：尚无已服记录时从昨天起数，别把"今天还没到点"算成断档
+      if (!hasTakenOn(cursor)) { cursor = addDays(cursor, -1); }
+      var n = 0;
+      for (var i = 0; i < MAX_STREAK_SCAN; i++) {
+        if (!hasTakenOn(cursor)) { break; }
+        n += 1;
+        cursor = addDays(cursor, -1);
+      }
+      return n;
+    }
+
+    function sumStats(days) {
+      var acc = { total: 0, taken: 0, skipped: 0, missed: 0, pending: 0 };
+      for (var i = days - 1; i >= 0; i--) {
+        var one = statsOfDay(startOfDay(addDays(now, -i)));
+        acc.total += one.total || 0;
+        acc.taken += one.taken || 0;
+        acc.skipped += one.skipped || 0;
+        acc.missed += one.missed || 0;
+        acc.pending += one.pending || 0;
+      }
+      var denom = acc.taken + acc.missed;
+      acc.rate = denom === 0 ? null : Math.round((acc.taken / denom) * 10000) / 10000;
+      acc.streakDays = streakDays();
+      return acc;
+    }
+
+    var stats7 = sumStats(7);
+    var stats30 = sumStats(30);
     var bars = [];
     for (var b = 29; b >= 0; b--) {
       var ds = startOfDay(addDays(now, -b));
-      var de = ds + 86400000;
       // 与「用药历史」取的是同一份 day 分组：图上每一天 = 历史里那一天。
-      var dayIntakes = intakesOfDay(ds);
-      // 今天：统计终点必须是「当前时刻」而非当天 24:00——否则 22:00 的未来计划
-      // 会被 A7 漏服判定（due <= 区间终点-15min）误判为漏服，导致今日柱红色。
-      var a = adherenceOf(dayIntakes, ds, b === 0 ? Math.min(now, de) : de);
-      bars.push({ dayMs: ds, key: dayKey(ds), rate: a.rate, total: a.total, taken: a.taken, missed: a.missed, isToday: b === 0 });
+      var a = statsOfDay(ds);
+      bars.push({
+        dayMs: ds, key: dayKey(ds), rate: a.rate, total: a.total,
+        taken: a.taken, missed: a.missed, pending: a.pending || 0, isToday: b === 0
+      });
     }
 
     // 日历热力图
@@ -702,12 +794,11 @@
     for (i2 = 0; i2 < heat.lead; i2++) heat.cells.push(null);
     for (i2 = 1; i2 <= heat.count; i2++) {
       var dms = monthStartMs(mk) + (i2 - 1) * 86400000;
-      // 同 bars：热力图与用药历史共用同一份 day 分组
-      var dIntakes = intakesOfDay(dms);
-      // 今天：终点用当前时刻（理由同 bars——未来计划不算漏服）
-      var dEnd = (dms === startOfDay(now)) ? now : dms + 86400000;
-      var aa = adherenceOf(dIntakes, dms, dEnd);
-      heat.cells.push({ day: i2, dayMs: dms, rate: aa.rate, total: aa.total, taken: aa.taken, missed: aa.missed });
+      var aa = statsOfDay(dms);
+      heat.cells.push({
+        day: i2, dayMs: dms, rate: aa.rate, total: aa.total,
+        taken: aa.taken, missed: aa.missed, pending: aa.pending || 0
+      });
     }
 
     return {
@@ -715,6 +806,7 @@
       orphanCount: orphanMeds.length,
       dupIntakeCount: dupIntakeCount,
       doses: doses, todayRate: todayRate, done: done, total: doses.length, overdueCount: overdueCount,
+      scheduleCount: schedules.length,
       meds: medVM, history: history, hasMoreHistory: true,
       stats7: stats7, stats30: stats30, bars: bars, heat: heat
     };
@@ -1034,11 +1126,19 @@
   /* ---- ⑥ 依从性统计（内联 SVG 柱状图 + 热力图） ---- */
   function renderStats(el, vm) {
     if (!el) return;
+    var note = (vm.scheduleCount === 0)
+      ? '<div class="muted" style="font-size:11px;margin-top:6px;line-height:1.7">尚未设置用药排程，'
+        + '依从率只能统计「已打卡的记录」——没打卡的日子不会计入分母。'
+        + '设置排程后，系统会按「应服次数」计算，漏服才会显现出来。</div>'
+      : '<div class="muted" style="font-size:11px;margin-top:6px;line-height:1.7">分母是排程推算的「应服次数」：'
+        + '该吃却没有任何记录的日子会记为漏服。若某天确实不需要服（如医嘱停药），'
+        + '可在当天点「跳过」——跳过不计入依从率。</div>';
     var html = '<div class="card">' +
       '<div class="section-title">依从性统计</div>' +
       '<div class="md-stats__cards">' + kpiCard('近 7 天', vm.stats7) + kpiCard('近 30 天', vm.stats30) + '</div>' +
       barChart(vm.bars) +
       heatmap(vm.heat) +
+      note +
       '</div>';
     setHtml(el, html);
   }
@@ -1068,21 +1168,36 @@
     var parts = [];
     bars.forEach(function (b, i) {
       var noData = (b.rate === null || b.rate === undefined) || b.total === 0; // 无完结打卡 → 空白占位
-      var h = noData ? 1.5 : Math.max(1.5, Math.round(b.rate * (H - padB - 4)));
+      var hasMiss = (b.missed || 0) > 0;
+      // 0% 但确有漏服的日子必须看得见：只给 1.5px 灰线等于没画，
+      // 用户会以为「这天没数据」，而这恰恰是他最需要看见的一天。
+      var minH = noData ? 1.5 : (hasMiss && b.rate === 0 ? 7 : 2);
+      var h = noData ? minH : Math.max(minH, Math.round(b.rate * (H - padB - 4)));
       var x = i * bw + gap / 2, w = Math.max(1, bw - gap);
       var y = H - padB - h;
       var fill = noData ? 'var(--border)' : (b.rate >= 0.8 ? 'var(--ok)' : (b.rate >= 0.5 ? 'var(--warn)' : 'var(--danger)'));
-      parts.push('<rect x="' + x.toFixed(2) + '" y="' + y + '" width="' + w.toFixed(2) + '" height="' + h + '" rx="1.5" fill="' + fill + '"/>');
+      var tip = noData
+        ? (b.key + ' 无应服记录')
+        : (b.key + ' 依从率 ' + Math.round(b.rate * 100) + '%（已服 ' + b.taken
+          + ' · 漏服 ' + b.missed + (b.pending ? ' · 待服 ' + b.pending : '') + '）');
+      parts.push('<rect x="' + x.toFixed(2) + '" y="' + y + '" width="' + w.toFixed(2) + '" height="' + h + '" rx="1.5" fill="' + fill + '"><title>' + esc(tip) + '</title></rect>');
     });
     var ticks = [0, 9, 19, 29].map(function (i) {
       var b = bars[i];
       return '<text x="' + ((i + 0.5) * bw).toFixed(1) + '" y="' + (H - 4) + '" font-size="8" fill="var(--text-dim)" text-anchor="middle">' +
         (b ? b.key.slice(5).replace('-', '/') : '') + '</text>';
     }).join('');
+    var missedKeys = [];
+    bars.forEach(function (b) { if ((b.missed || 0) > 0) missedKeys.push(b.key.slice(5).replace('-', '/')); });
+    var missLine = missedKeys.length
+      ? '<div class="muted" style="font-size:11px;margin-top:4px;color:var(--danger)">漏服日：'
+        + esc(missedKeys.slice(-12).join('、'))
+        + (missedKeys.length > 12 ? ' 等 ' + missedKeys.length + ' 天' : '') + '</div>'
+      : '<div class="muted" style="font-size:11px;margin-top:4px">近 30 天没有漏服</div>';
     return '<div class="section-title" style="margin-top:12px;font-size:13px">近 30 天每日依从率</div>' +
       '<svg class="md-chart" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" role="img" aria-label="近30天依从率柱状图">' +
       '<line x1="0" y1="' + (H - padB) + '" x2="' + W + '" y2="' + (H - padB) + '" stroke="var(--border)" stroke-width="1"/>' +
-      parts.join('') + ticks + '</svg>';
+      parts.join('') + ticks + '</svg>' + missLine;
   }
 
   /** 日历热力图（可切换月份，颜色深浅=当日依从率） */

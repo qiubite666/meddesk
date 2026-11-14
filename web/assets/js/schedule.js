@@ -24,6 +24,10 @@
   var OVERDUE_GRACE_MS = 15 * MINUTE_MS; // 超过计划时间 15 分钟才判为逾期/漏服
   var YESTERDAY_SPAN_MS = DAY_MS;        // buildToday 向前多看 24 小时（昨天未处理顺延到今天）
   var MAX_SCAN_DAYS = 3660;              // 扫描上限约 10 年，防御死循环
+  // 「同药同日」兜底匹配的最大时间差。用途：排程改了服药时间（08:00 → 09:00）
+  // 后，旧记录的 occKey 已对不上，但显然还是同一次服药。
+  // 上限避免把晚上那次算到早上那次头上，从而掩盖真正的漏服。
+  var MATCH_MAX_GAP_MS = 6 * HOUR_MS;
   var FALLBACK_ANCHOR = '1970-01-01';    // custom_interval 缺 startDate 时的确定性降级锚点
 
   var KINDS = [
@@ -440,27 +444,71 @@
    * DoseVM = {occKey, medId, schedId, profileId, medName, dosageText, timeMs,
    *           status, intakeId, overdue, critical, remindOffsetMin}
    */
-  function buildToday(arg) {
+  /**
+   * 区间剂量视图：把排程在 [fromMs, toMs] 内的每个 occurrence 与服药记录匹配，
+   * 得出每个时点的真实状态（taken / skipped / missed / pending / snoozed）。
+   *
+   * 【为什么统计必须走这里】
+   * 只统计「已有的服药记录」时，「该吃但没打卡、系统里也没有记录」的日子
+   * 根本不进入分母 —— 表现为某天整天没吃药，依从率仍是 100%。
+   * 有了排程 occurrences 作为应服清单，没打卡的时点才能被判为漏服。
+   *
+   * 【匹配规则】按优先级依次尝试，一条记录只消耗一次：
+   *   1. occKey 完全一致（正常写入的路径）
+   *   2. medicationId@scheduledFor（兼容旧格式 occKey）
+   *   3. 同药 + 同日、时间最接近且尚未被占用的记录
+   * 第 3 条是为了容忍「改过服药时间」：排程从 08:00 改成 22:00 后，
+   * 旧打卡记录的 occKey 已经对不上，但同一天同一味药显然还是同一次服药。
+   * 一天两次只吃一次的场景仍会正确判出漏服（两条 occurrence 争用一条记录，
+   * 剩下那条没有记录可用 → missed）。
+   */
+  function buildRange(arg) {
     arg = arg || {};
     var meds = arg.meds || [];
     var schedules = arg.schedules || [];
     var intakes = arg.intakes || [];
     var profileId = (arg.profileId === undefined ? null : arg.profileId);
     var nowMs = num(arg.nowMs, Date.now());
+    var fromMs = num(arg.fromMs, startOfDay(nowMs));
+    var toMs = num(arg.toMs, nowMs);
 
     var medMap = indexBy(meds, function (m) { return m && m.id; });
     var byOcc = indexBy(intakes, function (it) { return it && it.occKey; });
-    // 兜底索引：A8 若以 `medicationId@scheduledFor` 形式写入 occKey 也能匹配上
     var byMedTime = indexBy(intakes, function (it) {
       return (it && it.medicationId !== undefined && it.scheduledFor !== undefined)
         ? (String(it.medicationId) + '@' + String(it.scheduledFor)) : null;
     });
+    var byMedDay = Object.create(null);
+    for (var a = 0; a < intakes.length; a++) {
+      var rec = intakes[a];
+      if (!rec || rec.deleted === true) { continue; }
+      var sf = num(rec.scheduledFor, 0);
+      if (rec.medicationId === undefined || rec.medicationId === null || !sf) { continue; }
+      var gk = String(rec.medicationId) + '|' + dayKeyOf(sf);
+      (byMedDay[gk] || (byMedDay[gk] = [])).push(rec);
+    }
+    var usedId = Object.create(null);
 
-    var fromMs = startOfDay(nowMs) - YESTERDAY_SPAN_MS; // 昨天的 00:00
-    var toMs = startOfDay(nowMs) + DAY_MS - 1;          // 今天的 23:59:59.999
-    var todayStartMs = startOfDay(nowMs);               // 用于区分「昨天的」与「今天的」剂量
+    function pickIntake(sch, occ) {
+      var direct = byOcc[occ.occKey] || byMedTime[String(sch.medicationId) + '@' + occ.timeMs] || null;
+      if (direct && !usedId[direct.id]) { usedId[direct.id] = true; return direct; }
+      var pool = byMedDay[String(sch.medicationId) + '|' + dayKeyOf(occ.timeMs)];
+      if (!pool || !pool.length) { return null; }
+      var best = null, bestGap = Infinity;
+      for (var b = 0; b < pool.length; b++) {
+        var cand = pool[b];
+        if (!cand || usedId[cand.id]) { continue; }
+        var gap = Math.abs(num(cand.scheduledFor, 0) - occ.timeMs);
+        // 只接受「同一天内时间相近」的记录。没有这个上限，排程一天两次时
+        // 晚上的记录会被强行算到早上那次头上，掩盖真正的漏服。
+        if (gap > MATCH_MAX_GAP_MS) { continue; }
+        if (gap < bestGap) { bestGap = gap; best = cand; }
+      }
+      if (best) { usedId[best.id] = true; }
+      return best;
+    }
+
     var out = [];
-
     for (var i = 0; i < schedules.length; i++) {
       var sch = schedules[i];
       if (!sch || sch.deleted === true) { continue; }
@@ -474,8 +522,7 @@
       var occs = occurrences(sch, fromMs, toMs);
       for (var j = 0; j < occs.length; j++) {
         var occ = occs[j];
-        var key = occ.occKey;
-        var intake = byOcc[key] || byMedTime[String(sch.medicationId) + '@' + occ.timeMs] || null;
+        var intake = pickIntake(sch, occ);
         var status, overdue = false;
 
         if (intake) {
@@ -495,21 +542,16 @@
             overdue = occ.timeMs < (nowMs - OVERDUE_GRACE_MS);
           }
         } else if (occ.timeMs < (nowMs - OVERDUE_GRACE_MS)) {
-          // 无人处理且已过宽限期 -> 漏服（昨天未处理的也会出现在这里，不会消失）
+          // 应服但没有任何记录，且已过宽限期 -> 漏服
           status = 'missed';
           overdue = true;
         } else {
           status = 'pending';
         }
 
-        // 昨天的剂量只在「未完成」时顺延展示：昨天已服用/已跳过的不要再占用今日列表，
-        // 否则跨过零点后同一种药会同时出现「昨天已完成」与「今天待处理」两条，看起来就是重复提醒。
-        // 昨天漏服(missed)与待处理(pending)仍然保留，保证昨天没做完的不会凭空消失。
-        if (occ.timeMs < todayStartMs && (status === 'taken' || status === 'skipped')) { continue; }
-
         var name = med ? (med.name || String(med.id || '').slice(0, 8)) : String(sch.medicationId || '').slice(0, 8);
         out.push({
-          occKey: key,
+          occKey: occ.occKey,
           medId: sch.medicationId,
           schedId: sch.id,
           profileId: med ? med.profileId : profileId,
@@ -518,19 +560,49 @@
           timeMs: occ.timeMs,
           status: status,
           intakeId: intake ? intake.id : null,
+          // 显式「撤销为待服用」的时间戳：统计时要把它排除，
+          // 用户主动取消的剂量不是遗忘，不该算漏服。
+          undoneAt: intake ? num(intake.undoneAt, 0) : 0,
           overdue: overdue,
           critical: !!(sch.critical || (med && med.critical)),
-          // 非契约字段：供 MD.remind 计算提前量（A8 可忽略）
           remindOffsetMin: num(sch.remindOffsetMin, 0)
         });
       }
     }
 
-    out.sort(function (a, b) {
-      if (a.timeMs !== b.timeMs) { return a.timeMs - b.timeMs; }
-      if (a.medName !== b.medName) { return a.medName < b.medName ? -1 : 1; }
-      return a.occKey < b.occKey ? -1 : 1;
+    out.sort(function (x, y) {
+      if (x.timeMs !== y.timeMs) { return x.timeMs - y.timeMs; }
+      if (x.medName !== y.medName) { return x.medName < y.medName ? -1 : 1; }
+      return x.occKey < y.occKey ? -1 : 1;
     });
+    return out;
+  }
+
+  /**
+   * 今日剂量 = buildRange(昨天 0 点 … 今天 23:59:59.999) 再剔除「昨天已完成」的项。
+   * 为什么剔除：跨过零点后，昨天已服用的药若继续留在今日列表，会与今天的剂量
+   * 并列显示，看起来像重复提醒。昨天漏服(missed)与待处理(pending)仍然保留，
+   * 保证昨天没做完的不会凭空消失。
+   */
+  function buildToday(arg) {
+    arg = arg || {};
+    var nowMs = num(arg.nowMs, Date.now());
+    var todayStartMs = startOfDay(nowMs);
+    var all = buildRange({
+      meds: arg.meds || [],
+      schedules: arg.schedules || [],
+      intakes: arg.intakes || [],
+      profileId: (arg.profileId === undefined ? null : arg.profileId),
+      nowMs: nowMs,
+      fromMs: todayStartMs - YESTERDAY_SPAN_MS,
+      toMs: todayStartMs + DAY_MS - 1
+    });
+    var out = [];
+    for (var i = 0; i < all.length; i++) {
+      var d = all[i];
+      if (d.timeMs < todayStartMs && (d.status === 'taken' || d.status === 'skipped')) { continue; }
+      out.push(d);
+    }
     return out;
   }
 
@@ -641,6 +713,7 @@
     occurrences: occurrences,
     nextAfter: nextAfter,
     describe: describe,
+    buildRange: buildRange,
     buildToday: buildToday,
     adherence: adherence
   };
